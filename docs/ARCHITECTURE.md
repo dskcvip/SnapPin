@@ -80,5 +80,20 @@ Ctrl+1 / 悬浮球 / 托盘
 | Linux Wayland | xcap 走 X11 路径；纯 Wayland 会话需 XWayland，后续换 PipeWire portal |
 | macOS 权限 | 屏幕录制/辅助功能授权流程依赖 xcap 行为，尚未在真机验证 |
 | 快捷键冲突 | 注册失败时静默降级（仍可用悬浮球/托盘），后续加失败提示 |
-| 保存对话框 | 当前为阻塞式原生对话框；格式选项仅 PNG/JPEG |
+| 保存对话框 | 当前为阻塞式原生对话框；格式选项仅 PNG/JPEG；保存流程未做 E2E 验证 |
 | 鸿蒙 PC | 截图/全局置顶窗 API 开放度未经 DevEco 文档验证（推断） |
+
+## 六、Windows 平台硬约束（踩坑记录，2026-10-20）
+
+1. **裸 `cargo run` 白屏**：tauri 的 `dev` cfg 由 `custom-protocol` 特性决定
+   （`let dev = !custom_protocol`）。未开该特性时 `WebviewUrl::App` 解析到
+   devUrl，直连二进制（无 vite dev server）即白屏。本项目在 src-tauri/Cargo.toml
+   透传 `custom-protocol` 特性，开发运行统一带 `--features custom-protocol`。
+2. **同步命令内创建 webview 死锁/空白**：Tauri 文档 Known issues——Windows 上
+   `WebviewWindowBuilder` 在同步命令或事件处理器（均跑在主线程）中创建 webview
+   会死锁，症状为"窗口建成但页面永不加载、无鼠标事件"。所有建窗流程
+   （截图浮层/贴图窗）必须在 `async` 命令 + `tauri::async_runtime::spawn_blocking`
+   中执行。
+3. **透明窗点击穿透**：WebView2 透明背景下，页面透明区域会透传鼠标事件
+   （浮层未加载出内容时表现为"完全无法交互"）。加载失败时先查资源协议
+   （assetProtocol scope 与 convertFileSrc URL），不要误判为事件系统问题。
