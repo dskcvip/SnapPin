@@ -1,0 +1,68 @@
+.pin-root {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+}
+
+.pin-img {
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  -webkit-user-drag: none;
+  cursor: grab;
+}
+
+.pin-img:active {
+  cursor: grabbing;
+}
+
+.pin-toolbar {
+  position: absolute;
+  right: 6px;
+  top: 6px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  box-shadow: var(--shadow-lg);
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  cursor: default;
+}
+
+.pin-root:hover .pin-toolbar {
+  opacity: 1;
+}
+
+.pin-toolbar button {
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 5px;
+  background: rgba(15, 23, 42, 0.06);
+  white-space: nowrap;
+}
+
+.pin-toolbar button:hover {
+  background: rgba(15, 23, 42, 0.12);
+}
+
+.pin-toolbar button.danger:hover {
+  background: rgba(220, 38, 38, 0.12);
+  color: #b91c1c;
+}
+
+.pin-opacity {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-dim);
+  padding: 0 2px;
+}
+
+.pin-opacity input {
+  width: 64px;
+}

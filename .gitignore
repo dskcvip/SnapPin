@@ -1,0 +1,21 @@
+# Rust
+/target
+**/*.rs.bk
+
+# Node
+/node_modules
+
+# 前端构建产物（tauri.conf.json 的 frontendDist 指向此处）
+/dist
+
+# Tauri 生成目录（构建时自动生成）
+/src-tauri/gen
+
+# 本地环境
+.env
+.env.local
+*.log
+
+# 系统
+.DS_Store
+Thumbs.db

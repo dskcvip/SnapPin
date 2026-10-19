@@ -1,0 +1,33 @@
+[package]
+name = "snappin"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77.2"
+description = "SnapPin - cross-platform screenshot & pin-to-screen desktop tool"
+license = "MIT"
+
+[lib]
+name = "snappin_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.7", features = [] }
+
+[features]
+# 生产模式：启用 tauri 自定义协议，WebviewUrl::App 解析到内嵌的前端资源
+# （tauri://localhost），而非 devUrl。不启用时 dev cfg 为 true，
+# 裸 cargo run 会去连 http://localhost:5173 导致白屏。
+# 等价于 `tauri build` CLI 自动附加的特性。
+custom-protocol = ["tauri/custom-protocol"]
+
+[dependencies]
+tauri = { version = "2.12", features = ["tray-icon", "image-png", "protocol-asset"] }
+tauri-plugin-global-shortcut = "2.4"
+tauri-plugin-single-instance = "2.5"
+tauri-plugin-dialog = "2.8"
+serde = { workspace = true }
+serde_json = { workspace = true }
+image = { workspace = true }
+anyhow = { workspace = true }
+snappin-core-algo = { path = "../core/core-algo" }
+snappin-core-platform = { path = "../core/core-platform" }

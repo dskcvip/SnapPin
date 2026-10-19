@@ -1,0 +1,11 @@
+[package]
+name = "snappin-core-algo"
+version = "0.1.0"
+edition = "2021"
+description = "Platform-agnostic RGBA8 image algorithms for SnapPin. Zero dependencies by design."
+license = "MIT"
+
+[dependencies]
+# 故意保持零依赖：仅用 std。
+# 目的：本 crate 是远期 C++ 移植（鸿蒙 PC 路线）的"移植说明书"，
+# 只处理 RGBA8 字节缓冲与值类型，C++ 重写应为机械翻译。
