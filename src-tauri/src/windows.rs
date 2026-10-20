@@ -36,8 +36,17 @@ const WEBVIEW_GUARD: &str = r#"
 "#;
 
 /// 悬浮球窗口相对球体的留白（逻辑像素）。
-/// hover/active 有 transform: scale 动画，窗口必须比球大，否则缩放后被窗口边缘裁剪成椭圆。
-const BALL_MARGIN: f64 = 10.0;
+///
+/// 这个值由**外投影**决定，不是随便留的：透明窗口会把超出窗口的内容直接裁掉，
+/// 留白不足时阴影在上下左右变成一条直线（用户看到的"切面"）。
+/// 球半径 28，阴影 `0 6px 16px` → 球心到底部需要 28 + 6 + 16 = 50；
+/// hover 时 `scale(1.07)` + `0 5px 14px` → 28×1.07 + (5+14)×1.07 ≈ 50.3。
+/// 取 24 时窗口半边长 = 28 + 24 = 52 ≥ 50.3，静止与 hover 都不裁。
+const BALL_MARGIN: f64 = 24.0;
+
+/// 旧版留白（10px）。仅用于把历史配置里"窗口左上角"换算成球心，
+/// 避免窗口变大后悬浮球在屏幕上平移 14px。
+const BALL_MARGIN_LEGACY: f64 = 10.0;
 
 /// 贴图窗口相对图片的留白（逻辑像素）。
 /// 图片有外投影 box-shadow，窗口必须比图片大一圈，否则阴影被窗口边缘裁掉。
@@ -52,11 +61,14 @@ pub fn ensure_ball_window(app: &AppHandle, cfg: &AppConfig) -> tauri::Result<()>
         return Ok(());
     }
     let size = cfg.ball_size as f64;
-    // 窗口比球大一圈：容纳 hover 放大动画，避免被窗口边缘裁剪成椭圆
+    // 窗口比球大一圈：容纳外投影与 hover 放大动画（见 BALL_MARGIN 注释）
     let win = size + BALL_MARGIN * 2.0;
     let window = WebviewWindowBuilder::new(app, BALL_LABEL, WebviewUrl::App("ball.html".into()))
         .title("SnapPin")
         .inner_size(win, win)
+        // 实测：Windows 会把小于 SM_CXMINTRACK（本机 136px）的窗口**强行加宽**，
+        // 于是 104x104 变成 136x104。试过 min_inner_size(1.0, 1.0)，无效——
+        // 这条限制来自系统而非 winit，所以位置一律按**实际** inner_size 换算。
         .decorations(false)
         .transparent(true)
         .always_on_top(true)
@@ -73,13 +85,62 @@ pub fn ensure_ball_window(app: &AppHandle, cfg: &AppConfig) -> tauri::Result<()>
         inner, outer
     );
 
-    // 位置用物理像素精确还原（position() 是逻辑像素，混合 DPI 下会漂移）
+    // 位置是**球心**（物理像素）：窗口留白变化时球不会在屏幕上平移。
+    // 历史配置存的是窗口左上角（旧留白 10px），这里换算一次。
+    //
+    // 两个坑：
+    // 1) Windows 有最小跟踪宽度（实测 136px），小于它的窗口会被**加宽**成非正方形，
+    //    所以半宽/半高必须按实际 inner_size 分别取，否则球心横向偏 (实宽-目标宽)/2。
+    // 2) 这次"加宽 + 重新放置"发生在 build() 之后，紧接着的 set_position 会被它覆盖
+    //    （现象：球固定跳回主屏中部）。所以等窗口真正 show 完成后，再按最终尺寸定位一次。
     if let Some(p) = cfg.ball_position {
-        window.set_position(PhysicalPosition::new(p.x, p.y))?;
-        let pos = window.outer_position().unwrap_or_default();
-        eprintln!("[snappin] ball positioned to {:?} (outer_position)", pos);
+        let sf = window.scale_factor().unwrap_or(1.0);
+        let (cx, cy) = if cfg.ball_pos_center {
+            (p.x, p.y)
+        } else {
+            let legacy_half = (size + BALL_MARGIN_LEGACY * 2.0) * sf / 2.0;
+            (p.x + legacy_half, p.y + legacy_half)
+        };
+        place_ball_center(&window, cx, cy, "immediate");
+
+        let win_handle = window.clone();
+        std::thread::spawn(move || {
+            // 窗口从 build() 到真正 show 之间会被系统重放置（最小尺寸修正），
+            // 期间任何 set_position 都可能被覆盖，所以分几拍再落一次，最后一拍为准。
+            for (delay, tag) in [(250u64, "t+250"), (900, "t+900")] {
+                std::thread::sleep(std::time::Duration::from_millis(delay));
+                place_ball_center(&win_handle, cx, cy, tag);
+            }
+        });
     }
     Ok(())
+}
+
+/// 按球心放置悬浮球窗口（内部按实际 inner_size 取半宽半高）。
+fn place_ball_center<R: tauri::Runtime>(
+    window: &tauri::WebviewWindow<R>,
+    cx: f64,
+    cy: f64,
+    tag: &str,
+) {
+    let actual = window.inner_size().unwrap_or_default();
+    if actual.width == 0 || actual.height == 0 {
+        return;
+    }
+    let nx = (cx - actual.width as f64 / 2.0).round() as i32;
+    let ny = (cy - actual.height as f64 / 2.0).round() as i32;
+    if let Err(e) = window.set_position(PhysicalPosition::new(nx, ny)) {
+        eprintln!("[snappin] ball position ({tag}) failed: {e}");
+        return;
+    }
+    let got = window
+        .outer_position()
+        .map(|p| format!("({},{})", p.x, p.y))
+        .unwrap_or_else(|_| "?".into());
+    eprintln!(
+        "[snappin] ball positioned ({tag}): want=({nx},{ny}) got={got} center=({cx:.0},{cy:.0}) size={}x{}",
+        actual.width, actual.height
+    );
 }
 
 /// 显示/隐藏悬浮球之间切换。

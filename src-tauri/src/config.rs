@@ -9,8 +9,12 @@ use std::path::Path;
 pub struct AppConfig {
     pub theme_color: String,
     pub ball_size: u32,
-    /// 悬浮球位置（物理像素；创建窗口时用 set_position 精确还原）
+    /// 悬浮球**球心**位置（物理像素；创建窗口时用 set_position 精确还原）
     pub ball_position: Option<BallPosition>,
+    /// `ball_position` 是否为球心语义。
+    /// 旧版本存的是窗口左上角，为 false；新版一律 true。
+    /// 留这个标记是为了让旧配置只换算一次，不会每次启动都把球往前推。
+    pub ball_pos_center: bool,
     pub shortcut_capture: String,
     pub shortcut_pin_clipboard: String,
     pub save_dir: Option<String>,
@@ -29,6 +33,7 @@ impl Default for AppConfig {
             theme_color: "#12A5D8".to_string(),
             ball_size: 56,
             ball_position: None,
+            ball_pos_center: false,
             shortcut_capture: "Ctrl+1".to_string(),
             shortcut_pin_clipboard: "Ctrl+2".to_string(),
             save_dir: None,

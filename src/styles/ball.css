@@ -22,14 +22,18 @@
   display: grid;
   place-items: center;
   cursor: pointer;
-  transition: transform 0.12s ease;
+  transition:
+    transform 0.12s ease,
+    box-shadow 0.12s ease;
 }
 
+/* hover 阴影必须比静止态**更小**：窗口留白 24px（球心到底 52px）是硬上限，
+   放大后的球（scale 1.07）连同外发光一起缩放，超出部分会被窗口边缘裁成直线。 */
 .ball:hover {
   transform: scale(1.07);
   box-shadow:
-    0 8px 20px rgba(2, 10, 24, 0.48),
-    0 0 0 3px rgba(245, 119, 42, 0.16),
+    0 5px 12px rgba(2, 10, 24, 0.5),
+    0 0 0 2px rgba(245, 119, 42, 0.18),
     inset 0 0 0 1px rgba(255, 255, 255, 0.22),
     inset 0 -8px 14px rgba(0, 0, 0, 0.34);
 }
