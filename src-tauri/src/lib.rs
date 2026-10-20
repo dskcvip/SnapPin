@@ -5,7 +5,7 @@ mod windows;
 
 use tauri::{AppHandle, Manager};
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
-use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut};
+use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut, ShortcutState};
 use std::time::{Duration, Instant};
 
 use crate::state::AppState;
@@ -40,7 +40,13 @@ pub fn run() {
                     let capture_sc = capture_sc;
                     let pin_sc = pin_sc;
                     let paste_sc = paste_sc;
-                    move |app, shortcut, _event| {
+                    move |app, shortcut, event| {
+                        // 插件对**按下**和**抬起**各回调一次，只认 Pressed。
+                        // 否则一次按键会执行两遍：截图侧表现为「start 紧接 busy」，
+                        // Ctrl+V 侧会真的粘贴两次。
+                        if event.state != ShortcutState::Pressed {
+                            return;
+                        }
                         if shortcut == &capture_sc {
                             handle_capture(app, "hotkey");
                         } else if shortcut == &pin_sc {

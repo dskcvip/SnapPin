@@ -53,6 +53,24 @@ interface OverlayContext {
 type ShotAction = 'copy' | 'pin' | 'save'
 type BallCommand = 'capture' | 'pin-clipboard' | 'hide' | 'quit'
 
+/** 标注图形载荷（confirm_selection 的 shapes 字段，逻辑像素、原点=裁剪图左上角） */
+type ShapePayload =
+  | { type: 'rect'; x: number; y: number; w: number; h: number; color: Rgba; width: number }
+  | { type: 'ellipse'; x: number; y: number; w: number; h: number; color: Rgba; width: number }
+  | { type: 'arrow'; x1: number; y1: number; x2: number; y2: number; color: Rgba; width: number }
+  | { type: 'pen'; points: [number, number][]; color: Rgba; width: number }
+  | { type: 'highlighter'; points: [number, number][]; color: Rgba; width: number }
+  | { type: 'mosaic'; x: number; y: number; w: number; h: number; block: number }
+  // 聚光灯：区域外压暗。radius 圆角半径（逻辑像素，核心层 clamp 到短边一半），
+  // dim 压暗强度 0-255（乘性压暗，不影响 alpha）
+  | { type: 'spotlight'; x: number; y: number; w: number; h: number; radius: number; dim: number }
+  // 文字/序号等"需字形的标注"由 UI 层光栅化成位图上传（见 ARCHITECTURE 三·5）
+  // png: base64（无 data: 前缀），尺寸为物理像素；x/y 仍为逻辑像素
+  // 序号徽标复用此载荷：圆底+数字已在 UI 层画进位图，核心层无感知
+  | { type: 'bitmap'; x: number; y: number; png: string }
+
+type Rgba = [number, number, number, number]   // 0-255
+
 interface AppConfig {
   themeColor: string
   ballSize: number

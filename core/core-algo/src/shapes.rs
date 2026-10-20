@@ -84,6 +84,38 @@ pub enum Shape {
         /// 块边长（物理像素），最小 2
         block: u32,
     },
+    /// 位图图层：由 UI 层预先光栅化好的 RGBA8 贴图，核心层只做 alpha 合成。
+    ///
+    /// 为什么文字类标注要走位图而不是在这里画字：渲染文字需要字体文件、
+    /// CJK 回退与输入法，属 UI 层能力。若把字体库引进 core-algo，会破坏
+    /// 本 crate「零依赖 + 可机械翻译 C++」的硬约束（鸿蒙 PC 路线），
+    /// 中文字体（≥10MB）也不该进安装包。故文字由前端 Canvas 用系统字体
+    /// 光栅化成位图，核心层只负责合成——既守住约束，又天然支持
+    /// 中文/emoji/任意系统字体，并且所见即所得由构造保证。
+    Bitmap {
+        x: i32,
+        y: i32,
+        w: u32,
+        h: u32,
+        /// RGBA8，行优先，长度 = w*h*4，**非预乘 alpha**
+        rgba: Vec<u8>,
+    },
+    /// 聚光灯：把**圆角矩形区域之外**的像素压暗，区域本身保持原亮度。
+    ///
+    /// 与其他图形不同，它不改写任何几何形状，只是对底图做一次
+    /// "区域外乘性压暗"，因此可以与底图逐像素合成而不需要额外的图层。
+    /// 用的是圆角矩形有符号距离场（SDF），边缘再按 1.5px 羽化，
+    /// 避免圆角处出现硬锯齿。
+    Spotlight {
+        x: i32,
+        y: i32,
+        w: u32,
+        h: u32,
+        /// 圆角半径（物理像素），实际生效值会被 clamp 到 min(w,h)/2
+        radius: u32,
+        /// 压暗强度：0 = 不压暗，255 = 全黑
+        dim: u8,
+    },
 }
 
 impl Shape {
@@ -106,7 +138,11 @@ impl Shape {
                     p.1 += dy;
                 }
             }
-            Shape::Mosaic { x, y, .. } => {
+            Shape::Mosaic { x, y, .. } | Shape::Bitmap { x, y, .. } => {
+                *x += dx as i32;
+                *y += dy as i32;
+            }
+            Shape::Spotlight { x, y, .. } => {
                 *x += dx as i32;
                 *y += dy as i32;
             }
@@ -118,7 +154,9 @@ impl Shape {
         match self {
             Shape::Rect { x, y, w, h, .. }
             | Shape::Ellipse { x, y, w, h, .. }
-            | Shape::Mosaic { x, y, w, h, .. } => Some(Rect {
+            | Shape::Mosaic { x, y, w, h, .. }
+            | Shape::Spotlight { x, y, w, h, .. }
+            | Shape::Bitmap { x, y, w, h, .. } => Some(Rect {
                 x: *x,
                 y: *y,
                 w: *w,
@@ -157,7 +195,8 @@ impl Shape {
         }
     }
 
-    /// 线宽（马赛克无线宽，返回块边长近似）。
+    /// 线宽（马赛克无线宽，返回块边长近似；位图图层与线宽无关，返回 0；
+    /// 聚光灯同理，返回圆角半径近似）。
     pub fn width_or_block(&self) -> f32 {
         match self {
             Shape::Rect { style, .. }
@@ -166,6 +205,8 @@ impl Shape {
             | Shape::Pen { style, .. }
             | Shape::Highlighter { style, .. } => style.width,
             Shape::Mosaic { block, .. } => *block as f32,
+            Shape::Bitmap { .. } => 0.0,
+            Shape::Spotlight { radius, .. } => *radius as f32,
         }
     }
 }
@@ -232,5 +273,32 @@ mod tests {
         let r = Shape::Rect { x: 0, y: 0, w: 1, h: 1, style: style() };
         assert_eq!(r.points(), None);
         assert_eq!(r.width_or_block(), 2.0);
+    }
+
+    #[test]
+    fn bitmap_translates_and_reports_bounds() {
+        let mut b = Shape::Bitmap {
+            x: 10,
+            y: 20,
+            w: 30,
+            h: 8,
+            rgba: vec![0; 30 * 8 * 4],
+        };
+        assert_eq!(b.bounds(), Some(Rect { x: 10, y: 20, w: 30, h: 8 }));
+        b.translate(-4.0, 6.0);
+        assert_eq!(b.bounds(), Some(Rect { x: 6, y: 26, w: 30, h: 8 }));
+        // 位图与线宽无关
+        assert_eq!(b.width_or_block(), 0.0);
+        assert_eq!(b.points(), None);
+    }
+
+    #[test]
+    fn spotlight_translates_and_reports_bounds() {
+        let mut s = Shape::Spotlight { x: 5, y: 6, w: 40, h: 20, radius: 8, dim: 150 };
+        assert_eq!(s.bounds(), Some(Rect { x: 5, y: 6, w: 40, h: 20 }));
+        assert_eq!(s.width_or_block(), 8.0);
+        assert_eq!(s.points(), None);
+        s.translate(2.0, -3.0);
+        assert_eq!(s.bounds(), Some(Rect { x: 7, y: 3, w: 40, h: 20 }));
     }
 }

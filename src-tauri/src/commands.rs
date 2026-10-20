@@ -135,15 +135,39 @@ pub enum ShapePayload {
         h: f32,
         block: u32,
     },
+    /// UI 层光栅化的位图（文字 / 序列号等需要字体的标注）。
+    ///
+    /// `png`：base64 编码的 PNG，**无 `data:` 前缀**，尺寸已是物理像素
+    /// （前端按 DPR 光栅化）。用 PNG 而非裸 RGBA，是因为同一段文字
+    /// 裸 RGBA 有上百 KB、PNG 只有几 KB，IPC 体积差两个数量级。
+    Bitmap {
+        x: f32,
+        y: f32,
+        png: String,
+    },
+    /// 聚光灯：区域外压暗。`dim` 为 0-255 的压暗强度，
+    /// `radius` 为圆角半径（逻辑像素）。
+    Spotlight {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        radius: f32,
+        dim: u8,
+    },
 }
 
 impl ShapePayload {
     /// 转 core-algo 的纯值类型（逻辑像素 × sf → 物理像素）。
-    fn to_shape(&self, sf: f64) -> snappin_core_algo::shapes::Shape {
+    ///
+    /// 为什么返回 `Result`：位图载荷需要解 base64 + 解 PNG，属于可能失败的
+    /// 解码操作。宁可把错误回传给前端（前端会显示"复制失败：…"），
+    /// 也不要静默丢一层标注让用户拿到缺字的图。
+    fn to_shape(&self, sf: f64) -> Result<snappin_core_algo::shapes::Shape, String> {
         use snappin_core_algo::shapes::{Shape, ShapeStyle};
         let sf = sf as f32;
         let style = |color: [u8; 4], width: f32| ShapeStyle::new(color, width * sf);
-        match self {
+        let shape = match self {
             ShapePayload::Rect { x, y, w, h, color, width } => Shape::Rect {
                 x: (*x * sf) as i32,
                 y: (*y * sf) as i32,
@@ -180,12 +204,64 @@ impl ShapePayload {
                 h: (*h * sf).max(1.0) as u32,
                 block: (*block).max(2),
             },
-        }
+            // 位图已是物理像素：只把锚点换算过去，尺寸与像素原样使用
+            ShapePayload::Bitmap { x, y, png } => {
+                let (w, h, rgba) = decode_png_base64(png)?;
+                Shape::Bitmap {
+                    x: (*x * sf) as i32,
+                    y: (*y * sf) as i32,
+                    w,
+                    h,
+                    rgba,
+                }
+            }
+            ShapePayload::Spotlight { x, y, w, h, radius, dim } => Shape::Spotlight {
+                x: (*x * sf) as i32,
+                y: (*y * sf) as i32,
+                w: (*w * sf).max(1.0) as u32,
+                h: (*h * sf).max(1.0) as u32,
+                radius: (*radius * sf).max(0.0) as u32,
+                dim: *dim,
+            },
+        };
+        Ok(shape)
     }
 }
 
+/// base64 PNG → (宽, 高, RGBA8)。
+///
+/// 位图来自可信的本应用前端，但仍按不可信输入处理：长度、尺寸、
+/// 解码失败都要给出明确错误，不做任何 `unwrap`。
+fn decode_png_base64(png_b64: &str) -> Result<(u32, u32, Vec<u8>), String> {
+    use base64::Engine as _;
+    // 前端可能带着 data URL 前缀传上来（防御性处理）
+    let body = png_b64
+        .rsplit_once(',')
+        .filter(|(head, _)| head.starts_with("data:"))
+        .map(|(_, tail)| tail)
+        .unwrap_or(png_b64)
+        .trim();
+    if body.is_empty() {
+        return Err("bitmap payload is empty".to_string());
+    }
+    let raw = base64::engine::general_purpose::STANDARD
+        .decode(body)
+        .map_err(|e| format!("bitmap base64 decode failed: {e}"))?;
+    let img = image::load_from_memory_with_format(&raw, image::ImageFormat::Png)
+        .map_err(|e| format!("bitmap png decode failed: {e}"))?
+        .to_rgba8();
+    let (w, h) = (img.width(), img.height());
+    if w == 0 || h == 0 {
+        return Err("bitmap has zero size".to_string());
+    }
+    Ok((w, h, img.into_raw()))
+}
+
 /// 载荷列表 → core-algo 图形列表。
-fn to_shapes(payloads: &[ShapePayload], sf: f64) -> Vec<snappin_core_algo::shapes::Shape> {
+fn to_shapes(
+    payloads: &[ShapePayload],
+    sf: f64,
+) -> Result<Vec<snappin_core_algo::shapes::Shape>, String> {
     payloads.iter().map(|p| p.to_shape(sf)).collect()
 }
 
@@ -366,7 +442,7 @@ pub async fn confirm_selection(
     // await 之前取好配置，避免跨 await 持有 State
     let save_dir = { state.config.lock().unwrap().save_dir.clone() };
 
-    let (mut cropped, scale_factor, monitor_x, monitor_y) = {
+    let (cropped, scale_factor, monitor_x, monitor_y) = {
         let monitors = state.monitors.lock().unwrap();
         let m = monitors
             .iter()
@@ -385,10 +461,7 @@ pub async fn confirm_selection(
         // 保证所见即所得）。标注坐标同为逻辑像素，这里一起换算。
         if let Some(payloads) = &shapes {
             if !payloads.is_empty() {
-                snappin_core_algo::draw::draw_shapes(
-                    &mut cropped,
-                    &to_shapes(payloads, sf),
-                );
+                snappin_core_algo::draw::draw_shapes(&mut cropped, &to_shapes(payloads, sf)?);
             }
         }
         let (ox, oy) = m.logical_origin();
@@ -930,4 +1003,78 @@ async fn save_dialog(
     .await
     .ok()
     .flatten()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::Engine as _;
+
+    /// 2x1 的 PNG（左红右绿），base64 编码——模拟前端 `toDataURL` 的尾巴
+    fn sample_png_b64() -> String {
+        let mut img = image::RgbaImage::new(2, 1);
+        img.put_pixel(0, 0, image::Rgba([255, 0, 0, 255]));
+        img.put_pixel(1, 0, image::Rgba([0, 255, 0, 255]));
+        let mut buf = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+            .expect("encode png");
+        base64::engine::general_purpose::STANDARD.encode(buf)
+    }
+
+    #[test]
+    fn decodes_base64_png() {
+        let (w, h, rgba) = decode_png_base64(&sample_png_b64()).expect("decode");
+        assert_eq!((w, h), (2, 1));
+        assert_eq!(&rgba[0..4], &[255, 0, 0, 255]);
+        assert_eq!(&rgba[4..8], &[0, 255, 0, 255]);
+    }
+
+    #[test]
+    fn accepts_data_url_prefix_and_rejects_garbage() {
+        let with_prefix = format!("data:image/png;base64,{}", sample_png_b64());
+        assert!(decode_png_base64(&with_prefix).is_ok());
+        assert!(decode_png_base64("").is_err());
+        assert!(decode_png_base64("!!!not-base64!!!").is_err());
+        // 合法 base64 但不是 PNG
+        assert!(decode_png_base64("aGVsbG8=").is_err());
+    }
+
+    #[test]
+    fn bitmap_payload_scales_anchor_but_keeps_pixels() {
+        let p = ShapePayload::Bitmap { x: 10.0, y: 20.0, png: sample_png_b64() };
+        match p.to_shape(2.0).expect("to_shape") {
+            snappin_core_algo::shapes::Shape::Bitmap { x, y, w, h, rgba } => {
+                assert_eq!((x, y), (20, 40), "锚点应乘 DPR");
+                assert_eq!((w, h), (2, 1), "位图像素不应再缩放");
+                assert_eq!(rgba.len(), 8);
+            }
+            other => panic!("expect bitmap, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bad_bitmap_payload_fails_instead_of_silently_dropping() {
+        let p = ShapePayload::Bitmap { x: 0.0, y: 0.0, png: "broken".into() };
+        assert!(p.to_shape(1.0).is_err());
+    }
+
+    #[test]
+    fn spotlight_payload_scales_geometry_but_not_dim() {
+        let p = ShapePayload::Spotlight {
+            x: 1.0,
+            y: 2.0,
+            w: 30.0,
+            h: 10.0,
+            radius: 6.0,
+            dim: 150,
+        };
+        match p.to_shape(2.0).expect("to_shape") {
+            snappin_core_algo::shapes::Shape::Spotlight { x, y, w, h, radius, dim } => {
+                // 几何量乘 DPR，压暗强度是颜色语义、绝不能乘
+                assert_eq!((x, y, w, h, radius, dim), (2, 4, 60, 20, 12, 150));
+            }
+            other => panic!("expect spotlight, got {other:?}"),
+        }
+    }
 }

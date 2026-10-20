@@ -87,6 +87,116 @@ pub fn draw_shape(buf: &mut RgbaBuffer, s: &Shape) {
         Shape::Mosaic { x, y, w, h, block } => {
             mosaic_region(buf, *x, *y, *w, *h, (*block).max(2));
         }
+        Shape::Bitmap { x, y, w, h, rgba } => {
+            blit_bitmap(buf, *x, *y, *w, *h, rgba);
+        }
+        Shape::Spotlight { x, y, w, h, radius, dim } => {
+            spotlight_region(buf, *x, *y, *w, *h, *radius, *dim);
+        }
+    }
+}
+
+/// 聚光灯：把圆角矩形**外部**的像素按 `dim` 压暗，内部保持原样。
+///
+/// 几何用圆角矩形有符号距离场（SDF）判定：`d < 0` 在内部、`d > 0` 在外部，
+/// `d ∈ [0, FEATHER]` 的窄带内按线性插值做羽化，圆角处才不会出现硬锯齿。
+///
+/// 只做**乘性压暗**（RGB × (1 - strength × k)），alpha 通道不变——
+/// 压暗不该改变透明度，否则截图上原本透明的区域会变成半透明黑块。
+pub fn spotlight_region(
+    buf: &mut RgbaBuffer,
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+    radius: u32,
+    dim: u8,
+) {
+    if w == 0 || h == 0 || dim == 0 {
+        return;
+    }
+    let bw = buf.width as i32;
+    let bh = buf.height as i32;
+    if bw == 0 || bh == 0 {
+        return;
+    }
+    let strength = dim as f32 / 255.0;
+    // 圆角半径不能超过短边一半，否则 SDF 会退化成负的"半高"而出现破形
+    let r = radius.min(w / 2).min(h / 2) as f32;
+    let cx = x as f32 + w as f32 / 2.0;
+    let cy = y as f32 + h as f32 / 2.0;
+    // 圆角矩形的"内部直边"半长：|p-c| 超出这个值才开始算圆角
+    let hx = (w as f32 / 2.0 - r).max(0.0);
+    let hy = (h as f32 / 2.0 - r).max(0.0);
+    const FEATHER: f32 = 1.5;
+
+    // 洞的最大影响范围（含羽化）：超出这个带的像素直接按 k=1 处理，
+    // 省掉绝大部分 SDF 计算（4K 图上峰值的 99% 都在这个带之外）。
+    let band_x0 = x as f32 - FEATHER;
+    let band_x1 = x as f32 + w as f32 + FEATHER;
+    let band_y0 = y as f32 - FEATHER;
+    let band_y1 = y as f32 + h as f32 + FEATHER;
+
+    for py in 0..bh {
+        let fy = py as f32 + 0.5;
+        let row_in_band = fy >= band_y0 && fy <= band_y1;
+        for px in 0..bw {
+            let fx = px as f32 + 0.5;
+            // k = 压暗比例（0 = 不压暗，1 = 压到最暗）
+            let k = if row_in_band && fx >= band_x0 && fx <= band_x1 {
+                let qx = (fx - cx).abs() - hx;
+                let qy = (fy - cy).abs() - hy;
+                let outside = (qx.max(0.0) * qx.max(0.0) + qy.max(0.0) * qy.max(0.0)).sqrt()
+                    + qx.max(qy).min(0.0)
+                    - r;
+                (outside / FEATHER).clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+            if k <= 0.0 {
+                continue;
+            }
+            let f = 1.0 - strength * k;
+            let i = (py as usize * bw as usize + px as usize) * 4;
+            for c in 0..3 {
+                buf.data[i + c] = (buf.data[i + c] as f32 * f + 0.5) as u8;
+            }
+        }
+    }
+}
+
+/// 位图图层合成：把 RGBA8 贴图按 alpha 混合到目标缓冲（越界自动裁剪）。
+///
+/// 与 `mosaic_region` 一样只吃字节缓冲，不做解码/缩放——贴图尺寸与目标
+/// 位置均为**物理像素**，调用方负责保证 1:1（前端已按 DPR 光栅化）。
+/// 数据长度不足时静默跳过（宁可少画一层，也不要为坏数据 panic 掉整张图）。
+pub fn blit_bitmap(buf: &mut RgbaBuffer, x: i32, y: i32, w: u32, h: u32, rgba: &[u8]) {
+    if w == 0 || h == 0 {
+        return;
+    }
+    let need = w as usize * h as usize * 4;
+    if rgba.len() < need {
+        return;
+    }
+    // 只遍历与目标缓冲相交的行列，避免对超大贴图做无用功
+    for row in 0..h as i32 {
+        let py = y + row;
+        if py < 0 || py as u32 >= buf.height {
+            continue;
+        }
+        let src_row = row as usize * w as usize * 4;
+        for col in 0..w as i32 {
+            let px = x + col;
+            if px < 0 || px as u32 >= buf.width {
+                continue;
+            }
+            let i = src_row + col as usize * 4;
+            let a = rgba[i + 3];
+            if a == 0 {
+                continue;
+            }
+            blend_pixel(buf, px, py, [rgba[i], rgba[i + 1], rgba[i + 2], a]);
+        }
     }
 }
 
@@ -376,8 +486,154 @@ mod tests {
     }
 
     #[test]
-    fn highlighter_overlap_blends_not_overwrites() {
-        let mut buf = black(20, 20);
+    fn blit_copies_pixels_at_offset() {
+        let mut buf = black(10, 10);
+        // 2x2 纯红不透明贴图
+        let src = vec![255, 0, 0, 255].repeat(4);
+        blit_bitmap(&mut buf, 3, 4, 2, 2, &src);
+        assert_eq!(buf.pixel(3, 4), Some([255, 0, 0, 255]));
+        assert_eq!(buf.pixel(4, 5), Some([255, 0, 0, 255]));
+        // 贴图之外保持原样
+        assert_eq!(buf.pixel(2, 4), Some([0, 0, 0, 255]));
+        assert_eq!(buf.pixel(5, 4), Some([0, 0, 0, 255]));
+    }
+
+    #[test]
+    fn blit_respects_source_alpha() {
+        let mut buf = black(1, 1);
+        // 50% 白覆盖黑底 → 约 128
+        blit_bitmap(&mut buf, 0, 0, 1, 1, &[255, 255, 255, 128]);
+        let p = buf.pixel(0, 0).unwrap();
+        assert!((p[0] as i32 - 128).abs() <= 1, "got {:?}", p);
+    }
+
+    #[test]
+    fn blit_clips_to_buffer_edges() {
+        let mut buf = black(4, 4);
+        // 负坐标与越界：不应 panic，只在相交区域落像素
+        let src = vec![255, 0, 0, 255].repeat(9); // 3x3
+        blit_bitmap(&mut buf, -1, -1, 3, 3, &src);
+        assert_eq!(buf.pixel(0, 0), Some([255, 0, 0, 255]));
+        assert_eq!(buf.pixel(1, 1), Some([255, 0, 0, 255]));
+        assert_eq!(buf.pixel(2, 2), Some([0, 0, 0, 255]));
+
+        let mut buf2 = black(4, 4);
+        blit_bitmap(&mut buf2, 3, 3, 3, 3, &src);
+        assert_eq!(buf2.pixel(3, 3), Some([255, 0, 0, 255]));
+        assert_eq!(buf2.pixel(0, 0), Some([0, 0, 0, 255]));
+    }
+
+    #[test]
+    fn blit_ignores_short_or_empty_data() {
+        let mut buf = black(2, 2);
+        // 长度不足：静默跳过，不 panic
+        blit_bitmap(&mut buf, 0, 0, 2, 2, &[255, 0, 0, 255]);
+        blit_bitmap(&mut buf, 0, 0, 0, 0, &[]);
+        assert_eq!(buf.pixel(0, 0), Some([0, 0, 0, 255]));
+    }
+
+    #[test]
+    fn bitmap_shape_draws_through_draw_shape() {
+        let mut buf = black(6, 6);
+        let s = Shape::Bitmap {
+            x: 1,
+            y: 2,
+            w: 2,
+            h: 1,
+            rgba: vec![0, 255, 0, 255, 0, 255, 0, 255],
+        };
+        draw_shape(&mut buf, &s);
+        assert_eq!(buf.pixel(1, 2), Some([0, 255, 0, 255]));
+        assert_eq!(buf.pixel(2, 2), Some([0, 255, 0, 255]));
+        assert_eq!(buf.pixel(3, 2), Some([0, 0, 0, 255]));
+    }
+
+    /// 压暗系数对应的期望灰度：255 × (1 - dim/255)
+    fn dimmed(dim: u8, k: f32) -> i32 {
+        (255.0 * (1.0 - (dim as f32 / 255.0) * k)).round() as i32
+    }
+
+    fn white(w: u32, h: u32) -> RgbaBuffer {
+        let mut data = vec![255u8; w as usize * h as usize * 4];
+        for px in data.chunks_exact_mut(4) {
+            px[3] = 255;
+        }
+        RgbaBuffer::new(w, h, data).unwrap()
+    }
+
+    #[test]
+    fn spotlight_dims_outside_and_keeps_inside() {
+        let mut buf = white(40, 40);
+        spotlight_region(&mut buf, 10, 10, 20, 20, 0, 200);
+        // 洞内保持纯白（不留一点暗角）
+        assert_eq!(buf.pixel(20, 20), Some([255, 255, 255, 255]));
+        assert_eq!(buf.pixel(11, 11), Some([255, 255, 255, 255]));
+        // 洞外压暗，alpha 不变（压暗不该改变透明度）
+        let corner = buf.pixel(0, 0).unwrap();
+        let want = dimmed(200, 1.0);
+        assert!((corner[0] as i32 - want).abs() <= 1, "corner={corner:?} want={want}");
+        assert_eq!(corner[3], 255);
+    }
+
+    #[test]
+    fn spotlight_feathers_edge_instead_of_hard_step() {
+        let mut buf = white(20, 20);
+        spotlight_region(&mut buf, 5, 5, 10, 10, 0, 255);
+        // 右边界外 0.5px 处落在羽化带内：既不纯白也不全黑
+        let p = buf.pixel(15, 10).unwrap();
+        assert!(p[0] > 0 && p[0] < 255, "feathered pixel={p:?}");
+        // 离得够远就该完全压黑
+        assert_eq!(buf.pixel(19, 10), Some([0, 0, 0, 255]));
+    }
+
+    #[test]
+    fn spotlight_full_radius_becomes_circle() {
+        let mut buf = white(40, 40);
+        // 20×20 且 radius=10 → 正圆：中心亮，外接框角落（圆外）压黑
+        spotlight_region(&mut buf, 10, 10, 20, 20, 10, 255);
+        assert_eq!(buf.pixel(20, 20), Some([255, 255, 255, 255]));
+        assert_eq!(buf.pixel(11, 11), Some([0, 0, 0, 255]));
+    }
+
+    #[test]
+    fn spotlight_zero_dim_is_noop() {
+        let mut buf = white(10, 10);
+        spotlight_region(&mut buf, 2, 2, 4, 4, 1, 0);
+        for y in 0..10 {
+            for x in 0..10 {
+                assert_eq!(buf.pixel(x, y), Some([255, 255, 255, 255]), "({x},{y})");
+            }
+        }
+    }
+
+    #[test]
+    fn spotlight_handles_out_of_bounds_and_degenerate() {
+        // 完全在画布外：整幅压暗，且不 panic
+        let mut buf = white(8, 8);
+        spotlight_region(&mut buf, -50, -50, 10, 10, 2, 255);
+        assert_eq!(buf.pixel(0, 0), Some([0, 0, 0, 255]));
+        // 退化尺寸：无操作
+        let mut buf2 = white(8, 8);
+        spotlight_region(&mut buf2, 0, 0, 0, 0, 0, 255);
+        assert_eq!(buf2.pixel(0, 0), Some([255, 255, 255, 255]));
+        // 半径大于短边一半：自动 clamp，不破形
+        let mut buf3 = white(20, 20);
+        spotlight_region(&mut buf3, 5, 5, 10, 10, 999, 255);
+        assert_eq!(buf3.pixel(10, 10), Some([255, 255, 255, 255]));
+        assert_eq!(buf3.pixel(0, 0), Some([0, 0, 0, 255]));
+    }
+
+    #[test]
+    fn spotlight_draws_through_draw_shape() {
+        let mut buf = white(30, 30);
+        let s = Shape::Spotlight { x: 10, y: 10, w: 10, h: 10, radius: 0, dim: 255 };
+        draw_shape(&mut buf, &s);
+        assert_eq!(buf.pixel(15, 15), Some([255, 255, 255, 255]));
+        assert_eq!(buf.pixel(0, 0), Some([0, 0, 0, 255]));
+    }
+
+    #[test]
+    fn highlighter_overlap_blends_not_overwrites() {        let mut buf = black(20, 20);
         // 荧光笔 40% 黄，来回画两遍：重叠处不应比单遍更"实"到 100%
         let style = ShapeStyle::new([255, 255, 0, 100], 6.0);
         let s = Shape::Highlighter {

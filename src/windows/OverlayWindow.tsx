@@ -19,6 +19,7 @@ import {
   type ShotAction,
 } from '../lib/api'
 import { AnnotationLayer } from '../annotate/AnnotationLayer'
+import { ToolProps } from '../annotate/ToolProps'
 import {
   ArrowIcon,
   CheckIcon,
@@ -31,7 +32,9 @@ import {
   PinIcon,
   RectIcon,
   SaveIcon,
+  SequenceIcon,
   ShareIcon,
+  SpotlightIcon,
   StickerIcon,
   TextIcon,
   TranslateIcon,
@@ -40,6 +43,9 @@ import {
 import {
   PRESET_COLORS,
   MOSAIC_BLOCKS,
+  SPOTLIGHT_DIM,
+  TEXT_FONT_SIZE,
+  toShapePayloads,
   toolMeta,
   type AnnotateTool,
   type Rgba,
@@ -84,6 +90,10 @@ export function OverlayWindow() {
   const [color, setColor] = useState<Rgba>(PRESET_COLORS[0])
   const [width, setWidth] = useState(2)
   const [mosaicBlock, setMosaicBlock] = useState(MOSAIC_BLOCKS[1])
+  /** 文字字号（逻辑像素）；与画笔线宽分开存，切工具不会互相污染 */
+  const [fontSize, setFontSize] = useState(TEXT_FONT_SIZE.default)
+  /** 聚光灯压暗强度（0-255）；同样独立存，不借用 width */
+  const [spotDim, setSpotDim] = useState(SPOTLIGHT_DIM.default)
   /** 未实现工具的提示气泡（1.8s 自动消失） */
   const [hint, setHint] = useState<string | null>(null)
   const hintTimer = useRef<number | undefined>(undefined)
@@ -228,6 +238,11 @@ export function OverlayWindow() {
   // 键盘：Esc 取消截图；Enter 完成（复制）；Ctrl+Enter 同；Ctrl+Z 撤销标注
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // 文字输入中：键盘事件归输入框自己处理（否则 Enter/Esc/Ctrl+Z 会被
+      // 当成"完成截图/取消截图/撤销标注"，打字打到一半整张图就没了）
+      const target = e.target as HTMLElement | null
+      const tag = target?.tagName
+      if (tag === 'TEXTAREA' || tag === 'INPUT') return
       if (e.key === 'Escape') {
         e.preventDefault()
         void exitCapture()
@@ -264,7 +279,8 @@ export function OverlayWindow() {
     setBusy(true)
     setActError(null)
     try {
-      await confirmSelection(ctx.monitorId, rect, action, shapes, ctx.sessionId)
+      // 发送前剥掉位图图形里的 canvas 引用（DOM 节点不能进 IPC）
+      await confirmSelection(ctx.monitorId, rect, action, toShapePayloads(shapes), ctx.sessionId)
       // Rust 已关全部浮层；自关兜底（双屏下某块浮层漏关时由③轮询兜底）
       closeSelf().catch(() => {})
     } catch (e) {
@@ -285,7 +301,8 @@ export function OverlayWindow() {
     hintTimer.current = window.setTimeout(() => setHint(null), 1800)
   }
 
-  /** 选工具：再次点击已选中的工具则回到"选择"态（工具条无高亮）。 */
+  /** 选工具：再次点击已选中的工具则回到"选择"态（工具条无高亮）。
+   *  荧光笔没有独立按钮（挂在画笔的二级面板里），点画笔等于收起它。 */
   const pickTool = (t: AnnotateTool) => {
     const same = tool === t || (t === 'pen' && tool === 'highlighter')
     setTool(same ? null : t)
@@ -421,6 +438,8 @@ export function OverlayWindow() {
             color={color}
             width={width}
             mosaicBlock={mosaicBlock}
+            fontSize={fontSize}
+            spotlightDim={spotDim}
             shapes={shapes}
             onShapesChange={setShapes}
           />
@@ -507,11 +526,28 @@ export function OverlayWindow() {
                 <MosaicIcon />
               </button>
               <button
-                className="sbtn"
+                data-tool="spotlight"
+                className={`sbtn ${tool === 'spotlight' ? 'active' : ''}`}
+                title="聚光灯"
+                onClick={() => pickTool('spotlight')}
+              >
+                <SpotlightIcon />
+              </button>
+              <button
+                data-tool="text"
+                className={`sbtn ${tool === 'text' ? 'active' : ''}`}
                 title="文字"
-                onClick={(e) => showHint('文字工具', e.currentTarget)}
+                onClick={() => pickTool('text')}
               >
                 <TextIcon />
+              </button>
+              <button
+                data-tool="badge"
+                className={`sbtn ${tool === 'badge' ? 'active' : ''}`}
+                title="序号"
+                onClick={() => pickTool('badge')}
+              >
+                <SequenceIcon />
               </button>
             </div>
 
@@ -605,44 +641,20 @@ export function OverlayWindow() {
                   </button>
                 </div>
               )}
-              {tool === 'mosaic' ? (
-                <div className="sb-seg">
-                  {MOSAIC_BLOCKS.map((b, i) => (
-                    <button
-                      key={b}
-                      className={mosaicBlock === b ? 'on' : ''}
-                      onClick={() => setMosaicBlock(b)}
-                    >
-                      {['小', '中', '大'][i]}
-                    </button>
-                  ))}
-                </div>
-              ) : (
-                <>
-                  <div className="sb-colors">
-                    {PRESET_COLORS.map((c) => (
-                      <button
-                        key={c.join(',')}
-                        className={`swatch ${color === c ? 'active' : ''}`}
-                        style={{ background: `rgb(${c[0]},${c[1]},${c[2]})` }}
-                        onClick={() => setColor(c)}
-                        title={`颜色 rgba(${c.join(',')})`}
-                      />
-                    ))}
-                  </div>
-                  <i className="sb-sep" />
-                  <label className="sb-width" title={`线宽 ${width}px`}>
-                    <input
-                      type="range"
-                      min={1}
-                      max={24}
-                      step={1}
-                      value={width}
-                      onChange={(e) => setWidth(Number(e.target.value))}
-                    />
-                  </label>
-                </>
-              )}
+              <ToolProps
+                tool={tool}
+                color={color}
+                width={width}
+                fontSize={fontSize}
+                spotDim={spotDim}
+                mosaicBlock={mosaicBlock}
+                onColor={setColor}
+                onWidth={setWidth}
+                onFontSize={setFontSize}
+                onSpotDim={setSpotDim}
+                onMosaicBlock={setMosaicBlock}
+                onTool={setTool}
+              />
             </div>
           )}
 

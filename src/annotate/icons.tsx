@@ -98,11 +98,28 @@ export const MosaicIcon = (p: IconProps) => (
 )
 
 /** 文字（方框内的 T） */
+/** 聚光灯：画面范围 + 中央亮区 + 光晕虚线圈 */
+export const SpotlightIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <rect x="3.6" y="3.6" width="16.8" height="16.8" rx="3.2" />
+    <circle cx="12" cy="12" r="3.4" fill="currentColor" stroke="none" />
+    <circle cx="12" cy="12" r="6.7" strokeDasharray="2.2 2.7" />
+  </Icon>
+)
+
 export const TextIcon = (p: IconProps) => (
   <Icon {...p}>
     <rect x="3.6" y="3.6" width="16.8" height="16.8" rx="2.8" />
     <path d="M8.1 8.3h7.8" />
     <path d="M12 8.3v8.2" />
+  </Icon>
+)
+
+/** 序号（圆环内的 1；数字用描边画，保持与其它图标同一线宽语言） */
+export const SequenceIcon = (p: IconProps) => (
+  <Icon scale={1.2} {...p}>
+    <circle cx="12" cy="12" r="8.4" />
+    <path d="M10.3 10.4l1.75-1.25v6.7" />
   </Icon>
 )
 

@@ -56,9 +56,10 @@
 /* ===================== 顶部截图工具条（选中选区后出现） ===================== */
 /* 布局参考主流截图工具：绘制工具组 ｜ 颜色/线宽组 ｜ 操作组（撤销/保存/贴图/取消/完成） */
 
-/* ============ 顶部工具条（1:1 复刻参考图：48px 高 · 48px 节距） ============ */
-/* 参考图实测：面板 #fafafa、圆角 12、内边距 4、按钮 48×46、
-   分隔线 1×28 且左右各 8 留白（一组加宽 17px）、图标 22px / 描边 1.6 / #4c4c4c。 */
+/* ============ 顶部工具条（参考图为 48px 高 · 48px 节距，按需收紧） ============ */
+/* 面板 #fafafa、圆角 12、内边距 4、分隔线 1×28、图标 22px / 描边 1.6 / #4c4c4c。
+   节距：参考图为 48px，这里收紧到 40px（图标间距 26 → 18），
+   理由是工具已增至 17 个，保持 48 会让工具条过宽、离选区边缘太近。 */
 .shot-bar {
   position: fixed;
   top: 12px;
@@ -88,7 +89,7 @@
   flex: 0 0 auto;
   width: 1px;
   height: 28px;
-  margin: 0 8px;
+  margin: 0 6px;
   background: #e2e2e2;
 }
 
@@ -97,7 +98,7 @@
   align-items: center;
   justify-content: center;
   box-sizing: border-box;
-  width: 48px;
+  width: 40px;
   height: 46px;
   padding: 0;
   color: #4c4c4c;
@@ -227,9 +228,29 @@
 }
 
 .sb-width input {
-  width: 84px;
+  width: 72px;
   height: 16px;
   accent-color: #4c4c4c;
+}
+
+/* 滑条右侧的实时数值：滑条本身没有刻度，不给数字就是"盲调"。
+   tabular-nums + 固定最小宽度，避免拖动时面板宽度跟着数字跳动。 */
+.sb-val {
+  min-width: 30px;
+  font-size: 11px;
+  line-height: 1;
+  color: #374151;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  user-select: none;
+}
+
+/* 滑条左侧的量名（暗度等）：没有色块可依赖时用来表明这个滑条管什么 */
+.sb-cap {
+  font-size: 11px;
+  line-height: 1;
+  color: #6b7280;
+  user-select: none;
 }
 
 /* 未实现工具 / 报错的瞬时提示（定位在工具条下方，不参与工具条布局） */
@@ -277,6 +298,35 @@
 .annotate-canvas.passthrough {
   pointer-events: none;
   cursor: default;
+}
+
+/* 文字工具：光标给 I 型，提示"点一下就能打字" */
+.annotate-canvas.text-mode {
+  cursor: text;
+}
+
+/* 文字输入框：背景透明，所见即所得——样式必须与 rasterizeText 的输出对齐
+   （同字体栈、同字号、同行高）。字体栈与 src/annotate/tools.ts 的
+   TEXT_FONT_STACK 保持一致，改一处必须改两处。 */
+.text-editor {
+  position: absolute;
+  z-index: 3;
+  margin: 0;
+  padding: 0;
+  border: none;
+  outline: 1px dashed rgba(255, 255, 255, 0.6);
+  outline-offset: 2px;
+  background: transparent;
+  font-family: system-ui, "Segoe UI", "Microsoft YaHei", "PingFang SC",
+    "Hiragino Sans GB", "Noto Sans CJK SC", sans-serif;
+  font-weight: 400;
+  letter-spacing: normal;
+  resize: none;
+  overflow: hidden;
+  white-space: pre;
+  pointer-events: auto;
+  cursor: text;
+  caret-color: currentColor;
 }
 
 .sel {
