@@ -16,7 +16,7 @@ pub struct MonitorShot {
     pub id: String,
     /// 显示器名称
     pub name: String,
-    /// 显示器原点（虚拟桌面坐标）
+    /// 显示器原点（虚拟桌面坐标；**单位随平台不同**，见 `logical_origin`）
     pub x: i32,
     pub y: i32,
     /// 物理像素尺寸
@@ -31,36 +31,164 @@ pub struct MonitorShot {
     pub path: PathBuf,
 }
 
+impl MonitorShot {
+    /// 显示器原点换算成**逻辑像素**（CSS px），供窗口定位使用。
+    ///
+    /// 为什么需要这个函数：xcap 各平台 `x()/y()` 单位不一致（已核对
+    /// xcap 0.9.8 源码）——
+    /// - Windows：来自 MONITORINFO，是**物理像素**，要除以 scale_factor；
+    /// - macOS：来自 `CGDisplayBounds`，单位是**点**，本身就是逻辑坐标，
+    ///   再除一次 scale_factor 会算出 1/2 的位置（Retina 副屏会严重偏移）。
+    /// 统一成逻辑像素后，上层只按逻辑像素算窗口位置。
+    pub fn logical_origin(&self) -> (f64, f64) {
+        #[cfg(target_os = "macos")]
+        {
+            (self.x as f64, self.y as f64)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let sf = self.scale_factor as f64;
+            (self.x as f64 / sf, self.y as f64 / sf)
+        }
+    }
+}
+
+/// 光标在虚拟桌面中的物理像素坐标（多屏坐标系，与 `MonitorShot.x/y` 同系）。
+///
+/// 用途：剪贴板贴图（Ctrl+V）时把贴图窗口放到鼠标当前位置。
+/// 失败或平台不支持时返回 None，调用方降级为主屏居中。
+///
+/// 实现：直接 FFI 声明 Win32 `GetCursorPos`，不为一个函数引入
+/// windows crate 全量依赖（xcap 已传递依赖，但显式声明会拖慢编译）。
+#[cfg(windows)]
+pub fn cursor_position() -> Option<(i32, i32)> {
+    #[repr(C)]
+    struct POINT {
+        x: i32,
+        y: i32,
+    }
+    extern "system" {
+        fn GetCursorPos(lpPoint: *mut POINT) -> i32;
+    }
+    let mut p = POINT { x: 0, y: 0 };
+    // SAFETY: p 是本地可写结构体，GetCursorPos 仅写入 8 字节
+    let ok = unsafe { GetCursorPos(&mut p) };
+    if ok == 0 {
+        return None;
+    }
+    Some((p.x, p.y))
+}
+
+#[cfg(not(windows))]
+pub fn cursor_position() -> Option<(i32, i32)> {
+    None
+}
+
+/// 确保已获得"屏幕录制"权限（仅 macOS 有意义）。
+///
+/// macOS 10.15 起，任何程序读取屏幕像素都要用户在
+/// 「系统设置 → 隐私与安全性 → 屏幕录制」里授权；未授权时
+/// CGWindowListCreateImage / ScreenCaptureKit 只返回空白或纯黑图，
+/// 用户看到的现象就是"截图全黑 / 采集失败"。
+///
+/// 返回 true 表示已授权。未授权时会触发系统授权弹窗（首次），
+/// 授权后**必须重启应用**才生效（系统限制，不是本程序的问题）。
+#[cfg(target_os = "macos")]
+pub fn ensure_screen_capture_permission() -> bool {
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGPreflightScreenCaptureAccess() -> bool;
+        fn CGRequestScreenCaptureAccess() -> bool;
+    }
+    // SAFETY: 两个都是无参纯查询/提示接口，不涉及指针所有权。
+    unsafe {
+        if CGPreflightScreenCaptureAccess() {
+            true
+        } else {
+            CGRequestScreenCaptureAccess()
+        }
+    }
+}
+
+/// 非 macOS 平台无需屏幕录制授权，恒为 true。
+#[cfg(not(target_os = "macos"))]
+pub fn ensure_screen_capture_permission() -> bool {
+    true
+}
+
 /// 截图临时目录：`%TEMP%/snappin`
 pub fn temp_shot_dir() -> PathBuf {
     std::env::temp_dir().join("snappin")
 }
 
 /// 截取全部显示器：返回每块的像素缓冲与冻结用 PNG。
+///
+/// 多台显示器并行采集（每台独立线程做 DXGI/GDI 采集 + PNG 编码），
+/// 避免串行等待；冻结图用 fast 压缩，牺牲体积换取速度。
 pub fn capture_all_monitors() -> Result<Vec<MonitorShot>> {
     let dir = temp_shot_dir();
     std::fs::create_dir_all(&dir).context("create temp shot dir failed")?;
 
     let monitors = xcap::Monitor::all().context("enumerate monitors failed")?;
-    let mut shots = Vec::with_capacity(monitors.len());
-    for (i, m) in monitors.iter().enumerate() {
+    let count = monitors.len();
+    let mut slots: Vec<Option<MonitorShot>> = (0..count).map(|_| None).collect();
+
+    let result: Result<()> = std::thread::scope(|s| {
+        let mut handles = Vec::with_capacity(count);
+        for (i, m) in monitors.into_iter().enumerate() {
+            let dir = dir.clone();
+            let m = SendMonitor(m); // 外层包装：闭包只捕获 Send 类型
+            handles.push(s.spawn(move || m.capture_shot(i, &dir)));
+        }
+        for (i, h) in handles.into_iter().enumerate() {
+            match h.join() {
+                Ok(Ok(shot)) => slots[i] = Some(shot),
+                Ok(Err(e)) => return Err(e),
+                Err(_) => return Err(anyhow::anyhow!("capture thread {} panicked", i)),
+            }
+        }
+        Ok(())
+    });
+    result?;
+
+    Ok(slots.into_iter().flatten().collect())
+}
+
+/// 跨线程传递 Monitor 的包装（仅用于并行采集）。
+///
+/// 安全性依据（xcap 0.9.8 Windows 实现）：
+/// - 本项目未启用 xcap 的 `wgc` feature，`capture_image` 走 GDI BitBlt 路径，
+///   每次调用新建 DC/位图，Monitor 本身无共享可变状态
+/// - Windows 端 `ImplMonitor` 仅含 `h_monitor: HMONITOR` 不透明句柄，
+///   HMONITOR 作为显示器标识符可跨线程使用（Win32 语义）
+/// - macOS 端 `SCShareableInfo`/`CGDirectDisplayID` 同理为值语义句柄
+///
+/// ⚠️ 若未来启用 xcap `wgc` feature（WinRT 对象有 STA 线程亲和要求），
+/// 必须重新评估此包装的线程安全性，或改回串行采集。
+struct SendMonitor(xcap::Monitor);
+unsafe impl Send for SendMonitor {}
+
+impl SendMonitor {
+    /// 采集单台显示器并保存冻结图（在调用方线程内执行）。
+    fn capture_shot(self, index: usize, dir: &Path) -> Result<MonitorShot> {
+        let m = self.0;
         let rgba = m
             .capture_image()
-            .with_context(|| format!("capture monitor {} failed", i))?;
+            .with_context(|| format!("capture monitor {} failed", index))?;
         let width = rgba.width();
         let height = rgba.height();
         let buffer = RgbaBuffer::new(width, height, rgba.into_raw())
             .context("captured image has invalid buffer")?;
 
-        let id = format!("m{}", i);
+        let id = format!("m{}", index);
         let path = dir.join(format!("shot-{}.png", id));
-        save_png(&buffer, &path)?;
+        save_png_fast(&buffer, &path)?;
 
-        shots.push(MonitorShot {
+        Ok(MonitorShot {
             id,
             name: m
                 .friendly_name()
-                .unwrap_or_else(|_| format!("Display {}", i + 1)),
+                .unwrap_or_else(|_| format!("Display {}", index + 1)),
             x: m.x().unwrap_or(0),
             y: m.y().unwrap_or(0),
             width,
@@ -69,18 +197,83 @@ pub fn capture_all_monitors() -> Result<Vec<MonitorShot>> {
             is_primary: m.is_primary().unwrap_or(false),
             image: buffer,
             path,
-        });
+        })
     }
-    Ok(shots)
 }
 
-/// 把 RGBA 缓冲保存为 PNG。
+/// 生成默认保存文件名：`snappin_YYYYMMDDHHmmss_NNNN.png`。
+///
+/// 规则：snappin_ + 本地时间时间戳（秒级）+ 四位随机数字。
+pub fn default_save_name() -> String {
+    let ts = chrono::Local::now().format("%Y%m%d%H%M%S");
+    // uuid 的 u128 取模取四位随机数字（避免额外引入 rand 依赖）
+    let rand = (uuid::Uuid::new_v4().as_u128() % 10000) as u32;
+    format!("snappin_{}_{:04}.png", ts, rand)
+}
+
+/// 把 RGBA 缓冲保存为 PNG（默认压缩，体积优先，用于用户主动保存）。
 pub fn save_png(buffer: &RgbaBuffer, path: &Path) -> Result<()> {
     let image = image::RgbaImage::from_raw(buffer.width, buffer.height, buffer.data.clone())
         .ok_or_else(|| anyhow::anyhow!("invalid rgba buffer for {}", path.display()))?;
     image
         .save(path)
         .with_context(|| format!("save png failed: {}", path.display()))?;
+    Ok(())
+}
+
+/// 把 RGBA 缓冲保存为 PNG（fast 压缩，速度优先，用于冻结图等瞬时用途）。
+pub fn save_png_fast(buffer: &RgbaBuffer, path: &Path) -> Result<()> {
+    use image::codecs::png::{CompressionType, FilterType, PngEncoder};
+    let file = std::fs::File::create(path)
+        .with_context(|| format!("create png failed: {}", path.display()))?;
+    let encoder = PngEncoder::new_with_quality(
+        std::io::BufWriter::new(file),
+        CompressionType::Fast,
+        FilterType::Sub,
+    );
+    image::ImageEncoder::write_image(
+        encoder,
+        &buffer.data,
+        buffer.width,
+        buffer.height,
+        image::ExtendedColorType::Rgba8,
+    )
+    .with_context(|| format!("save png failed: {}", path.display()))?;
+    Ok(())
+}
+
+/// 按目标扩展名保存图像：`.jpg/.jpeg` → JPEG（q90，去 alpha）；其他 → PNG。
+pub fn save_image(buffer: &RgbaBuffer, path: &Path) -> Result<()> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase());
+    match ext.as_deref() {
+        Some("jpg") | Some("jpeg") => save_jpeg(buffer, path),
+        _ => save_png(buffer, path),
+    }
+}
+
+/// 把 RGBA 缓冲保存为 JPEG（质量 90；JPEG 无 alpha，先转 RGB）。
+pub fn save_jpeg(buffer: &RgbaBuffer, path: &Path) -> Result<()> {
+    use image::codecs::jpeg::JpegEncoder;
+    let rgba = image::RgbaImage::from_raw(buffer.width, buffer.height, buffer.data.clone())
+        .ok_or_else(|| anyhow::anyhow!("invalid rgba buffer for {}", path.display()))?;
+    let mut rgb = image::RgbImage::new(buffer.width, buffer.height);
+    for (dst, src) in rgb.pixels_mut().zip(rgba.pixels()) {
+        *dst = image::Rgb([src[0], src[1], src[2]]);
+    }
+    let file = std::fs::File::create(path)
+        .with_context(|| format!("create jpeg failed: {}", path.display()))?;
+    let encoder = JpegEncoder::new_with_quality(std::io::BufWriter::new(file), 90);
+    image::ImageEncoder::write_image(
+        encoder,
+        rgb.as_raw(),
+        buffer.width,
+        buffer.height,
+        image::ExtendedColorType::Rgb8,
+    )
+    .with_context(|| format!("save jpeg failed: {}", path.display()))?;
     Ok(())
 }
 

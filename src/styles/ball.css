@@ -1,20 +1,24 @@
 .ball-root {
   position: fixed;
   inset: 0;
+  display: grid;
+  place-items: center;
 }
 
 .ball {
-  width: 100%;
-  height: 100%;
+  width: var(--ball-size, 56px);
+  height: var(--ball-size, 56px);
   border-radius: 50%;
-  background: radial-gradient(
-    circle at 30% 28%,
-    var(--ball-light, #4fc3e8),
-    var(--ball-color, #12a5d8) 62%
-  );
+  /* 品牌深墨蓝底：顶部冷光 + 底部暗角 + 中段微亮弧，配合橙色 S 形成对比 */
+  background:
+    radial-gradient(circle at 32% 24%, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0) 56%),
+    radial-gradient(circle at 50% 118%, rgba(2, 8, 23, 0.55), rgba(2, 8, 23, 0) 62%),
+    linear-gradient(180deg, #26374F 0%, #1A2740 44%, #0B1220 100%);
   box-shadow:
-    0 4px 14px rgba(2, 32, 44, 0.35),
-    inset 0 0 0 1px rgba(255, 255, 255, 0.28);
+    0 6px 16px rgba(2, 10, 24, 0.42),
+    0 1px 2px rgba(2, 10, 24, 0.28),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.16),
+    inset 0 -8px 14px rgba(0, 0, 0, 0.36);
   display: grid;
   place-items: center;
   cursor: pointer;
@@ -23,6 +27,11 @@
 
 .ball:hover {
   transform: scale(1.07);
+  box-shadow:
+    0 8px 20px rgba(2, 10, 24, 0.48),
+    0 0 0 3px rgba(245, 119, 42, 0.16),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.22),
+    inset 0 -8px 14px rgba(0, 0, 0, 0.34);
 }
 
 .ball:active {
@@ -30,8 +39,7 @@
 }
 
 .ball svg {
-  width: 52%;
-  height: 52%;
-  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.25));
+  width: 64%;
+  height: 64%;
   pointer-events: none;
 }

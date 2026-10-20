@@ -1,14 +1,47 @@
 //! 窗口管理：悬浮球 / 截图浮层 / 贴图窗口的创建与关闭。
 
 use tauri::webview::WebviewWindowBuilder;
-use tauri::{AppHandle, Manager, PhysicalPosition, WebviewUrl};
+use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WebviewUrl};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
+use std::time::Duration;
 
 use crate::config::AppConfig;
+use crate::state::AppState;
 
 pub const BALL_LABEL: &str = "ball";
 pub const OVERLAY_PREFIX: &str = "overlay-";
 pub const PIN_PREFIX: &str = "pin-";
+
+/// 注入到所有 webview 的守卫脚本（document-start，早于页面脚本执行）。
+///
+/// 背景：wry 0.57 的 WebView2 默认开启浏览器原生右键菜单（返回/刷新/
+/// **打印**/查看源代码…），桌面应用里出现这种菜单是 bug——用户右键悬浮球
+/// 点"打印"会弹出一个空白页的打印对话框。Tauri 未暴露 wry 的
+/// `default_context_menus` 开关，故在前端层拦截。
+///
+/// - `contextmenu`：preventDefault 只取消默认菜单，不阻止事件传播，
+///   各窗口仍可在 React 里正常响应右键（悬浮球 → 原生菜单 ball_menu）。
+/// - 浏览器快捷键：Ctrl+P 打印 / F5、Ctrl+R 刷新 / Ctrl+S 保存 / Ctrl+O 打开。
+const WEBVIEW_GUARD: &str = r#"
+(function () {
+  window.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+  window.addEventListener('keydown', function (e) {
+    if (e.key === 'F5') { e.preventDefault(); return; }
+    if (e.ctrlKey && ['p', 'r', 's', 'o'].indexOf(e.key.toLowerCase()) !== -1) {
+      e.preventDefault();
+    }
+  });
+})();
+"#;
+
+/// 悬浮球窗口相对球体的留白（逻辑像素）。
+/// hover/active 有 transform: scale 动画，窗口必须比球大，否则缩放后被窗口边缘裁剪成椭圆。
+const BALL_MARGIN: f64 = 10.0;
+
+/// 贴图窗口相对图片的留白（逻辑像素）。
+/// 图片有外投影 box-shadow，窗口必须比图片大一圈，否则阴影被窗口边缘裁掉。
+const PIN_MARGIN: f64 = 10.0;
 
 /// 截图期间是否因采集而隐藏了悬浮球（用于结束后恢复）。
 static BALL_HIDDEN_BY_CAPTURE: AtomicBool = AtomicBool::new(false);
@@ -19,15 +52,18 @@ pub fn ensure_ball_window(app: &AppHandle, cfg: &AppConfig) -> tauri::Result<()>
         return Ok(());
     }
     let size = cfg.ball_size as f64;
+    // 窗口比球大一圈：容纳 hover 放大动画，避免被窗口边缘裁剪成椭圆
+    let win = size + BALL_MARGIN * 2.0;
     let window = WebviewWindowBuilder::new(app, BALL_LABEL, WebviewUrl::App("ball.html".into()))
         .title("SnapPin")
-        .inner_size(size, size)
+        .inner_size(win, win)
         .decorations(false)
         .transparent(true)
         .always_on_top(true)
         .skip_taskbar(true)
         .resizable(false)
         .shadow(false)
+        .initialization_script(WEBVIEW_GUARD)
         .build()?;
 
     let inner = window.inner_size().unwrap_or_default();
@@ -61,45 +97,184 @@ pub fn toggle_ball(app: &AppHandle) {
     }
 }
 
-/// 为每台显示器打开一个全尺寸透明浮层。
+/// 采集前隐藏悬浮球（必须：否则球体会被截进冻结图）。
+/// 窗口操作须在主线程执行，这里经 run_on_main_thread 同步等待完成。
+/// 返回是否真的隐藏了（供调用方等待合成器刷新）。
+pub fn hide_ball_for_capture(app: &AppHandle) -> bool {
+    let visible = app
+        .get_webview_window(BALL_LABEL)
+        .map(|w| w.is_visible().unwrap_or(false))
+        .unwrap_or(false);
+    if !visible {
+        return false;
+    }
+    run_on_main(app, |app| {
+        if let Some(w) = app.get_webview_window(BALL_LABEL) {
+            let _ = w.hide();
+        }
+    });
+    BALL_HIDDEN_BY_CAPTURE.store(true, Ordering::SeqCst);
+    true
+}
+
+/// 后台并行预创建**隐藏**浮层（与采集重叠，降低点击→冻结的感知延迟）。
 ///
-/// 注意：xcap 给出的显示器几何为物理像素，除以 scale_factor 得到逻辑像素。
-/// 混合 DPI 多显示器下位置可能有偏差（已知限制，见 ROADMAP）。
-pub fn open_overlays(
-    app: &AppHandle,
-    monitors: &[snappin_core_platform::MonitorShot],
-) -> tauri::Result<()> {
+/// 关键：窗口以 `visible(false)` 创建，采集完成后才由 `show_overlays` 显示——
+/// 采集期间屏幕上没有任何本应用的可见像素，冻结图干净（不会混入
+/// loading 遮罩/文字/悬浮球）。失败无妨：`show_overlays` 会兜底创建。
+///
+/// 平台差异：调用方是采集线程（非主线程）。
+/// - Windows：主线程同步建窗会死锁，必须在工作线程直接建（当前实现）。
+/// - macOS：NSWindow 只能主线程建，这里投递到主线程并**同步等它建完**
+///   （show_overlays 依赖窗口已存在，异步会漏显示）。
+#[cfg(not(target_os = "macos"))]
+pub fn precreate_overlays_hidden(app: &AppHandle) {
+    build_overlays_hidden(app);
+}
+
+#[cfg(target_os = "macos")]
+pub fn precreate_overlays_hidden(app: &AppHandle) {
+    run_on_main(app, build_overlays_hidden);
+}
+
+fn build_overlays_hidden(app: &AppHandle) {
+    let monitors = match app.available_monitors() {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("[snappin] precreate overlays: enumerate failed: {e}");
+            return;
+        }
+    };
     for (i, m) in monitors.iter().enumerate() {
         let label = format!("{}{}", OVERLAY_PREFIX, i);
         if app.get_webview_window(&label).is_some() {
+            // 复用路径：页面不会重新加载，前端计时基准陈旧（已在前端按
+            // overlay-ready 重置）。这里打日志便于排查"上一轮未关干净"。
+            eprintln!("[snappin] precreate: {label} already alive, reused");
             continue;
         }
-        let sf = m.scale_factor as f64;
-        let logical_w = (m.width as f64 / sf).max(1.0);
-        let logical_h = (m.height as f64 / sf).max(1.0);
-        WebviewWindowBuilder::new(app, &label, WebviewUrl::App("overlay.html".into()))
+        let sf = m.scale_factor();
+        let logical_w = (m.size().width as f64 / sf).max(1.0);
+        let logical_h = (m.size().height as f64 / sf).max(1.0);
+        let built = WebviewWindowBuilder::new(app, &label, WebviewUrl::App("overlay.html".into()))
             .title("SnapPin Capture")
             .inner_size(logical_w, logical_h)
-            .position(m.x as f64 / sf, m.y as f64 / sf)
+            .position(m.position().x as f64 / sf, m.position().y as f64 / sf)
             .decorations(false)
             .transparent(true)
             .always_on_top(true)
             .skip_taskbar(true)
             .resizable(false)
             .shadow(false)
-            .focused(true)
-            .build()?;
-    }
-    eprintln!("[snappin] opened {} overlay window(s)", monitors.len());
-
-    // 截图期间隐藏悬浮球：避免遮挡选区拖拽，也避免透传点击误触
-    if let Some(ball) = app.get_webview_window(BALL_LABEL) {
-        if ball.is_visible().unwrap_or(false) {
-            let _ = ball.hide();
-            BALL_HIDDEN_BY_CAPTURE.store(true, Ordering::SeqCst);
+            .visible(false) // 先隐藏：采集完成后统一显示
+            .initialization_script(WEBVIEW_GUARD)
+            .build();
+        if let Err(e) = built {
+            eprintln!("[snappin] precreate overlay {label} failed: {e}");
         }
     }
-    Ok(())
+    eprintln!(
+        "[snappin] precreate done: {} monitor(s) enumerated",
+        monitors.len()
+    );
+}
+
+/// 采集完成后显示全部浮层（不存在则兜底创建并显示）。
+///
+/// 几何用 xcap 的精确值校正（tauri 的枚举几何为近似值）；
+/// set_size/set_position/show 必须在主线程执行，故经 run_on_main_thread。
+pub fn show_overlays(app: &AppHandle, monitors: &[snappin_core_platform::MonitorShot]) {
+    let corrections: Vec<(String, f64, f64, f64, f64)> = monitors
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let sf = m.scale_factor as f64;
+            // 原点单位随平台不同（Windows 物理像素 / macOS 点），统一走 logical_origin
+            let (ox, oy) = m.logical_origin();
+            (
+                format!("{}{}", OVERLAY_PREFIX, i),
+                (m.width as f64 / sf).max(1.0),
+                (m.height as f64 / sf).max(1.0),
+                ox,
+                oy,
+            )
+        })
+        .collect();
+    run_on_main(app, move |app| {
+        for (label, w, h, x, y) in corrections {
+            if let Some(win) = app.get_webview_window(&label) {
+                let r1 = win.set_size(tauri::LogicalSize::new(w, h));
+                let r2 = win.set_position(tauri::LogicalPosition::new(x, y));
+                let r3 = win.show();
+                let r4 = win.set_focus();
+                eprintln!(
+                    "[snappin] show {label}: size={:?} pos={:?} show={:?} focus={:?} visible={:?}",
+                    r1.err(),
+                    r2.err(),
+                    r3.err(),
+                    r4.err(),
+                    win.is_visible()
+                );
+                // 主动通知前端"采集完成"：WebView2 的窗口 show() 不保证触发
+                // document visibilitychange，前端轮询若只靠 visibilitychange
+                // 门控会永远等不到 ready（表现为"截图采集超时"）。
+                let _ = app.emit_to(&label, "overlay-ready", ());
+            } else {
+                // 兜底：预创建缺失（如采集中显示器热插拔），直接创建并显示
+                let built = WebviewWindowBuilder::new(
+                    app,
+                    &label,
+                    WebviewUrl::App("overlay.html".into()),
+                )
+                .title("SnapPin Capture")
+                .inner_size(w, h)
+                .position(x, y)
+                .decorations(false)
+                .transparent(true)
+                .always_on_top(true)
+                .skip_taskbar(true)
+                    .resizable(false)
+                    .shadow(false)
+                    .focused(true)
+                    .initialization_script(WEBVIEW_GUARD)
+                    .build();
+                if let Err(e) = built {
+                    eprintln!("[snappin] fallback overlay {label} failed: {e}");
+                } else {
+                    let _ = app.emit_to(&label, "overlay-ready", ());
+                }
+            }
+        }
+    });
+    // 多余浮层（tao 枚举数 > 实际采集数，如显示器热插拔、镜像/虚拟显示器）：
+    // 直接关掉。否则它会盖在屏幕上、且 overlay_context 取不到对应数据，
+    // 表现为永远"截图采集超时"。
+    let extra: Vec<String> = app
+        .webview_windows()
+        .keys()
+        .filter(|l| l.starts_with(OVERLAY_PREFIX))
+        .filter(|l| {
+            l.strip_prefix(OVERLAY_PREFIX)
+                .and_then(|s| s.parse::<usize>().ok())
+                .map(|i| i >= monitors.len())
+                .unwrap_or(true)
+        })
+        .cloned()
+        .collect();
+    if !extra.is_empty() {
+        eprintln!(
+            "[snappin] closing {} extra overlay(s): {:?} (captured={})",
+            extra.len(),
+            extra,
+            monitors.len()
+        );
+        for label in extra {
+            if let Some(w) = app.get_webview_window(&label) {
+                let _ = w.close();
+            }
+        }
+    }
+    eprintln!("[snappin] showed {} overlay window(s)", monitors.len());
 }
 
 /// 关闭全部截图浮层。
@@ -123,11 +298,69 @@ pub fn close_overlays(app: &AppHandle) {
     }
 }
 
+/// 在主线程执行闭包并同步等待完成。
+///
+/// 用途：窗口类操作（hide/show/set_size/set_position/set_always_on_top）
+/// 在非主线程调用会失败（"PostMessage failed ... 无效的窗口句柄"）。
+pub fn run_on_main<F>(app: &AppHandle, f: F)
+where
+    F: FnOnce(&AppHandle) + Send + 'static,
+{
+    let (tx, rx) = mpsc::channel::<()>();
+    // 接收者与闭包必须是两个独立的 AppHandle：闭包 move 捕获 app_cb，
+    // 而方法调用借用的接收者不能是被 move 的那个绑定（否则 E0505：
+    // cannot move out of `app2` because it is borrowed）。
+    let app_recv = app.clone();
+    let app_cb = app.clone();
+    let _ = app_recv.run_on_main_thread(move || {
+        f(&app_cb);
+        let _ = tx.send(());
+    });
+    let _ = rx.recv_timeout(Duration::from_secs(2));
+}
+
+/// 在主线程执行闭包（**不等待结果**）。
+///
+/// 与 `run_on_main` 的区别：不阻塞调用方。因此可以在主线程自身调用
+/// （闭包会排在当前事件之后执行，不会自等待死锁）。
+pub fn post_to_main<F>(app: &AppHandle, f: F)
+where
+    F: FnOnce(&AppHandle) + Send + 'static,
+{
+    let app_cb = app.clone();
+    let _ = app.run_on_main_thread(move || f(&app_cb));
+}
+
+/// 在主线程设置指定窗口的置顶状态（同步等待）。
+/// 用于弹系统对话框前临时取消置顶，避免盖住对话框。
+pub fn set_window_topmost(app: &AppHandle, label: &str, topmost: bool) {
+    let label = label.to_string();
+    run_on_main(app, move |app| {
+        if let Some(w) = app.get_webview_window(&label) {
+            let _ = w.set_always_on_top(topmost);
+        }
+    });
+}
+
+/// 在主线程设置指定窗口的鼠标穿透状态（同步等待）。
+/// WS_EX_TRANSPARENT 需操作窗口句柄，与置顶同理必须在主线程执行。
+pub fn set_window_ignore_cursor_events(app: &AppHandle, label: &str, ignore: bool) {
+    let label = label.to_string();
+    run_on_main(app, move |app| {
+        if let Some(w) = app.get_webview_window(&label) {
+            let _ = w.set_ignore_cursor_events(ignore);
+        }
+    });
+}
+
 /// 创建贴图窗口（无边框置顶透明窗）。
 ///
-/// - `label`：窗口标签（同时作为 pins 状态表的 key）
-/// - `disp_w/h`：逻辑像素显示尺寸
-/// - `x/y`：逻辑像素位置
+/// 平台差异（重要）：
+/// - **Windows**：主线程同步建窗会死锁/白屏，调用方必须放到阻塞线程；
+///   这里就是直接的建窗逻辑。
+/// - **macOS**：NSWindow 只能在主线程创建，所以这里把建窗投递到主线程并
+///   同步等待结果；调用方在工作线程（async 命令）直接调用即可。
+#[cfg(target_os = "macos")]
 pub fn create_pin_window(
     app: &AppHandle,
     label: &str,
@@ -135,19 +368,55 @@ pub fn create_pin_window(
     disp_h: f64,
     x: f64,
     y: f64,
-) -> tauri::Result<()> {
+) -> Result<(), String> {
+    let (tx, rx) = mpsc::channel::<Result<(), String>>();
+    let app_cb = app.clone();
+    let label_cb = label.to_string();
+    let _ = app.run_on_main_thread(move || {
+        let _ = tx.send(build_pin_window(&app_cb, &label_cb, disp_w, disp_h, x, y));
+    });
+    rx.recv_timeout(Duration::from_secs(5))
+        .unwrap_or_else(|_| Err("create pin window: main thread timeout".to_string()))
+}
+
+/// 创建贴图窗口（Windows：由阻塞线程直接调用建窗）。
+#[cfg(not(target_os = "macos"))]
+pub fn create_pin_window(
+    app: &AppHandle,
+    label: &str,
+    disp_w: f64,
+    disp_h: f64,
+    x: f64,
+    y: f64,
+) -> Result<(), String> {
+    build_pin_window(app, label, disp_w, disp_h, x, y)
+}
+
+/// 真正的建窗逻辑（Windows 由阻塞线程调用，macOS 由主线程调用）。
+fn build_pin_window(
+    app: &AppHandle,
+    label: &str,
+    disp_w: f64,
+    disp_h: f64,
+    x: f64,
+    y: f64,
+) -> Result<(), String> {
+    let w = disp_w.max(8.0) + PIN_MARGIN * 2.0;
+    let h = disp_h.max(8.0) + PIN_MARGIN * 2.0;
     WebviewWindowBuilder::new(app, label, WebviewUrl::App("pin.html".into()))
         .title("SnapPin Pin")
-        .inner_size(disp_w.max(8.0), disp_h.max(8.0))
-        .position(x, y)
+        .inner_size(w, h)
+        .position(x - PIN_MARGIN, y - PIN_MARGIN)
         .decorations(false)
         .transparent(true)
         .always_on_top(true)
         .skip_taskbar(true)
         .resizable(false)
         .shadow(false)
-        .build()?;
-    Ok(())
+        .initialization_script(WEBVIEW_GUARD)
+        .build()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 /// 关闭指定贴图窗口。
@@ -155,6 +424,25 @@ pub fn close_pin(app: &AppHandle, label: &str) {
     if let Some(w) = app.get_webview_window(label) {
         let _ = w.close();
     }
+}
+
+/// 结束截图会话：关闭全部浮层 + 清空会话数据。
+///
+/// 取消（Esc/右键/取消按钮）与确认成功（复制/贴图/保存）后调用。
+/// 清空 `state.monitors` 后，各浮层的 `overlay_context` 轮询会得到
+/// ready=false，前端检测到 ready 由 true→false 即自关窗口——
+/// 即使 Rust 侧漏关某块浮层（如双显示器某块创建异常），
+/// 也不会残留"截图模式关不掉"的状态（前端轮询兜底，见 OverlayWindow）。
+pub fn end_capture_session(app: &AppHandle, state: &AppState, why: &str) {
+    let before = state.monitors.lock().unwrap().len();
+    let overlays = app
+        .webview_windows()
+        .keys()
+        .filter(|l| l.starts_with(OVERLAY_PREFIX))
+        .count();
+    eprintln!("[snappin] end session (why={why}, monitors={before}, overlays={overlays})");
+    close_overlays(app);
+    state.monitors.lock().unwrap().clear();
 }
 
 /// 计算主显示器上的居中位置（逻辑像素）。

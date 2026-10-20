@@ -1,0 +1,14 @@
+# 统一换行：仓库内存 LF，检出时按平台转换。
+# 注意：shell 脚本必须强制 LF —— 从 Windows 提交后若变成 CRLF，
+# macOS/Linux 上会报 "bad interpreter: /usr/bin/env bash^M"。
+* text=auto
+
+*.sh       text eol=lf
+*.command  text eol=lf
+
+# 二进制，不做换行转换（否则 git 可能误判/损坏）
+*.png      binary
+*.ico      binary
+*.icns     binary
+*.dmg      binary
+*.zip      binary

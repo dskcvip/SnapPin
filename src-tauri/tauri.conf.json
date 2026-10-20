@@ -10,6 +10,7 @@
     "beforeBuildCommand": "npm run build"
   },
   "app": {
+    "macOSPrivateApi": true,
     "security": {
       "csp": null,
       "assetProtocol": {
@@ -27,6 +28,10 @@
       "icons/128x128@2x.png",
       "icons/icon.ico",
       "icons/icon.icns"
-    ]
+    ],
+    "macOS": {
+      "minimumSystemVersion": "11.0",
+      "signingIdentity": "-"
+    }
   }
 }

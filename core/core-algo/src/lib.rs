@@ -11,6 +11,9 @@
 
 use std::fmt;
 
+pub mod draw;
+pub mod shapes;
+
 /// 算法层错误。零依赖，因此手写 `Display` / `Error`。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AlgoError {

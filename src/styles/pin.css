@@ -1,19 +1,25 @@
 .pin-root {
   position: fixed;
   inset: 0;
+  display: grid;
+  place-items: center;
   overflow: hidden;
-}
-
-.pin-img {
-  width: 100%;
-  height: 100%;
-  object-fit: fill;
-  -webkit-user-drag: none;
   cursor: grab;
 }
 
-.pin-img:active {
+.pin-root:active {
   cursor: grabbing;
+}
+
+.pin-img {
+  display: block;
+  border-radius: 2px;
+  /* 内边框（贴近参考观感）+ 淡橙色外阴影；
+     窗口比图片大一圈（Rust 侧 PIN_MARGIN），阴影才有空间显示 */
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.55),
+    0 0 14px 2px rgba(255, 150, 64, 0.3);
+  -webkit-user-drag: none;
 }
 
 .pin-toolbar {
@@ -37,6 +43,11 @@
   opacity: 1;
 }
 
+/* 穿透中：工具条彻底隐藏（系统已把窗口设为鼠标透明，留着也点不到） */
+.pin-root.pass-through .pin-toolbar {
+  display: none;
+}
+
 .pin-toolbar button {
   font-size: 12px;
   padding: 4px 8px;
@@ -49,9 +60,52 @@
   background: rgba(15, 23, 42, 0.12);
 }
 
+/* 激活态开关按钮（置顶开 / 锁定开） */
+.pin-toolbar button.active {
+  background: rgba(37, 99, 235, 0.16);
+  color: #1d4ed8;
+}
+
 .pin-toolbar button.danger:hover {
   background: rgba(220, 38, 38, 0.12);
   color: #b91c1c;
+}
+
+/* 锁定：虚线内边框提示"位置已锁定"，仍可点工具条解锁 */
+.pin-root.locked .pin-img {
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.55),
+    0 0 0 1px rgba(37, 99, 235, 0.85),
+    0 0 14px 2px rgba(255, 150, 64, 0.3);
+}
+
+.pin-root.locked {
+  cursor: default;
+}
+
+/* 鼠标穿透中：系统级提示（窗口本身不收事件，只能靠视觉告知用户） */
+.pin-root.pass-through .pin-img {
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.55),
+    0 0 0 1px rgba(56, 189, 248, 0.9),
+    0 0 14px 2px rgba(255, 150, 64, 0.3);
+}
+
+.pin-toast {
+  position: absolute;
+  left: 50%;
+  bottom: 10px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  font-size: 12px;
+  white-space: nowrap;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 999px;
+  box-shadow: var(--shadow-lg);
 }
 
 .pin-opacity {

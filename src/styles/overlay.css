@@ -13,6 +13,16 @@
   -webkit-user-drag: none;
 }
 
+/* 截图态、尚未拖拽时的整屏轻压暗。
+   冻结图与真实桌面像素一致，没有这层压暗用户无法判断"是否已进入截图"，
+   会误以为点击没生效（历史误报：截图采集失败）。 */
+.overlay-dim {
+  position: absolute;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.2);
+  pointer-events: none;
+}
+
 .overlay-loading,
 .overlay-error {
   position: fixed;
@@ -41,6 +51,232 @@
   left: 0;
   right: 0;
   height: 1px;
+}
+
+/* ===================== 顶部截图工具条（选中选区后出现） ===================== */
+/* 布局参考主流截图工具：绘制工具组 ｜ 颜色/线宽组 ｜ 操作组（撤销/保存/贴图/取消/完成） */
+
+/* ============ 顶部工具条（1:1 复刻参考图：48px 高 · 48px 节距） ============ */
+/* 参考图实测：面板 #fafafa、圆角 12、内边距 4、按钮 48×46、
+   分隔线 1×28 且左右各 8 留白（一组加宽 17px）、图标 22px / 描边 1.6 / #4c4c4c。 */
+.shot-bar {
+  position: fixed;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  box-sizing: border-box;
+  height: 48px;
+  padding: 0 4px;
+  background: #fafafa;
+  border: 1px solid rgba(15, 23, 42, 0.07);
+  border-radius: 12px;
+  box-shadow:
+    0 6px 24px rgba(15, 23, 42, 0.22),
+    0 1px 3px rgba(15, 23, 42, 0.1);
+  cursor: default;
+  z-index: 10;
+}
+
+.sb-group {
+  display: flex;
+  align-items: center;
+}
+
+.sb-divider {
+  flex: 0 0 auto;
+  width: 1px;
+  height: 28px;
+  margin: 0 8px;
+  background: #e2e2e2;
+}
+
+.sbtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  width: 48px;
+  height: 46px;
+  padding: 0;
+  color: #4c4c4c;
+  background: transparent;
+  border-radius: 9px;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease;
+}
+
+.sbtn:hover {
+  background: rgba(15, 23, 42, 0.055);
+}
+
+.sbtn:active {
+  background: rgba(15, 23, 42, 0.1);
+}
+
+.sbtn:disabled {
+  color: #aeaeae;
+  cursor: default;
+}
+
+.sbtn:disabled:hover {
+  background: transparent;
+}
+
+.sbtn.active {
+  color: #1f2937;
+  background: rgba(15, 23, 42, 0.085);
+}
+
+.sbtn.close {
+  color: #fa5151;
+}
+
+.sbtn.close:hover {
+  background: rgba(250, 81, 81, 0.12);
+}
+
+.sbtn.confirm {
+  color: #00c375;
+}
+
+.sbtn.confirm:hover {
+  background: rgba(0, 195, 117, 0.13);
+}
+
+/* 工具属性条：参考图不含此项，仅选中工具后出现 */
+.sb-props {
+  position: fixed;
+  top: 68px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  box-sizing: border-box;
+  height: 40px;
+  padding: 0 12px;
+  background: #fafafa;
+  border: 1px solid rgba(15, 23, 42, 0.07);
+  border-radius: 10px;
+  box-shadow:
+    0 6px 20px rgba(15, 23, 42, 0.18),
+    0 1px 3px rgba(15, 23, 42, 0.08);
+  cursor: default;
+  z-index: 10;
+}
+
+.sb-seg {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  background: rgba(15, 23, 42, 0.06);
+  border-radius: 7px;
+}
+
+.sb-seg button {
+  height: 24px;
+  padding: 0 10px;
+  font-size: 12px;
+  color: #4c4c4c;
+  border-radius: 5px;
+}
+
+.sb-seg button.on {
+  color: #1f2937;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.16);
+}
+
+.sb-colors {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.swatch {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1px solid rgba(15, 23, 42, 0.16);
+  transition: transform 0.1s ease;
+}
+
+.swatch:hover {
+  transform: scale(1.12);
+}
+
+.swatch.active {
+  box-shadow:
+    0 0 0 2px #fafafa,
+    0 0 0 3.5px #4c4c4c;
+}
+
+.sb-sep {
+  width: 1px;
+  height: 20px;
+  background: #e2e2e2;
+}
+
+.sb-width {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sb-width input {
+  width: 84px;
+  height: 16px;
+  accent-color: #4c4c4c;
+}
+
+/* 未实现工具 / 报错的瞬时提示（定位在工具条下方，不参与工具条布局） */
+.sb-hint {
+  position: fixed;
+  top: 68px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 6px 12px;
+  font-size: 12px;
+  line-height: 1;
+  color: #fff;
+  background: rgba(15, 23, 42, 0.86);
+  border-radius: 6px;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 11;
+}
+
+.sb-hint.error {
+  color: #fff;
+  background: rgba(220, 38, 38, 0.92);
+}
+
+/* ===================== 标注层（覆盖冻结图的 Canvas） ===================== */
+
+.annotate-wrap {
+  position: absolute;
+  left: 0;
+  top: 0;
+  /* 盖在 .sel 的 9999px 蒙版阴影之上（.sel 无 z-index，此处 2 即胜出） */
+  z-index: 2;
+  pointer-events: none;
+}
+
+.annotate-canvas {
+  position: absolute;
+  left: 0;
+  top: 0;
+  pointer-events: auto;
+  cursor: crosshair;
+}
+
+/* 未选工具（选择态）：画布不拦截鼠标，允许在选区内重新框选 */
+.annotate-canvas.passthrough {
+  pointer-events: none;
+  cursor: default;
 }
 
 .sel {
@@ -118,6 +354,16 @@
   color: var(--text-dim);
   padding: 0 6px;
   font-variant-numeric: tabular-nums;
+}
+
+.toolbar-error {
+  font-size: 12px;
+  color: #dc2626;
+  padding: 0 6px;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .tbtn {

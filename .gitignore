@@ -19,3 +19,6 @@
 # 系统
 .DS_Store
 Thumbs.db
+
+# 分发给他人用的源码打包产物（体积大、可再生）
+/dist-macos

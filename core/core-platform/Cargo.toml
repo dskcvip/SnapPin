@@ -12,3 +12,4 @@ arboard = "3.7"
 image = { workspace = true }
 anyhow = { workspace = true }
 uuid = { workspace = true }
+chrono = "0.4"
