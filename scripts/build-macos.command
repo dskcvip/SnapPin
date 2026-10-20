@@ -6,9 +6,9 @@
 #   1) 双击本文件（Finder 里首次可能要右键 → 打开）
 #   2) 或在终端执行： bash scripts/build-macos.command
 #
-# 产物：
-#   src-tauri/target/<target>/release/bundle/dmg/SnapPin_0.1.0_<arch>.dmg
-#   src-tauri/target/<target>/release/bundle/macos/SnapPin.app
+# 产物（注意：这是 cargo workspace，target 在**仓库根**，不是 src-tauri/target）：
+#   target/<target>/release/bundle/dmg/SnapPin_0.1.0_<arch>.dmg
+#   target/<target>/release/bundle/macos/SnapPin.app
 #
 # 可选环境变量：
 #   TARGET=aarch64-apple-darwin   只出 Apple Silicon（默认打通用包，最慢但哪儿都能跑）
@@ -76,8 +76,8 @@ echo
 echo "→ 打包 .app / .dmg（首次编译约 5~15 分钟）"
 npx tauri build --target "$TARGET" --features custom-protocol
 
-DMG_DIR="$ROOT/src-tauri/target/$TARGET/release/bundle/dmg"
-APP_DIR="$ROOT/src-tauri/target/$TARGET/release/bundle/macos"
+DMG_DIR="$ROOT/target/$TARGET/release/bundle/dmg"
+APP_DIR="$ROOT/target/$TARGET/release/bundle/macos"
 
 echo
 echo "=============================================="
@@ -98,4 +98,4 @@ echo "    或右键 App → 打开"
 echo " 3. 快捷键是 Control+1 / Control+2（不是 Command）"
 echo
 
-open "src-tauri/target/$TARGET/release/bundle/dmg" 2>/dev/null || true
+open "$DMG_DIR" 2>/dev/null || true

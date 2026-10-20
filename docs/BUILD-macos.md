@@ -70,15 +70,19 @@ TARGET=x86_64-apple-darwin   bash scripts/build-macos.command   # Intel
 产物路径**相对于项目根目录**（即你解压出来的 `SnapPin/` 目录）：
 
 ```
-src-tauri/target/universal-apple-darwin/release/bundle/dmg/SnapPin_0.1.0_universal.dmg
-src-tauri/target/universal-apple-darwin/release/bundle/macos/SnapPin.app
+target/universal-apple-darwin/release/bundle/dmg/SnapPin_0.1.0_universal.dmg
+target/universal-apple-darwin/release/bundle/macos/SnapPin.app
 ```
+
+> 📌 这里没有 `src-tauri/` 前缀 —— 本项目是 **cargo workspace**（根 `Cargo.toml`
+> 里有 `[workspace]`），cargo 把 `target/` 放在**仓库根**，不是 `src-tauri/target/`。
+> 按 `src-tauri/target/...` 找会扑空。
 
 换成**完整绝对路径**（把 `<用户名>` 换成你的 macOS 用户名，`~/SnapPin` 换成你实际解压的位置）：
 
 ```
-/Users/<用户名>/SnapPin/src-tauri/target/universal-apple-darwin/release/bundle/dmg/SnapPin_0.1.0_universal.dmg
-/Users/<用户名>/SnapPin/src-tauri/target/universal-apple-darwin/release/bundle/macos/SnapPin.app
+/Users/<用户名>/SnapPin/target/universal-apple-darwin/release/bundle/dmg/SnapPin_0.1.0_universal.dmg
+/Users/<用户名>/SnapPin/target/universal-apple-darwin/release/bundle/macos/SnapPin.app
 ```
 
 构建脚本跑完会直接把 dmg 的**完整路径**打出来，并自动在 Finder 里打开该目录。
@@ -86,7 +90,7 @@ src-tauri/target/universal-apple-darwin/release/bundle/macos/SnapPin.app
 
 ```bash
 # 在项目根目录执行，直接给出绝对路径
-ls -1 "$PWD"/src-tauri/target/*/release/bundle/dmg/*.dmg
+ls -1 "$PWD"/target/*/release/bundle/dmg/*.dmg
 
 # 或者全盘找（慢一点，但不会错）
 find ~ -name "SnapPin_*.dmg" 2>/dev/null

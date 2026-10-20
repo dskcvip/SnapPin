@@ -74,18 +74,19 @@ jobs:
           esac
           npx tauri build --target "$TARGET" --features custom-protocol
           echo "=== 产物 ==="
-          ls -1 "src-tauri/target/$TARGET/release/bundle/dmg/"*.dmg
+          # 注意：cargo workspace 的 target 在**仓库根**，不是 src-tauri/target
+          ls -1 "target/$TARGET/release/bundle/dmg/"*.dmg
 
       - name: 上传 dmg
         uses: actions/upload-artifact@v4
         with:
           name: snappin-macos-dmg
           if-no-files-found: error
-          path: src-tauri/target/*/release/bundle/dmg/*.dmg
+          path: target/*/release/bundle/dmg/*.dmg
 
       - name: 上传 app（免安装版）
         uses: actions/upload-artifact@v4
         with:
           name: snappin-macos-app
           if-no-files-found: warn
-          path: src-tauri/target/*/release/bundle/macos/*.app
+          path: target/*/release/bundle/macos/*.app
