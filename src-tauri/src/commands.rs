@@ -465,10 +465,8 @@ fn mac_capture_gate(app: &AppHandle) -> Result<(), String> {
             ))
             .show(|open_settings| {
                 if open_settings {
-                    // 直达「隐私与安全性 → 屏幕录制」面板
-                    let _ = std::process::Command::new("open")
-                        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
-                        .spawn();
+                    // 直达「隐私与安全性 → 屏幕录制」面板（常量与托盘菜单共用）
+                    crate::open_external(crate::SCREEN_RECORDING_SETTINGS_URL);
                 }
             });
     }

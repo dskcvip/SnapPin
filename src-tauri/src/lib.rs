@@ -293,7 +293,8 @@ fn setup_tray(
         format!("SnapPin — {}", tips.join("；"))
     };
 
-    let tray = TrayIconBuilder::new()
+    #[allow(unused_mut)]
+    let mut builder = TrayIconBuilder::new()
         .icon(tauri::include_image!("icons/32x32.png"))
         .tooltip(tooltip)
         // 点击（左键或右键）抬起时弹自绘菜单。
@@ -319,12 +320,52 @@ fn setup_tray(
                 crate::logln!("tray double-click: {button:?}")
             }
             _ => {}
-        })
-        .build(app)?;
+        });
+
+    // macOS 兜底：**右键**走系统原生 NSMenu，左键仍然弹自绘菜单
+    // （`show_menu_on_left_click(false)` 把左键让给上面的点击事件）。
+    //
+    // 为什么必须留这条路：本应用是 Accessory（无 Dock 图标、无 ⌘Q），自绘菜单一旦
+    // 建不出来（WKWebView 建窗失败、主线程投递超时……），用户就**没有任何退出入口**，
+    // 只能去命令行 kill —— 曾经真实发生过（见 docs/BUILD-macos.md 的"无法退出"条目）。
+    // 原生菜单由系统自己画，不依赖我们的 webview / 主线程 / 前端，因此永远点得动。
+    #[cfg(target_os = "macos")]
+    {
+        let menu = mac_native_tray_menu(app)?;
+        // 菜单须与应用同生命周期：与托盘句柄一样故意泄漏
+        let menu: &'static tauri::menu::Menu<tauri::Wry> = Box::leak(Box::new(menu));
+        builder = builder.menu(menu).show_menu_on_left_click(false);
+    }
+
+    let tray = builder.build(app)?;
 
     // 托盘图标须与应用同生命周期：故意泄漏句柄，避免 drop 后图标消失
     std::mem::forget(tray);
     Ok(())
+}
+
+/// macOS 右键兜底菜单（系统原生绘制）。
+///
+/// 只放**不可缺失**的动作：截图、贴图、退出、排障入口。视觉上不与自绘菜单
+/// 保持一致是刻意的取舍——这一份的职责是"永远能用"，不是"好看"。
+#[cfg(target_os = "macos")]
+fn mac_native_tray_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+
+    let capture = MenuItem::with_id(app, "capture", "截图", true, None::<&str>)?;
+    let pin = MenuItem::with_id(app, "pin-clipboard", "剪贴板贴图", true, None::<&str>)?;
+    let ball = MenuItem::with_id(app, "toggle-ball", "显示 / 隐藏悬浮球", true, None::<&str>)?;
+    let perm = MenuItem::with_id(app, "open-perm", "屏幕录制权限…", true, None::<&str>)?;
+    let log = MenuItem::with_id(app, "open-log", "打开运行日志", true, None::<&str>)?;
+    let about = MenuItem::with_id(app, "about", "关于 SnapPin", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "退出 SnapPin", true, None::<&str>)?;
+    let s1 = PredefinedMenuItem::separator(app)?;
+    let s2 = PredefinedMenuItem::separator(app)?;
+
+    Menu::with_items(
+        app,
+        &[&capture, &pin, &ball, &perm, &s1, &log, &about, &s2, &quit],
+    )
 }
 
 /// 菜单动作分发（单一事实来源）。
@@ -345,6 +386,8 @@ pub(crate) fn handle_menu_event(app: &AppHandle, id: &str) {
         "about" => open_external(ABOUT_URL),
         // 排障入口：直接打开落盘日志（release 无控制台，这是唯一的现场）
         "open-log" => open_external(&logfile::log_path().to_string_lossy()),
+        // 换包后授权失效时，用户唯一的自助恢复入口（macOS）
+        "open-perm" => open_external(SCREEN_RECORDING_SETTINGS_URL),
         "quit" => app.exit(0),
         _ => {}
     }
@@ -352,6 +395,10 @@ pub(crate) fn handle_menu_event(app: &AppHandle, id: &str) {
 
 /// "关于..." 跳转的项目仓库地址。
 pub const ABOUT_URL: &str = "https://gitee.com/dskcvip/snappin";
+
+/// macOS「隐私与安全性 → 屏幕录制」面板的深链（`open` 可直接识别）。
+pub const SCREEN_RECORDING_SETTINGS_URL: &str =
+    "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture";
 
 /// 用系统默认浏览器打开外部链接。
 ///

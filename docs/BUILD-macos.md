@@ -171,12 +171,49 @@ macOS 会启用路径随机化（App Translocation），每次启动路径都不
 
 要正式分发再考虑 Developer ID 签名 + notarytool 公证（需要 Apple 开发者账号）。
 
+## 四·五、退出与卸载（0.1.1 及更早版本的"卡死"现场）
+
+**症状**：菜单栏图标点不动 → 界面上没有任何地方能退出；Finder 里把 App 拖进废纸篓
+提示"正在使用"；装新 dmg 时提示"无法替换，因为正在使用"。
+
+**根因**：本应用是 `Accessory`（不占 Dock），所以既没有 Dock 图标右键菜单，
+也没有 ⌘Q（没有 app menu）。托盘菜单是唯一出口。0.1.0/0.1.1 换成自绘菜单后，
+macOS 上建 webview 窗口必须在主线程而当时没投递 → 菜单建不出来 → 出口全灭。
+（0.1.2 起：修了主线程建窗，并且**右键改成系统原生菜单**做兜底，见第五节。）
+
+**旧版本卡住时怎么退**（任选其一）：
+
+```bash
+pkill -x SnapPin            # 0.1.1 起可执行文件叫 SnapPin
+pkill -x snappin            # 0.1.0 及更早叫 snappin
+pkill -f 'SnapPin|snappin'  # 不确定哪个名字时用这条（宽松匹配）
+```
+
+图形界面替代：`⌥⌘⎋`（Option+Command+Esc）强制退出窗口里选中 SnapPin → 强制退出；
+或「活动监视器」搜 SnapPin → ⑧ 退出。
+
+**卸载**（先退出进程，再删）：
+
+```bash
+pkill -f 'SnapPin|snappin'
+rm -rf /Applications/SnapPin.app
+rm -rf ~/Library/Application\ Support/com.snappin.dev   # 配置 + 日志 + 模型缓存
+rm -rf ~/Library/Caches/com.snappin.dev
+rm -rf ~/Library/WebKit/com.snappin.dev
+tccutil reset ScreenCapture com.snappin.dev              # 清掉屏幕录制授权记录
+```
+
+**为什么删不掉**：`/Applications` 的 App 被运行中的进程占用时 Finder 会拒绝移动；
+另外如果当初是**直接从挂载的 dmg 里双击运行**，那个磁盘映像因为"正在使用"也无法推出
+（`hdiutil detach /Volumes/SnapPin` 或磁盘工具推出）。先 kill 进程再操作即可。
+
 ## 五、macOS 端已做的适配
 
 | 项 | 处理 |
 |---|---|
 | 透明窗口 | `tauri.conf.json` 开 `macOSPrivateApi: true` + Cargo `macos-private-api` feature（缺一会启动即报配置不一致） |
 | 不占 Dock | `set_activation_policy(Accessory)`，只在菜单栏留图标 |
+| 退出兜底 | 菜单栏图标**右键 = 系统原生 NSMenu**（左键仍是自绘菜单，`show_menu_on_left_click(false)`）。原生菜单不依赖 webview / 前端 / 主线程投递，任何情况下都能「退出 SnapPin」，避免再次出现"没有出口只能 kill" |
 | 屏幕录制权限 | 启动时 preflight + request；**每次截图前再 preflight**，未授权中止截图并弹原生提示（含直达系统设置按钮）+ 托盘 tooltip 告警；成功与否都记日志 |
 | 建窗线程 | macOS 要求 NSWindow 在主线程建：浮层预创建、贴图窗口都改成投递主线程并同步等待；Windows 保持原有的工作线程建窗（主线程会死锁） |
 | 显示器原点单位 | xcap 在 macOS 返回的是**点**、Windows 是**物理像素**，新增 `MonitorShot::logical_origin()` 统一成逻辑像素，避免 Retina 副屏位置算成 1/2 |
