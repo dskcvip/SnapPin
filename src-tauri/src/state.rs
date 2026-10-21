@@ -155,9 +155,39 @@ pub struct AppState {    /// 当前配置（磁盘 config.json 的内存镜像�
     pub menu_anchor: Mutex<Option<MenuAnchor>>,
     /// 贴图界面开关快照（label → flags）。贴图右键菜单据此画勾。
     pub pin_flags: Mutex<HashMap<String, PinFlags>>,
+    /// 当前生效的全局快捷键（截图, 剪贴板贴图）。
+    ///
+    /// 热键处理器与设置窗共用这一份事实来源：用户在设置里改键后
+    /// `update_config` 会同步更新它，处理器据此比对，改键即时生效。
+    pub hotkeys: Mutex<(tauri_plugin_global_shortcut::Shortcut, tauri_plugin_global_shortcut::Shortcut)>,
     /// 注册失败的内置快捷键名（空 = 全部成功）。
     /// 自绘菜单据此在顶部显示一条告警——热键注册失败时用户唯一的可见线索。
     pub shortcut_failed: Mutex<Vec<String>>,
+    /// OCR 结果窗内容（最近一次识别）。窗口是单例，前端挂载/再次打开时
+    /// 用 `ocr_result` 取；重复识别走 `ocr-open` 事件通知已存在的窗口重取。
+    pub ocr_result: Mutex<Vec<crate::commands::OcrLinePayload>>,
+    /// 翻译窗状态（原文 / 译文 / 错误 / 进行中）。
+    /// 翻译是秒级网络操作，放阻塞线程里跑，结果写这里 + 发 `trans-update`
+    /// 事件，前端据此渲染，不轮询。
+    pub trans: Mutex<TransState>,
+}
+
+/// 翻译窗的完整状态（前端 `trans_state` 的返回体 + `trans-update` 事件载荷）。
+#[derive(Debug, Clone, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransState {
+    /// 原文（用户点「翻译」时的 OCR 全文）
+    pub original: String,
+    /// 译文（成功后有值）
+    pub translated: String,
+    /// 失败原因（中文可操作文案；空 = 没出错）
+    pub error: String,
+    /// 是否正在翻译
+    pub busy: bool,
+    /// 目标语言（来自配置，窗内标题展示用）
+    pub target_lang: String,
+    /// 产出本次译文的模型名（空 = 还没翻译）
+    pub model_name: String,
 }
 
 impl AppState {
@@ -175,7 +205,13 @@ impl AppState {
             long_active: AtomicBool::new(false),
             menu_anchor: Mutex::new(None),
             pin_flags: Mutex::new(HashMap::new()),
+            hotkeys: Mutex::new((
+                crate::default_capture_shortcut(),
+                crate::default_pin_shortcut(),
+            )),
             shortcut_failed: Mutex::new(Vec::new()),
+            ocr_result: Mutex::new(Vec::new()),
+            trans: Mutex::new(TransState::default()),
         }
     }
 }

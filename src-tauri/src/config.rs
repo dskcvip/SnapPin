@@ -18,6 +18,9 @@ pub struct AppConfig {
     pub shortcut_capture: String,
     pub shortcut_pin_clipboard: String,
     pub save_dir: Option<String>,
+    /// 翻译配置（在线 API，OpenAI 兼容协议）。Key 由用户自己填，
+    /// 只落本地 config.json，不进安装包、不进 git。
+    pub translation: snappin_core_platform::translate::TranslateConfig,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -37,6 +40,7 @@ impl Default for AppConfig {
             shortcut_capture: "Ctrl+1".to_string(),
             shortcut_pin_clipboard: "Ctrl+2".to_string(),
             save_dir: None,
+            translation: Default::default(),
         }
     }
 }

@@ -90,6 +90,44 @@ export interface AppConfig {
   shortcutCapture: string
   shortcutPinClipboard: string
   saveDir: string | null
+  /** 翻译配置（在线 API，OpenAI 兼容协议；Key 由用户自填，只存本地） */
+  translation: TranslationConfig
+}
+
+/** 一个自定义模型（与 Rust `TranslateModel` 对应）。 */
+export interface TranslateModel {
+  id: string
+  /** 显示名 */
+  name: string
+  /** 副标题（如 "深度搜索"） */
+  note: string
+  /** 端点根地址，不带 /chat/completions */
+  baseUrl: string
+  /** API Key；空 = 未配置（点翻译会引导来设置窗） */
+  apiKey: string
+  /** 模型 ID */
+  model: string
+  /** 「获取 Key」的网页 */
+  keyUrl: string
+}
+
+/** 翻译配置（与 Rust `TranslateConfig` 对应）。models 第一个 = 当前启用。 */
+export interface TranslationConfig {
+  models: TranslateModel[]
+  /** 目标语言，如 "英文" / "日文" */
+  targetLang: string
+}
+
+/** 翻译窗状态（trans_state 返回 + trans-update 事件载荷）。 */
+export interface TransState {
+  original: string
+  translated: string
+  /** 失败原因（中文可操作文案；空 = 没出错） */
+  error: string
+  busy: boolean
+  targetLang: string
+  /** 产出本次译文的模型名（空 = 还没翻译） */
+  modelName: string
 }
 
 export interface AppInfo {
@@ -370,3 +408,53 @@ export const updateConfig = (config: AppConfig): Promise<AppConfig> =>
   invoke('update_config', { config })
 
 export const appInfo = (): Promise<AppInfo> => invoke('app_info')
+
+// ---------- OCR 结果窗（独立窗口：可选中 / 可复制 / 可翻译） ----------
+
+/**
+ * 打开 OCR 结果窗（识别成功后调用）。行数据先存 Rust 侧，窗口通过
+ * `ocr-open` 事件刷新，因此重复识别时已开着的窗口内容会跟着更新。
+ */
+export const ocrShow = (lines: OcrLine[]): Promise<void> =>
+  invoke('ocr_show', { lines })
+
+/** OCR 结果窗内容（挂载时 / 收到 ocr-open 时调用）。 */
+export const ocrResult = (): Promise<OcrLine[]> => invoke('ocr_result')
+
+/** 关闭 OCR 结果窗。 */
+export const ocrClose = (): Promise<void> => invoke('ocr_close')
+
+/** OCR 结果窗打开/刷新事件（Rust `emit("ocr-open")`）。 */
+export const onOcrOpen = (cb: () => void): Promise<UnlistenFn> =>
+  listen('ocr-open', () => cb())
+
+// ---------- 翻译窗（左原文右译文） ----------
+
+/**
+ * 开始翻译并打开翻译窗。
+ *
+ * 同步返回：窗口立刻显示"翻译中"，译文通过 `trans-update` 事件推过来，
+ * 不阻塞调用方（网络请求在 Rust 阻塞线程里跑）。
+ */
+export const transStart = (text: string): Promise<void> =>
+  invoke('trans_start', { text })
+
+/** 测试某个模型的连通性（设置窗「模型」页用）。 */
+export const transTest = (id: string): Promise<void> =>
+  invoke('trans_test', { id })
+
+/** 翻译窗当前状态（挂载时拉一次）。 */
+export const transState = (): Promise<TransState> => invoke('trans_state')
+
+/** 关闭翻译窗（状态保留，下次打开接着看）。 */
+export const transClose = (): Promise<void> => invoke('trans_close')
+
+/** 翻译进度/结果事件（Rust `emit("trans-update", TransState)`）。 */
+export const onTransUpdate = (cb: (s: TransState) => void): Promise<UnlistenFn> =>
+  listen<TransState>('trans-update', (e) => cb(e.payload))
+
+// ---------- 设置窗 ----------
+
+/** 打开设置窗（单例；翻译未配 Key 时的"去设置"入口）。 */
+export const openSettingsWindow = (): Promise<void> =>
+  invoke('open_settings_window')

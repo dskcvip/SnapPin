@@ -3,6 +3,8 @@ import { OverlayWindow } from './windows/OverlayWindow'
 import { PinWindow } from './windows/PinWindow'
 import { MainWindow } from './windows/MainWindow'
 import { MenuWindow } from './windows/MenuWindow'
+import { OcrWindow } from './windows/OcrWindow'
+import { TranslationWindow } from './windows/TranslationWindow'
 import { getWindowKind } from './lib/windowKind'
 
 /**
@@ -23,6 +25,10 @@ export function App() {
       return <PinWindow />
     case 'menu':
       return <MenuWindow />
+    case 'ocr':
+      return <OcrWindow />
+    case 'trans':
+      return <TranslationWindow />
     default:
       return <MainWindow />
   }

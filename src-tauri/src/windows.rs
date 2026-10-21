@@ -12,6 +12,12 @@ use crate::state::AppState;
 pub const BALL_LABEL: &str = "ball";
 pub const OVERLAY_PREFIX: &str = "overlay-";
 pub const PIN_PREFIX: &str = "pin-";
+/// OCR 结果窗（单例：文字识别结果 + 翻译入口）
+pub const OCR_LABEL: &str = "ocr";
+/// 翻译窗（单例：左原文右译文）
+pub const TRANS_LABEL: &str = "trans";
+/// 设置 / 主窗（单例）
+pub const MAIN_LABEL: &str = "main";
 
 /// 注入到所有 webview 的守卫脚本（document-start，早于页面脚本执行）。
 ///
@@ -570,5 +576,100 @@ pub fn place_centered_on_primary(app: &AppHandle, w: f64, h: f64) -> (f64, f64) 
         )
     } else {
         (120.0, 120.0)
+    }
+}
+
+// ---------------------------------------------------------------- 文档型窗口
+// （OCR 结果 / 翻译 / 设置：要选文字、要滚动、要原生标题栏，因此是普通窗口，
+//   不是贴图那种无框透明窗）
+
+/// 建「文档型」单例窗口（已存在则直接复用）。
+///
+/// macOS 的 `WebviewWindowBuilder::build()` 必须在主线程执行，与贴图窗同一套
+/// 处理：`build_doc_window` 只负责真正的建窗逻辑，由平台包装函数决定投递。
+fn build_doc_window(
+    app: &AppHandle,
+    label: &str,
+    title: &str,
+    w: f64,
+    h: f64,
+) -> Result<(), String> {
+    if app.get_webview_window(label).is_some() {
+        return Ok(());
+    }
+    let (x, y) = place_centered_on_primary(app, w, h);
+    WebviewWindowBuilder::new(app, label, WebviewUrl::App(format!("{label}.html").into()))
+        .title(title)
+        .inner_size(w, h)
+        .position(x, y)
+        .min_inner_size(360.0, 320.0)
+        .initialization_script(WEBVIEW_GUARD)
+        .build()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// macOS：建窗投递主线程并同步等待（与 create_pin_window 同模式）。
+#[cfg(target_os = "macos")]
+fn ensure_doc_window(
+    app: &AppHandle,
+    label: &str,
+    title: &str,
+    w: f64,
+    h: f64,
+) -> Result<(), String> {
+    let (tx, rx) = mpsc::channel::<Result<(), String>>();
+    let app_cb = app.clone();
+    let label_cb = label.to_string();
+    let title_cb = title.to_string();
+    let _ = app.run_on_main_thread(move || {
+        let _ = tx.send(build_doc_window(&app_cb, &label_cb, &title_cb, w, h));
+    });
+    rx.recv_timeout(Duration::from_secs(5))
+        .unwrap_or_else(|_| Err("doc window: main thread timeout".to_string()))
+}
+
+/// Windows：工作线程直接建窗（主线程同步建窗会死锁，见 create_pin_window）。
+#[cfg(not(target_os = "macos"))]
+fn ensure_doc_window(
+    app: &AppHandle,
+    label: &str,
+    title: &str,
+    w: f64,
+    h: f64,
+) -> Result<(), String> {
+    build_doc_window(app, label, title, w, h)
+}
+
+/// 显示（必要时创建）一个文档型窗口并前置。
+fn show_doc_window(app: &AppHandle, label: &str, title: &str, w: f64, h: f64) -> Result<(), String> {
+    ensure_doc_window(app, label, title, w, h)?;
+    if let Some(win) = app.get_webview_window(label) {
+        let _ = win.show();
+        let _ = win.unminimize();
+        let _ = win.set_focus();
+    }
+    Ok(())
+}
+
+/// OCR 结果窗（单例）。
+pub fn show_ocr_window(app: &AppHandle) -> Result<(), String> {
+    show_doc_window(app, OCR_LABEL, "SnapPin 文字识别", 560.0, 680.0)
+}
+
+/// 翻译窗（单例）。
+pub fn show_trans_window(app: &AppHandle) -> Result<(), String> {
+    show_doc_window(app, TRANS_LABEL, "SnapPin 翻译", 820.0, 600.0)
+}
+
+/// 设置 / 主窗（单例）。
+pub fn show_main_window(app: &AppHandle) -> Result<(), String> {
+    show_doc_window(app, MAIN_LABEL, "SnapPin 设置", 460.0, 620.0)
+}
+
+/// 关闭文档型窗口（内容仍留在 state 里，下次打开重取）。
+pub fn close_doc_window(app: &AppHandle, label: &str) {
+    if let Some(w) = app.get_webview_window(label) {
+        let _ = w.close();
     }
 }

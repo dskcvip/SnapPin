@@ -6,10 +6,14 @@
 //!   功能权限）；其它平台返回 unsupported（前端降级为手动滚动模式）。
 //! - **稳态采集**：滚完后等待画面静止（连续两帧差 < 阈值）再交给拼接器，
 //!   避开平滑滚动动画的中间态。
-//! - **光标治愈**：GDI BitBlt 会把鼠标光标截进帧里（实测确认），而光标停在
-//!   选区中心会被拼进长图。对策：每次采集采两帧——光标在 P 采一帧、把光标
-//!   移开到 P+nudge 再采一帧——用后者的像素补前者光标所在的矩形区域
-//!   （页面静止时两帧内容一致）。这是 GDI 采集下的标准做法。
+//! - **光标处理（v2，丝滑化改造）**：旧实现每采一帧要把光标瞬移到 A、采一帧、
+//!   再瞬移到 B 采一帧、用 B 补 A 的光标区域——**光标在两个点之间每 100ms 跳一次，
+//!   用户看到的就是"屏幕不停闪"**，而且每轮两次全屏 BitBlt 本身也会让画面抖。
+//!   现在改为：会话开始时**隐藏系统光标**（Windows `ShowCursor(FALSE)`，
+//!   macOS `CGDisplayHideCursor`，都不需要额外权限）并一次性把光标送到滚动点，
+//!   之后每轮只做**一次选区采集**（`capture_region`，不再整屏 BitBlt + crop）。
+//!   光标隐藏期间用户看不到光标，也就没有瞬移的观感；会话结束（Drop）必然恢复。
+//!   隐藏失败（罕见）才回退到旧的双帧治愈逻辑，见 `grab_frame`。
 //! - **overlay 排除**：Windows 用 `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)`
 //!   把浮层排除出 BitBlt 采集（实测确认有效，见 scripts/test_wda_cursor.ps1）；
 //!   macOS 无对应 API，改为每次 grab 前后隐藏/显示浮层窗口（由调用方通过
@@ -40,9 +44,10 @@ const CURSOR_HEAL_HALF: u32 = 22;
 /// 稳态判定：连续两帧平均差 < 2.0（灰度域）认为画面已静止。
 const STABLE_DIFF: f32 = 2.0;
 /// 单步稳态等待上限（平滑滚动动画最长约 500ms，留一倍余量）。
-const MAX_SETTLE_MS: u64 = 1200;
-/// 稳态轮询间隔。
-const SETTLE_POLL_MS: u64 = 100;
+const MAX_SETTLE_MS: u64 = 800;
+/// 稳态轮询间隔。100ms 时"已静止"要白等一轮才被发现，观感就是一步一卡；
+/// 50ms 让等待随动画结束立即收尾，长截图节奏更跟手。
+const SETTLE_POLL_MS: u64 = 50;
 
 /// 采集前后的 UI 隐藏回调（macOS 用；Windows 传 None）。
 pub type UiCallback = Box<dyn Fn() + Send + 'static>;
@@ -71,6 +76,9 @@ pub struct LongCapture {
     show_ui: Option<UiCallback>,
     /// 外部停止标志（用户按 Esc 时置位；None = 不可中断，测试用）
     stop: Option<Arc<AtomicBool>>,
+    /// 会话期间系统光标是否被本会话隐藏（决定采集走单帧还是双帧治愈，
+    /// 以及 Drop 时要不要恢复显示）。
+    cursor_hidden: bool,
 }
 
 impl LongCapture {
@@ -100,15 +108,46 @@ impl LongCapture {
             (my as f64 + rect.y as f64 + rect.h as f64 / 2.0).round() as i32,
         );
 
-        // 第一帧：当前选区内容（此时用户刚框选完，页面静止）
-        let first = grab_cursorless(monitor.get(), &rect, scroll_point, &hide_ui, &show_ui)?;
+        // 第一帧：当前选区内容（此时用户刚框选完，页面静止）。
+        //
+        // 光标策略：先隐藏系统光标，再把光标一次性送到滚动点——隐藏状态下
+        // 这次移动用户看不见，也不会被采进帧里。之后整个会话不再动光标，
+        // 滚动事件照样能落到光标所在窗口（滚动点）。
+        let cursor_hidden = hide_cursor();
+        set_cursor_pos(scroll_point.0, scroll_point.1);
+        let first = match if cursor_hidden {
+            grab_once(monitor.get(), &rect, &hide_ui, &show_ui)
+        } else {
+            // 隐藏失败（极少数平台/远程桌面）：退回双帧治愈，保证图里不进光标
+            grab_with_heal(monitor.get(), &rect, scroll_point, &hide_ui, &show_ui)
+        } {
+            Ok(f) => f,
+            Err(e) => {
+                // 建会话失败也必须把光标还回去，否则用户看到的是"没有鼠标箭头"
+                if cursor_hidden {
+                    show_cursor();
+                }
+                return Err(e);
+            }
+        };
         if first.width != rect.w || first.height != rect.h {
+            if cursor_hidden {
+                show_cursor();
+            }
             return Err(format!(
                 "selection {}x{} outside monitor bounds (got {}x{})",
                 rect.w, rect.h, first.width, first.height
             ));
         }
-        let stitcher = Stitcher::new(&first, opts).map_err(|e| e.to_string())?;
+        let stitcher = match Stitcher::new(&first, opts) {
+            Ok(s) => s,
+            Err(e) => {
+                if cursor_hidden {
+                    show_cursor();
+                }
+                return Err(e.to_string());
+            }
+        };
         Ok(Self {
             monitor,
             rect,
@@ -118,6 +157,7 @@ impl LongCapture {
             hide_ui,
             show_ui,
             stop,
+            cursor_hidden,
         })
     }
 
@@ -147,8 +187,20 @@ impl LongCapture {
     }
 
     /// 结束会话，取出最终长图。
+    ///
+    /// 因为 `LongCapture` 实现了 `Drop`（恢复光标），不能直接按字段 move，
+    /// 这里用 `ManuallyDrop` 阻止自动 drop、由本函数显式完成"恢复光标"，
+    /// 再把 `stitcher` 读出来（`ptr::read` 配合 ManuallyDrop 是标准做法：
+    /// 原值不会被二次 drop，`cursor_hidden` 是 Copy 类型无所谓）。
     pub fn into_canvas(self) -> RgbaBuffer {
-        self.stitcher.into_canvas()
+        let this = std::mem::ManuallyDrop::new(self);
+        if this.cursor_hidden {
+            show_cursor();
+        }
+        // SAFETY: `this` 是 ManuallyDrop，函数返回后不会有 Drop 跑到 stitcher；
+        // 这里把 stitcher 的所有权读出来交给调用方，正好一次。
+        let stitcher = unsafe { std::ptr::read(&this.stitcher) };
+        stitcher.into_canvas()
     }
 
     /// 推进一步：滚动 → 等稳态 → 采集 → 拼接。
@@ -156,9 +208,10 @@ impl LongCapture {
     /// `lines` 覆盖默认格数（NoMatch 重试时调用方传 1 轻滚）。
     /// 等待稳态期间若 `stop` 被置位，返回 `StepOutcome::Stopped`（本步作废，
     /// 拼接器保持原状，调用方应结束会话并取 `into_canvas()`）。
+    ///
+    /// 光标在 `new()` 时已一次性送到滚动点并隐藏，本函数**不再碰光标**：
+    /// 旧实现每步 `SetCursorPos` 一次、每帧瞬移两次，是"屏幕不停闪"的主因。
     pub fn step(&mut self, lines: i32) -> Result<StepOutcome, String> {
-        // 光标必须先位于滚动点，滚轮才落得到目标窗口
-        set_cursor_pos(self.scroll_point.0, self.scroll_point.1);
         scroll_wheel(lines)?;
         let frame = match self.grab_stable()? {
             Some(f) => f,
@@ -202,19 +255,65 @@ impl LongCapture {
     }
 
     fn grab_cursorless(&self) -> Result<RgbaBuffer, String> {
-        grab_cursorless(
-            self.monitor.get(),
-            &self.rect,
-            self.scroll_point,
-            &self.hide_ui,
-            &self.show_ui,
-        )
+        if self.cursor_hidden {
+            // 光标已隐藏：单帧即可，无需治愈
+            grab_once(
+                self.monitor.get(),
+                &self.rect,
+                &self.hide_ui,
+                &self.show_ui,
+            )
+        } else {
+            grab_with_heal(
+                self.monitor.get(),
+                &self.rect,
+                self.scroll_point,
+                &self.hide_ui,
+                &self.show_ui,
+            )
+        }
     }
 }
 
-/// 采一帧选区（物理像素）；`hide_ui`/`show_ui` 在采集前后调用
-/// （macOS 隐藏浮层用，Windows 为 None）。
-fn grab_cursorless(
+/// 会话结束（正常取出 / 异常丢弃）时恢复系统光标。
+///
+/// 这是"光标隐藏"方案的保险：任何路径退出都必须让鼠标箭头回来，
+/// 否则用户会以为系统坏了。`into_canvas()` 消耗 self 前也会走到这里。
+impl Drop for LongCapture {
+    fn drop(&mut self) {
+        if self.cursor_hidden {
+            show_cursor();
+        }
+    }
+}
+
+/// 采一帧选区（物理像素）。光标已隐藏或已被治愈，直接采。
+fn grab_once(
+    monitor: &xcap::Monitor,
+    rect: &Rect,
+    hide_ui: &Option<UiCallback>,
+    show_ui: &Option<UiCallback>,
+) -> Result<RgbaBuffer, String> {
+    if let Some(f) = hide_ui {
+        f();
+    }
+    let result = (|| {
+        // 只采选区：xcap 0.9.8 的 capture_region 直接问系统要这块矩形，
+        // 比"整屏 BitBlt + crop"少一次全屏拷贝——既快，也少一次全屏读，
+        // 屏幕观感更稳（整屏采集在高分屏上本身就会让画面抖一下）。
+        monitor
+            .capture_region(rect.x.max(0) as u32, rect.y.max(0) as u32, rect.w, rect.h)
+            .map_err(|e| format!("capture failed: {e}"))
+            .and_then(|img| RgbaBuffer::new(img.width(), img.height(), img.into_raw()).map_err(|e| e.to_string()))
+    })();
+    if let Some(f) = show_ui {
+        f();
+    }
+    result
+}
+
+/// 采一帧选区，并用"移开光标再采一帧"治愈光标残影（光标隐藏失败时的兜底）。
+fn grab_with_heal(
     monitor: &xcap::Monitor,
     rect: &Rect,
     scroll_point: (i32, i32),
@@ -233,30 +332,6 @@ fn grab_cursorless(
     set_cursor_pos(px, py);
     heal_cursor_at(&mut a, &b, cx, cy, CURSOR_HEAL_HALF);
     Ok(a)
-}
-
-/// 单次采集（含 hide/show 包裹）。
-fn grab_once(
-    monitor: &xcap::Monitor,
-    rect: &Rect,
-    hide_ui: &Option<UiCallback>,
-    show_ui: &Option<UiCallback>,
-) -> Result<RgbaBuffer, String> {
-    if let Some(f) = hide_ui {
-        f();
-    }
-    let result = (|| {
-        let img = monitor
-            .capture_image()
-            .map_err(|e| format!("capture failed: {e}"))?;
-        let full =
-            RgbaBuffer::new(img.width(), img.height(), img.into_raw()).map_err(|e| e.to_string())?;
-        full.crop(rect).map_err(|e| e.to_string())
-    })();
-    if let Some(f) = show_ui {
-        f();
-    }
-    result
 }
 
 /// 把 `b` 的像素复制到 `a` 的 (cx, cy) 附近矩形（光标治愈）。
@@ -294,6 +369,76 @@ pub fn write_thumbnail(canvas: &RgbaBuffer, path: &Path) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------- 平台输入
+
+/// 隐藏系统光标（长截图会话期间调用）。
+///
+/// 目的不是"界面好看"，而是**采集层不再需要瞬移光标**：光标隐藏后
+/// - 采集帧里天然没有光标，不需要双帧治愈（每帧省一次全屏采集）；
+/// - 会话开始时把光标送到滚动点这一次移动用户看不见，不会觉得屏幕在闪。
+///
+/// Windows `ShowCursor` 是**按线程**的引用计数；本进程的长截图驱动跑在
+/// 阻塞线程里，调用与恢复都在同一线程，计数配平。macOS
+/// `CGDisplayHideCursor` 不需要任何权限。
+///
+/// 返回 false = 当前平台不支持（调用方回退到双帧治愈逻辑）。
+pub fn hide_cursor() -> bool {
+    #[cfg(windows)]
+    {
+        extern "system" {
+            fn ShowCursor(show: i32) -> i32;
+        }
+        // SAFETY: 纯值参数。一次 FALSE 即可把可见光标收起来
+        // （计数器 ≥1 时减到 0 即隐藏）。
+        unsafe {
+            ShowCursor(0) >= 0
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        extern "C" {
+            fn CGMainDisplayID() -> u32;
+            fn CGDisplayHideCursor(display: u32) -> i32;
+        }
+        // SAFETY: 纯值参数（display id）
+        unsafe {
+            CGDisplayHideCursor(CGMainDisplayID()) == 0
+        }
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        false
+    }
+}
+
+/// 恢复系统光标（会话结束 / 建会话失败时调用）。
+///
+/// 与 `hide_cursor` 成对出现；本函数在 `LongCapture::drop` 里被调用，
+/// 是"光标必须回来"的最终保险。
+pub fn show_cursor() {
+    #[cfg(windows)]
+    {
+        extern "system" {
+            fn ShowCursor(show: i32) -> i32;
+        }
+        // SAFETY: 纯值参数。内部计数从 -1 回到 0，光标重新可见。
+        unsafe {
+            ShowCursor(1);
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        extern "C" {
+            fn CGMainDisplayID() -> u32;
+            fn CGDisplayShowCursor(display: u32) -> i32;
+        }
+        // SAFETY: 纯值参数（display id）
+        unsafe {
+            CGDisplayShowCursor(CGMainDisplayID());
+        }
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {}
+}
 
 /// 移动光标（绝对坐标；系统会钳制到虚拟桌面内，见实测）。
 pub fn set_cursor_pos(x: i32, y: i32) {

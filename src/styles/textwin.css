@@ -1,0 +1,256 @@
+/* ==========================================================================
+   文本类窗口（OCR 结果窗 / 翻译窗）共用样式。
+   这两个窗口的第一职责是**让人选文字**：因此正文一律 user-select:text，
+   且不拦截 pointerdown（浏览器原生选区最好用，别自绘）。
+   ========================================================================== */
+
+.tw-root {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background: #fff;
+  font-size: 13px;
+  color: #1f2329;
+}
+
+/* ---------------- 顶栏 ---------------- */
+
+.tw-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex: none;
+  padding: 12px 16px;
+  border-bottom: 1px solid #eceef1;
+}
+
+.tw-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.tw-count {
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: #f0f1f3;
+  font-size: 11px;
+  font-weight: 400;
+  color: #6b7280;
+}
+
+.tw-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tw-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  padding: 0 11px;
+  border-radius: 7px;
+  background: #f0f1f3;
+  font-size: 12px;
+  color: #1f2329;
+  transition: background 0.12s ease;
+}
+
+.tw-btn:hover {
+  background: #e4e6ea;
+}
+
+.tw-btn.ghost {
+  background: transparent;
+  color: #6b7280;
+}
+
+.tw-btn.ghost:hover {
+  background: #f0f1f3;
+}
+
+.tw-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* ---------------- 正文 ---------------- */
+
+.tw-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 16px;
+}
+
+.tw-empty {
+  padding: 24px 0;
+  text-align: center;
+  font-size: 12px;
+  color: #9aa0ab;
+}
+
+.tw-error {
+  flex: none;
+  margin: 12px 16px 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #fdecec;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #c0392b;
+}
+
+.ocr-lines {
+  display: flex;
+  flex-direction: column;
+}
+
+.ocr-line {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 7px 8px;
+  border-radius: 8px;
+  transition: background 0.12s ease;
+}
+
+.ocr-line:hover {
+  background: #f7f8fa;
+}
+
+.ocr-idx {
+  flex: none;
+  width: 20px;
+  padding-top: 1px;
+  text-align: right;
+  font-size: 11px;
+  color: #b6bcc7;
+  font-variant-numeric: tabular-nums;
+  /* 序号不参与选择：用户框选整段时不会把行号一起选走 */
+  user-select: none;
+}
+
+.ocr-text {
+  flex: 1;
+  min-width: 0;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  word-break: break-word;
+  cursor: text;
+}
+
+.ocr-copy {
+  flex: none;
+  align-self: center;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  color: #9aa0ab;
+  opacity: 0;
+  transition:
+    opacity 0.12s ease,
+    background 0.12s ease;
+}
+
+.ocr-line:hover .ocr-copy {
+  opacity: 1;
+}
+
+.ocr-copy:hover {
+  background: #eceef1;
+  color: #1f2329;
+}
+
+/* ---------------- 翻译窗：左右分栏 ---------------- */
+
+.trans-root {
+  display: grid;
+  grid-template-rows: auto auto 1fr auto;
+}
+
+.trans-panes {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1px;
+  min-height: 0;
+  background: #eceef1;
+}
+
+.trans-pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: #fff;
+}
+
+.pane-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  padding: 9px 14px;
+  font-size: 12px
+  ;
+  color: #8a919f;
+  border-bottom: 1px solid #f0f1f3;
+}
+
+.pane-btn {
+  margin-left: auto;
+  padding: 2px 9px;
+  border-radius: 6px;
+  font-size: 11px;
+  color: #6b7280;
+}
+
+.pane-btn:hover {
+  background: #f0f1f3;
+  color: #1f2329;
+}
+
+.pane-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.pane-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 14px;
+  line-height: 1.75;
+  white-space: pre-wrap;
+  word-break: break-word;
+  cursor: text;
+}
+
+.pane-spinner {
+  width: 11px;
+  height: 11px;
+  border: 2px solid #d7dbe1;
+  border-top-color: #1f2329;
+  border-radius: 50%;
+  animation: tw-spin 0.7s linear infinite;
+}
+
+@keyframes tw-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ---------------- 底栏 ---------------- */
+
+.tw-foot {
+  flex: none;
+  padding: 9px 16px;
+  border-top: 1px solid #eceef1;
+  font-size: 11px;
+  color: #9aa0ab;
+}

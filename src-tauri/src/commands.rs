@@ -7,6 +7,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State, Window};
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
+use tauri_plugin_global_shortcut::Shortcut;
 
 use crate::config::AppConfig;
 use crate::state::{AppState, LongSession, MenuKind, PinFlags, PinMeta};
@@ -916,7 +917,7 @@ fn to_decoded_payloads(
 ///
 /// 坐标约定：框相对**选区左上角**、单位**逻辑像素**——与二维码定位点同一
 /// 口径，前端拿到即可直接画高亮框。
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct OcrLinePayload {
     pub text: String,
@@ -1579,7 +1580,144 @@ pub async fn update_config(
             let _ = w.set_size(tauri::LogicalSize::new(new_size, new_size));
         }
     });
+    // 快捷键变化：热重注册（M7）。注册是全局的，换键要先注销旧的；
+    // 失败不阻断保存，把失败名带回前端提示（与启动时的 sc_failed 同思路）。
+    let mut failed: Vec<String> = Vec::new();
+    // 闭包必须 'static：这里持有**拥有版**字符串，不借 config
+    let targets = [
+        (
+            "截图",
+            config.shortcut_capture.clone(),
+            "Ctrl+1".to_string(),
+        ),
+        (
+            "剪贴板贴图",
+            config.shortcut_pin_clipboard.clone(),
+            "Ctrl+2".to_string(),
+        ),
+    ];
+    for (label, spec, default) in targets {
+        let Some(sc) = parse_shortcut(&spec) else {
+            failed.push(format!("{label}：无法识别“{spec}”"));
+            continue;
+        };
+        let old = parse_shortcut(&default).expect("builtin default shortcut");
+        let label_cb = label.to_string();
+        let spec_cb = spec.clone();
+        windows::post_to_main(&app, move |app| {
+            let gs = app.global_shortcut();
+            let _ = gs.unregister(old);
+            if let Err(e) = gs.register(sc) {
+                eprintln!("[snappin] re-register {label_cb} ({spec_cb}) failed: {e}");
+            }
+        });
+        // 同步更新内存里的"当前生效键"：热键处理器靠它比对，
+        // 不更新的话用户改了键，按新键没反应、按旧键反而还有（注销是异步的）。
+        let mut hot = state.hotkeys.lock().unwrap();
+        if label == "截图" {
+            hot.0 = sc;
+        } else {
+            hot.1 = sc;
+        }
+    }
+    if !failed.is_empty() {
+        return Err(format!("快捷键未生效：{}", failed.join("；")));
+    }
     Ok(config)
+}
+
+/// 把 "Ctrl+1" / "Ctrl+Shift+A" 这类配置字符串解析成 `Shortcut`。
+///
+/// 支持的修饰键：Ctrl / Shift / Alt / Super（Win 键 / ⌘）；
+/// 主键：0-9、A-Z、F1-F12。解析不了返回 None——调用方必须给出可见错误，
+/// 不能静默回退到默认值（用户会以为改成功了）。
+pub fn parse_shortcut(spec: &str) -> Option<Shortcut> {
+    use tauri_plugin_global_shortcut::{Code, Modifiers};
+    let mut mods: Option<Modifiers> = None;
+    let mut code: Option<Code> = None;
+    for part in spec.split('+').map(|p| p.trim()).filter(|p| !p.is_empty()) {
+        let m = match part.to_ascii_lowercase().as_str() {
+            "ctrl" | "control" => Some(Modifiers::CONTROL),
+            "shift" => Some(Modifiers::SHIFT),
+            "alt" | "option" => Some(Modifiers::ALT),
+            "super" | "cmd" | "command" | "win" => Some(Modifiers::SUPER),
+            _ => None,
+        };
+        if let Some(m) = m {
+            mods = Some(match mods {
+                Some(cur) => cur | m,
+                None => m,
+            });
+            continue;
+        }
+        let up = part.to_ascii_uppercase();
+        code = parse_code(&up).or(code);
+    }
+    Some(Shortcut::new(mods, code?))
+}
+
+/// 单个主键字符串 → `Code`（0-9 / A-Z / F1-F12）。
+fn parse_code(up: &str) -> Option<tauri_plugin_global_shortcut::Code> {
+    use tauri_plugin_global_shortcut::Code;
+    if up.len() > 1 {
+        // F1..F12（长度 >1 才可能是功能键；单字母 F 走字母分支）
+        let n: u8 = up.strip_prefix('F')?.parse().ok()?;
+        return match n {
+            1 => Some(Code::F1),
+            2 => Some(Code::F2),
+            3 => Some(Code::F3),
+            4 => Some(Code::F4),
+            5 => Some(Code::F5),
+            6 => Some(Code::F6),
+            7 => Some(Code::F7),
+            8 => Some(Code::F8),
+            9 => Some(Code::F9),
+            10 => Some(Code::F10),
+            11 => Some(Code::F11),
+            12 => Some(Code::F12),
+            _ => None,
+        };
+    }
+    let ch = up.chars().next()?;
+    match ch {
+        '0' => Some(Code::Digit0),
+        '1' => Some(Code::Digit1),
+        '2' => Some(Code::Digit2),
+        '3' => Some(Code::Digit3),
+        '4' => Some(Code::Digit4),
+        '5' => Some(Code::Digit5),
+        '6' => Some(Code::Digit6),
+        '7' => Some(Code::Digit7),
+        '8' => Some(Code::Digit8),
+        '9' => Some(Code::Digit9),
+        'A' => Some(Code::KeyA),
+        'B' => Some(Code::KeyB),
+        'C' => Some(Code::KeyC),
+        'D' => Some(Code::KeyD),
+        'E' => Some(Code::KeyE),
+        'F' => Some(Code::KeyF),
+        'G' => Some(Code::KeyG),
+        'H' => Some(Code::KeyH),
+        'I' => Some(Code::KeyI),
+        'J' => Some(Code::KeyJ),
+        'K' => Some(Code::KeyK),
+        'L' => Some(Code::KeyL),
+        'M' => Some(Code::KeyM),
+        'N' => Some(Code::KeyN),
+        'O' => Some(Code::KeyO),
+        'P' => Some(Code::KeyP),
+        'Q' => Some(Code::KeyQ),
+        'R' => Some(Code::KeyR),
+        'S' => Some(Code::KeyS),
+        'T' => Some(Code::KeyT),
+        'U' => Some(Code::KeyU),
+        'V' => Some(Code::KeyV),
+        'W' => Some(Code::KeyW),
+        'X' => Some(Code::KeyX),
+        'Y' => Some(Code::KeyY),
+        'Z' => Some(Code::KeyZ),
+        _ => None,
+    }
 }
 
 #[tauri::command]
@@ -2287,6 +2425,122 @@ fn long_pin_geometry(app: &AppHandle, w: u32, h: u32) -> (f64, f64, f64, f64) {
     let dh = dh * scale;
     let (x, y) = windows::place_centered_on_primary(app, dw, dh);
     (dw, dh, x, y)
+}
+
+
+// ---------- OCR 结果窗 / 翻译窗 / 设置窗 ----------
+
+/// 打开 OCR 结果窗（识别成功后由浮层调用）。
+///
+/// 行数据先存进 state，再建/前置窗口；窗口（含已存在的旧窗）通过
+/// `ocr-open` 事件重新拉取，避免"第二次识别后窗口内容不刷新"。
+#[tauri::command]
+pub fn ocr_show(app: AppHandle, lines: Vec<OcrLinePayload>) -> Result<(), String> {
+    *app.state::<AppState>().ocr_result.lock().unwrap() = lines;
+    windows::show_ocr_window(&app)?;
+    let _ = app.emit("ocr-open", ());
+    Ok(())
+}
+
+/// OCR 结果窗内容（前端挂载时 / 收到 ocr-open 时调用）。
+#[tauri::command]
+pub fn ocr_result(app: AppHandle) -> Vec<OcrLinePayload> {
+    app.state::<AppState>().ocr_result.lock().unwrap().clone()
+}
+
+/// 关闭 OCR 结果窗（内容保留，下次打开还在）。
+#[tauri::command]
+pub fn ocr_close(app: AppHandle) {
+    windows::close_doc_window(&app, windows::OCR_LABEL);
+}
+
+/// 开始翻译：先开窗（用户立刻看到"翻译中"），再到阻塞线程里调 API。
+///
+/// 设计要点：
+/// - **同步返回、异步出结果**：翻译是秒级网络操作，不能卡住调用方
+///   （OCR 窗点「翻译」后要能继续操作）；结果走 `trans-update` 事件推送。
+/// - **状态集中在 state.trans**：窗口销毁不丢上下文，重开窗能接着看。
+/// - 重复调用会取消上一次吗？不会——但 `busy` 期间前端禁用按钮，
+///   且后到的结果会覆盖先到的（正常单用户场景不会并发）。
+#[tauri::command]
+pub async fn trans_start(app: AppHandle, text: String) -> Result<(), String> {
+    {
+        let state = app.state::<AppState>();
+        let mut t = state.trans.lock().unwrap();
+        t.original = text;
+        t.translated.clear();
+        t.error.clear();
+        t.busy = true;
+        let tr = state.config.lock().unwrap().translation.clone();
+        t.target_lang = tr.target_lang.clone();
+        t.model_name = tr
+            .active()
+            .map(|m| if m.name.is_empty() { m.model.clone() } else { m.name.clone() })
+            .unwrap_or_default();
+    }
+    windows::show_trans_window(&app)?;
+    let _ = app.emit("trans-update", snapshot_trans(&app));
+
+    let app2 = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app2.state::<AppState>();
+        // 配置快照：翻译期间用户改设置不影响本次请求（也避免持锁跨网络调用）
+        let cfg = state.config.lock().unwrap().translation.clone();
+        let outcome = snappin_core_platform::translate::translate(&cfg, &{
+            let t = state.trans.lock().unwrap();
+            t.original.clone()
+        });
+        {
+            let mut t = state.trans.lock().unwrap();
+            t.busy = false;
+            if outcome.ok {
+                t.translated = outcome.translated;
+                t.error.clear();
+            } else {
+                t.translated.clear();
+                t.error = outcome.error;
+            }
+        }
+        let _ = app2.emit("trans-update", snapshot_trans(&app2));
+    });
+    Ok(())
+}
+
+/// 测试某个模型的连通性（设置窗「模型」页的「测试连接」）。
+///
+/// 网络操作同样放阻塞线程；成功/失败都转成中文短文案，前端在行内显示。
+#[tauri::command]
+pub async fn trans_test(app: AppHandle, id: String) -> Result<(), String> {
+    let app2 = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let cfg = app2.state::<AppState>().config.lock().unwrap().translation.clone();
+        snappin_core_platform::translate::test_connection(&cfg, &id)
+    })
+    .await
+    .map_err(|e| format!("测试连接任务失败：{e}"))?
+}
+
+/// 翻译窗当前状态（前端挂载时拉一次，之后靠 trans-update 事件）。
+#[tauri::command]
+pub fn trans_state(app: AppHandle) -> crate::state::TransState {
+    snapshot_trans(&app)
+}
+
+/// 关闭翻译窗（状态保留，下次打开接着看）。
+#[tauri::command]
+pub fn trans_close(app: AppHandle) {
+    windows::close_doc_window(&app, windows::TRANS_LABEL);
+}
+
+/// 翻译状态快照（加锁克隆，避免把 MutexGuard 传出去）。
+fn snapshot_trans(app: &AppHandle) -> crate::state::TransState {
+    app.state::<AppState>().trans.lock().unwrap().clone()
+}
+
+/// 打开设置窗（托盘菜单 / 翻译失败时的"去设置"都用它）。
+#[tauri::command]
+pub fn open_settings_window(app: AppHandle) -> Result<(), String> {
+    windows::show_main_window(&app)
 }
 
 #[cfg(test)]

@@ -20,6 +20,7 @@ import {
   openUrl,
   ocrModelsStatus,
   ocrRecognize,
+  ocrShow,
   overlayContext,
   readImageBytes,
   uiLog,
@@ -615,10 +616,14 @@ export function OverlayWindow() {
     setOcrLines(null)
     try {
       const lines = await ocrRecognize(ctx.monitorId, rect, ctx.sessionId)
-      setOcrLines(lines)
+      // 识别结果进**独立窗口**（可拖动选择 / 全部复制 / 顶部翻译），
+      // 不再挤在浮层的窄面板里。空结果也开窗——让用户看到"确实没字"，
+      // 而不是点了按钮什么都没发生。
+      await ocrShow(lines)
       if (lines.length === 0) uiLog('ocr: no text found in selection')
     } catch (e) {
       uiLog(`ocr recognize failed: ${String(e)}`)
+      // 失败就地提示（模型缺失 / 推理错误都带可操作文案），不开空窗口
       setOcrError(String(e))
     } finally {
       setOcrBusy(false)

@@ -17,13 +17,22 @@ pub fn long_esc_shortcut() -> Shortcut {
     Shortcut::new(None, Code::Escape)
 }
 
+/// 内置默认快捷键：截图（Ctrl+1）。配置里可改，这里只做默认值。
+pub fn default_capture_shortcut() -> Shortcut {
+    Shortcut::new(Some(Modifiers::CONTROL), Code::Digit1)
+}
+
+/// 内置默认快捷键：剪贴板贴图（Ctrl+2）。
+pub fn default_pin_shortcut() -> Shortcut {
+    Shortcut::new(Some(Modifiers::CONTROL), Code::Digit2)
+}
+
 pub fn run() {
     // 最先初始化日志：release 无控制台，所有 eprintln! 靠它落盘才有取证价值
     logfile::init();
 
-    // 内置快捷键（自定义快捷键为 ROADMAP M7 项）
-    let capture_sc = Shortcut::new(Some(Modifiers::CONTROL), Code::Digit1);
-    let pin_sc = Shortcut::new(Some(Modifiers::CONTROL), Code::Digit2);
+    // 截图/贴图快捷键由配置驱动（默认 Ctrl+1 / Ctrl+2，见 default_*_shortcut）；
+    // Esc 只在长截图期间动态注册。
     let esc_sc = long_esc_shortcut();
 
     tauri::Builder::default()
@@ -37,8 +46,6 @@ pub fn run() {
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler({
-                    let capture_sc = capture_sc;
-                    let pin_sc = pin_sc;
                     let esc_sc = esc_sc;
                     move |app, shortcut, event| {
                         // 插件对**按下**和**抬起**各回调一次，只认 Pressed。
@@ -49,6 +56,13 @@ pub fn run() {
                         }
                         // 埋点：确认插件回调真的进来了（排障用，频率低）
                         crate::logln!("hotkey pressed: {:?}", shortcut);
+                        // 与设置窗共用同一份"当前生效键"：用户在设置里改键后
+                        // update_config 会更新它，这里立即按新键分发。
+                        let state = app.state::<AppState>();
+                        let (capture_sc, pin_sc) = {
+                            let g = state.hotkeys.lock().unwrap();
+                            (g.0.clone(), g.1.clone())
+                        };
                         if shortcut == &capture_sc {
                             handle_capture(app, "hotkey");
                         } else if shortcut == &pin_sc {
@@ -112,18 +126,40 @@ pub fn run() {
             // 注册失败（如组合键已被其他程序 RegisterHotKey 占用）**不阻断启动**，
             // 但必须让用户看得见：否则表现为"按 Ctrl+1 完全没反应"，
             // 用户只会以为什么都没发生。收集失败列表 → 写进托盘 tooltip。
-            let mut sc_failed: Vec<&'static str> = Vec::new();
-            if let Err(e) = handle.global_shortcut().register(capture_sc) {
-                crate::logln!("[snappin] register Ctrl+1 FAILED: {e}");
-                sc_failed.push("Ctrl+1");
-            } else {
-                crate::logln!("[snappin] Ctrl+1 registered");
+            // 配置里的快捷键优先；解析不了（手改 config.json 改错了）回退默认值，
+            // 并记进日志——不能静默用默认值，否则用户以为自己的键生效了。
+            let capture_sc = commands::parse_shortcut(&cfg.shortcut_capture)
+                .unwrap_or_else(|| {
+                    crate::logln!(
+                        "[snappin] shortcut_capture “{}” 无法解析，回退 Ctrl+1",
+                        cfg.shortcut_capture
+                    );
+                    default_capture_shortcut()
+                });
+            let pin_sc = commands::parse_shortcut(&cfg.shortcut_pin_clipboard)
+                .unwrap_or_else(|| {
+                    crate::logln!(
+                        "[snappin] shortcut_pin_clipboard “{}” 无法解析，回退 Ctrl+2",
+                        cfg.shortcut_pin_clipboard
+                    );
+                    default_pin_shortcut()
+                });
+            {
+                let state = handle.state::<AppState>();
+                *state.hotkeys.lock().unwrap() = (capture_sc.clone(), pin_sc.clone());
             }
-            if let Err(e) = handle.global_shortcut().register(pin_sc) {
-                crate::logln!("[snappin] register Ctrl+2 FAILED: {e}");
-                sc_failed.push("Ctrl+2");
+            let mut sc_failed: Vec<&'static str> = Vec::new();
+            if let Err(e) = handle.global_shortcut().register(capture_sc.clone()) {
+                crate::logln!("[snappin] register {} FAILED: {e}", cfg.shortcut_capture);
+                sc_failed.push("截图快捷键");
             } else {
-                crate::logln!("[snappin] Ctrl+2 registered");
+                crate::logln!("[snappin] {} registered", cfg.shortcut_capture);
+            }
+            if let Err(e) = handle.global_shortcut().register(pin_sc.clone()) {
+                crate::logln!("[snappin] register {} FAILED: {e}", cfg.shortcut_pin_clipboard);
+                sc_failed.push("贴图快捷键");
+            } else {
+                crate::logln!("[snappin] {} registered", cfg.shortcut_pin_clipboard);
             }
 
             // 悬浮球窗口
@@ -222,6 +258,14 @@ pub fn run() {
             commands::get_config,
             commands::update_config,
             commands::app_info,
+            commands::ocr_show,
+            commands::ocr_result,
+            commands::ocr_close,
+            commands::trans_start,
+            commands::trans_test,
+            commands::trans_state,
+            commands::trans_close,
+            commands::open_settings_window,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run SnapPin");
@@ -355,6 +399,7 @@ fn mac_native_tray_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<taur
     let capture = MenuItem::with_id(app, "capture", "截图", true, None::<&str>)?;
     let pin = MenuItem::with_id(app, "pin-clipboard", "剪贴板贴图", true, None::<&str>)?;
     let ball = MenuItem::with_id(app, "toggle-ball", "显示 / 隐藏悬浮球", true, None::<&str>)?;
+    let settings = MenuItem::with_id(app, "settings", "设置…", true, None::<&str>)?;
     let perm = MenuItem::with_id(app, "open-perm", "屏幕录制权限…", true, None::<&str>)?;
     let log = MenuItem::with_id(app, "open-log", "打开运行日志", true, None::<&str>)?;
     let about = MenuItem::with_id(app, "about", "关于 SnapPin", true, None::<&str>)?;
@@ -364,7 +409,18 @@ fn mac_native_tray_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<taur
 
     Menu::with_items(
         app,
-        &[&capture, &pin, &ball, &perm, &s1, &log, &about, &s2, &quit],
+        &[
+            &capture,
+            &pin,
+            &ball,
+            &settings,
+            &perm,
+            &s1,
+            &log,
+            &about,
+            &s2,
+            &quit,
+        ],
     )
 }
 
@@ -386,6 +442,12 @@ pub(crate) fn handle_menu_event(app: &AppHandle, id: &str) {
         "about" => open_external(ABOUT_URL),
         // 排障入口：直接打开落盘日志（release 无控制台，这是唯一的现场）
         "open-log" => open_external(&logfile::log_path().to_string_lossy()),
+        // 设置窗（翻译 Key、快捷键、外观都在这）
+        "settings" => {
+            if let Err(e) = windows::show_main_window(app) {
+                crate::logln!("open settings window failed: {e}");
+            }
+        }
         // 换包后授权失效时，用户唯一的自助恢复入口（macOS）
         "open-perm" => open_external(SCREEN_RECORDING_SETTINGS_URL),
         "quit" => app.exit(0),

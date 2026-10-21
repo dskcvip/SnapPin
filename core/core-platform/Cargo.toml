@@ -11,8 +11,12 @@ xcap = "0.9"
 arboard = "3.7"
 image = { workspace = true }
 anyhow = { workspace = true }
+serde = { workspace = true }
 uuid = { workspace = true }
 chrono = "0.4"
 rxing = "0.9.3"
 rten = "0.27.0"
 rten-tensor = "0.27.0"
+# 在线翻译（OpenAI 兼容协议）；blocking 版本由调用方放进阻塞线程
+reqwest = { version = "0.12", features = ["blocking", "json"] }
+serde_json = { workspace = true }
