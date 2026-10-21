@@ -415,7 +415,71 @@ impl Drop for CaptureGuard<'_> {
     }
 }
 
+/// macOS：截图前的「屏幕录制」权限闸门。
+///
+/// 未授权时 macOS **不会报错**，而是照常返回一张图 —— 只是把其他应用的窗口
+/// 全部过滤掉，于是用户看到的现象是"能进截图，但屏幕上所有窗口都不见了"，
+/// 最终截出一张空桌面壁纸。这种失败没有任何错误码可依，只能在采集之前拦住。
+///
+/// 提示节流 5 秒：用户连按快捷键时不至于叠出一摞对话框。
+///
+/// **故意不用 `#[cfg(target_os = "macos")]` 整块裁掉**：那样这段只在 mac 上
+/// 运行的代码在 Windows 开发机上永远不被编译器检查（API 改名、类型不匹配
+/// 都发现不了，只能等 CI/mac 构建时炸）。这里改成运行时判定——非 macOS 时
+/// `has_screen_capture_permission()` 恒为 true，第一行就返回，零副作用。
+fn mac_capture_gate(app: &AppHandle) -> Result<(), String> {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    // 本进程是否已经请求过系统授权框（系统只弹一次，重复调用没有意义）
+    static REQUESTED: AtomicBool = AtomicBool::new(false);
+    // 上次弹自定义提示的 Unix 秒（0 = 还没弹过）
+    static LAST_ALERT: AtomicU64 = AtomicU64::new(0);
+
+    if snappin_core_platform::has_screen_capture_permission() {
+        return Ok(());
+    }
+    // 第一次没权限：先让系统自己弹授权框（用户在系统框里点"允许"后需重启本应用）
+    if !REQUESTED.swap(true, Ordering::SeqCst)
+        && snappin_core_platform::request_screen_capture_permission()
+    {
+        return Ok(());
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if now.saturating_sub(LAST_ALERT.load(Ordering::SeqCst)) >= 5 {
+        LAST_ALERT.store(now, Ordering::SeqCst);
+        crate::logln!("[snappin] capture blocked: 无「屏幕录制」权限");
+        use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+        app.dialog()
+            .message(
+                "SnapPin 没有「屏幕录制」权限，macOS 会把它截到的画面里其他应用的窗口全部过滤掉——只能看到桌面壁纸。\n\n① 打开「系统设置 → 隐私与安全性 → 屏幕录制」，勾选 SnapPin；\n② 如果列表里已经有 SnapPin 且是勾选状态，请先取消勾选、再重新勾选（升级到新版本后程序签名会变，旧授权会失效）；\n③ 然后退出 SnapPin 再重新打开（macOS 要求重启后才生效）。",
+            )
+            .title("需要「屏幕录制」权限")
+            .kind(MessageDialogKind::Warning)
+            .buttons(MessageDialogButtons::OkCancelCustom(
+                "打开系统设置".to_string(),
+                "知道了".to_string(),
+            ))
+            .show(|open_settings| {
+                if open_settings {
+                    // 直达「隐私与安全性 → 屏幕录制」面板
+                    let _ = std::process::Command::new("open")
+                        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
+                        .spawn();
+                }
+            });
+    }
+    Err("需要「屏幕录制」权限：系统设置 → 隐私与安全性 → 屏幕录制 → 勾选 SnapPin 后重启应用"
+        .to_string())
+}
+
 pub fn do_capture(app: &AppHandle, state: &AppState, src: &str) -> Result<CapturePayload, String> {
+    // 权限闸必须在互斥锁与采集之前：否则会先截出一张"没有窗口的桌面"，
+    // 用户完全看不出这是权限问题（见 mac_capture_gate 文档）。
+    mac_capture_gate(app)?;
     let t0 = std::time::Instant::now();
     // 0. 互斥：热键/球点击/前端命令可能在同一瞬间重复触发。没有这道闸，
     // 第二遍采集会复用第一遍预创建的浮层（页面不重载→前端状态陈旧），

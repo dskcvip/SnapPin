@@ -98,25 +98,53 @@ pub fn cursor_position() -> Option<(i32, i32)> {
 /// 返回 true 表示已授权。未授权时会触发系统授权弹窗（首次），
 /// 授权后**必须重启应用**才生效（系统限制，不是本程序的问题）。
 #[cfg(target_os = "macos")]
-pub fn ensure_screen_capture_permission() -> bool {
+pub fn has_screen_capture_permission() -> bool {
     #[link(name = "CoreGraphics", kind = "framework")]
     extern "C" {
         fn CGPreflightScreenCaptureAccess() -> bool;
+    }
+    // SAFETY: 无参纯查询接口，不涉及指针所有权。
+    unsafe { CGPreflightScreenCaptureAccess() }
+}
+
+/// 弹出系统授权框（每个进程调一次即可）。
+///
+/// 只在**首次**需要时调用：`CGRequestScreenCaptureAccess` 会弹系统对话框，
+/// 用户已明确拒绝过就不会再弹，此后再调只是静默返回 false。因此
+/// 截图前的检查必须先走 `has_screen_capture_permission`（纯查询、无副作用），
+/// 只有确实没权限时才请求一次。
+#[cfg(target_os = "macos")]
+pub fn request_screen_capture_permission() -> bool {
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
         fn CGRequestScreenCaptureAccess() -> bool;
     }
-    // SAFETY: 两个都是无参纯查询/提示接口，不涉及指针所有权。
-    unsafe {
-        if CGPreflightScreenCaptureAccess() {
-            true
-        } else {
-            CGRequestScreenCaptureAccess()
-        }
+    // SAFETY: 无参接口，只触发系统授权流程。
+    unsafe { CGRequestScreenCaptureAccess() }
+}
+
+#[cfg(target_os = "macos")]
+pub fn ensure_screen_capture_permission() -> bool {
+    if has_screen_capture_permission() {
+        true
+    } else {
+        request_screen_capture_permission()
     }
 }
 
 /// 非 macOS 平台无需屏幕录制授权，恒为 true。
 #[cfg(not(target_os = "macos"))]
 pub fn ensure_screen_capture_permission() -> bool {
+    true
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn has_screen_capture_permission() -> bool {
+    true
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn request_screen_capture_permission() -> bool {
     true
 }
 

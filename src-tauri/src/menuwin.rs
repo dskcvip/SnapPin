@@ -60,6 +60,53 @@ const PARK_X: i32 = -32000;
 const PARK_Y: i32 = -32000;
 
 /// 懒创建菜单窗（已存在则直接返回）。创建后立即 park（屏幕外）。
+/// 建窗/移窗是否必须由主线程执行。
+///
+/// - macOS：`WebviewWindowBuilder::build()` 与 NSWindow 的 resize/show 必须在主线程；
+/// - Windows：主线程同步建窗会**死锁**（见 `windows::create_pin_window` 文档），
+///   必须留在调用方的阻塞线程里做。
+///
+/// 用常量而不是 `#[cfg]` 分支的原因：`#[cfg]` 会把这段只在 mac 上运行的代码
+/// 从 Windows 的编译里整块裁掉，从而**永远得不到编译检查**（API 改名、
+/// 类型不匹配都要等 CI/mac 构建才炸）。运行时分支两边都会被编译。
+#[cfg(target_os = "macos")]
+const MENU_NEEDS_MAIN_THREAD: bool = true;
+#[cfg(not(target_os = "macos"))]
+const MENU_NEEDS_MAIN_THREAD: bool = false;
+
+/// 取（必要时创建）菜单窗，处理平台建窗线程约束。
+///
+/// 已存在的窗口直接返回——`get_webview_window` 只是查句柄表，任意线程都安全。
+/// 只有**真正建窗**那一步需要按平台分流：
+///
+/// - **macOS 必须主线程**：`WebviewWindowBuilder::build()` 要创建 NSWindow 与
+///   WKWebView，在阻塞线程调用会失败（Tauri 明确要求主线程）。三个入口
+///   （托盘点击 / 贴图右键命令 / 悬浮球）都在 `spawn_blocking` 里，
+///   不投递的话**菜单一次都弹不出来**——表现为"点托盘毫无反应"。
+/// - **Windows/其他平台留在调用线程**：主线程同步建窗会死锁
+///   （见 `windows::create_pin_window` 的注释）。
+///
+/// 为什么只包建窗、不包整段 open_menu：`Window::set_size/set_position/show`
+/// 这些方法在 Tauri 内部本来就会自己派发到主线程，外层再套一层投递会变成
+/// "主线程等主线程"的嵌套等待，反而有死锁风险。
+fn ensure_menu_window_threaded(app: &AppHandle) -> Result<tauri::WebviewWindow, String> {
+    if let Some(w) = app.get_webview_window(MENU_LABEL) {
+        return Ok(w);
+    }
+    if MENU_NEEDS_MAIN_THREAD {
+        let (tx, rx) = std::sync::mpsc::channel::<Result<tauri::WebviewWindow, String>>();
+        let app_cb = app.clone();
+        app.run_on_main_thread(move || {
+            let _ = tx.send(ensure_menu_window(&app_cb));
+        })
+        .map_err(|e| format!("menu window dispatch failed: {e}"))?;
+        return rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap_or_else(|_| Err("menu window: main thread timeout".to_string()));
+    }
+    ensure_menu_window(app)
+}
+
 fn ensure_menu_window(app: &AppHandle) -> Result<tauri::WebviewWindow, String> {
     if let Some(w) = app.get_webview_window(MENU_LABEL) {
         return Ok(w);
@@ -133,6 +180,13 @@ pub fn open_pin_menu_at_cursor(app: &AppHandle, label: &str) -> Result<(), Strin
 }
 
 /// 在指定物理坐标打开菜单。尺寸待前端 `menu_fit` 到达后才移到锚点。
+///
+/// **线程约束（macOS）**：菜单窗是懒创建的，第一次点击就要
+/// `WebviewWindowBuilder::build()`，而 macOS 要求建窗在主线程。三个入口
+/// （托盘点击 / 贴图右键命令 / 悬浮球）都在 `spawn_blocking` 线程里调用本函数，
+/// 直接用 build() 会失败 —— 表现就是**点托盘图标毫无反应**（菜单一次都弹不出来）。
+/// 因此 macOS 上把整段逻辑投递到主线程并同步等待结果，与
+/// `windows::create_pin_window` 同一套做法。
 pub fn open_menu(
     app: &AppHandle,
     px: f64,
@@ -140,7 +194,7 @@ pub fn open_menu(
     kind: MenuKind,
     pin_label: Option<String>,
 ) -> Result<(), String> {
-    let window = ensure_menu_window(app)?;
+    let window = ensure_menu_window_threaded(app)?;
     // 先离开屏幕：上一次的尺寸/位置不能露出来（也避免在旧位置闪一帧）
     park_menu(app);
     // 重新写锚点（park_menu 会清空）
@@ -168,6 +222,8 @@ pub fn open_menu(
 }
 
 /// 按前端量出的窗口尺寸定位并显示菜单。
+///
+/// 同样受 macOS 主线程约束（resize / move / show / set_focus 都在这里）。
 pub fn fit_and_show(app: &AppHandle, w: f64, h: f64) -> Result<(), String> {
     let anchor = {
         let state = app.state::<AppState>();

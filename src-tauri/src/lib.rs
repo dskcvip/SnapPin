@@ -74,19 +74,28 @@ pub fn run() {
         .setup(move |app| {
             // macOS 专属启动配置（必须放在 `app.handle()` 之前：
             // set_activation_policy 需要 &mut App，handle 会先借走不可变借用）
+            // 屏幕录制权限（仅 macOS 有意义）：未授权时系统不会报错，只是把
+            // 其他应用的窗口从采集结果里过滤掉 —— 用户看到的是"截图后所有窗口都不见了"。
+            // 这里只做一次状态探测（必要时触发系统授权框），真正的拦截在截图入口
+            // （commands::mac_capture_gate），探测结果同时带进托盘 tooltip。
             #[cfg(target_os = "macos")]
-            {
+            let mac_perm_ok = {
                 // 纯后台常驻：不占 Dock 图标（截图工具的常规形态，同 PixPin/Shottr）
                 app.set_activation_policy(tauri::ActivationPolicy::Accessory);
-                // 屏幕录制权限：macOS 10.15+ 未授权时采集到的是空白/全黑图，
-                // 表现为"截图全黑 / 采集失败"，必须明确提示（首次会弹系统授权框）
-                if !snappin_core_platform::ensure_screen_capture_permission() {
-                    eprintln!(
-                        "[snappin] 未获得屏幕录制权限：系统设置 → 隐私与安全性 → 屏幕录制 → \
-                         勾选 SnapPin，然后**重启应用**（macOS 要求重启才生效）"
+                let ok = snappin_core_platform::ensure_screen_capture_permission();
+                // 无论成败都记一行：这是判断"截出空桌面"到底是权限问题还是采集问题的
+                // 唯一依据（菜单 → 打开运行日志）。
+                crate::logln!("[snappin] 屏幕录制权限 preflight = {ok}");
+                if !ok {
+                    crate::logln!(
+                        "[snappin] 未获得「屏幕录制」权限：系统设置 → 隐私与安全性 → \
+                         屏幕录制 → 勾选 SnapPin，然后重启应用（macOS 要求重启才生效）"
                     );
                 }
-            }
+                ok
+            };
+            #[cfg(not(target_os = "macos"))]
+            let mac_perm_ok = true;
 
             let handle = app.handle();
 
@@ -173,7 +182,7 @@ pub fn run() {
                 *state.shortcut_failed.lock().unwrap() =
                     sc_failed.iter().map(|s| s.to_string()).collect();
             }
-            setup_tray(&handle, &sc_failed)?;
+            setup_tray(&handle, &sc_failed, mac_perm_ok)?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -259,16 +268,29 @@ fn handle_pin_clipboard(app: &AppHandle) {
 /// `sc_failed`：注册失败的内置快捷键名（如 `["Ctrl+1"]`）。非空时 tooltip
 /// 改告警文案，并在自绘菜单顶部显示一条提示——热键注册失败只靠这个让用户
 /// 看见，否则表现就是"按键毫无反应"。
-fn setup_tray(app: &AppHandle, sc_failed: &[&'static str]) -> tauri::Result<()> {
+fn setup_tray(
+    app: &AppHandle,
+    sc_failed: &[&'static str],
+    mac_perm_ok: bool,
+) -> tauri::Result<()> {
     use tauri::tray::{MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
-    let tooltip = if sc_failed.is_empty() {
+    // tooltip 是用户唯一常驻可见的状态位：热键被占用、以及（macOS）缺屏幕录制
+    // 权限都必须写在这里，否则用户只会觉得"这软件坏了"。
+    let mut tips: Vec<String> = Vec::new();
+    if !sc_failed.is_empty() {
+        tips.push(format!(
+            "全局快捷键 {} 注册失败（已被其他程序占用）",
+            sc_failed.join(" / ")
+        ));
+    }
+    if !mac_perm_ok {
+        tips.push("未获得「屏幕录制」权限：只能截到桌面壁纸".to_string());
+    }
+    let tooltip = if tips.is_empty() {
         "SnapPin".to_string()
     } else {
-        format!(
-            "SnapPin — 全局快捷键 {} 注册失败（已被其他程序占用）",
-            sc_failed.join(" / ")
-        )
+        format!("SnapPin — {}", tips.join("；"))
     };
 
     let tray = TrayIconBuilder::new()

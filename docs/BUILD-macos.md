@@ -103,16 +103,27 @@ find ~ -name "SnapPin_*.dmg" 2>/dev/null
 
 ## 三、首次运行必做：屏幕录制权限
 
-macOS 10.15 起，任何程序读屏幕像素都要授权。**没授权时截图是全黑/空白**，
-现象就是"点了截图没反应 / 采集失败"。
+macOS 10.15 起，任何程序读屏幕像素都要授权。
+
+**未授权时系统不会报错**，它照常给你一张图，只是把**其他应用的窗口全部过滤掉** ——
+所以现象不是"截图黑屏"，而是 **"进入截图后屏幕上所有窗口都不见了，只剩桌面壁纸"**，
+截出来的图自然也只有壁纸。（更早的 macOS 版本会返回全黑图，现象不同但根因相同。）
 
 1. 首次启动会弹系统授权框 → 允许；
 2. 若没弹或误点了拒绝：`系统设置 → 隐私与安全性 → 屏幕录制` → 勾选 **SnapPin**；
-3. **改完权限必须退出并重新打开 SnapPin**（这是 macOS 的硬性要求，
-   权限只在进程启动时读取）。
+   列表里没有 SnapPin 时点 `+` 手动添加 `/Applications/SnapPin.app`；
+3. **列表里已勾选但仍截不到窗口**：先**取消勾选、再重新勾选**。原因是 dmg 是
+   ad-hoc 签名，每次重新构建/cdhash 变化，TCC 会把它当成"另一个程序"，旧授权失效；
+4. **改完权限必须退出并重新打开 SnapPin**（macOS 的硬性要求，权限只在进程启动时读取）。
 
-代码里已做处理：启动时用 `CGPreflightScreenCaptureAccess` 检查，
-未授权会用 `CGRequestScreenCaptureAccess` 触发系统授权框，并在 stderr 打印提示。
+代码里的处理：
+
+- 启动时 `CGPreflightScreenCaptureAccess` 探测，未授权才调
+  `CGRequestScreenCaptureAccess` 触发系统授权框（后者每个进程只能弹一次）；
+- 探测结果无论成败都写进日志：`[snappin] 屏幕录制权限 preflight = true/false`；
+- **每次截图前**再次 preflight（`commands::mac_capture_gate`）。未授权则**中止截图**并弹
+  原生提示框（含「打开系统设置」按钮，直达屏幕录制面板），而不是让用户截一张空桌面；
+- 未授权状态同时显示在托盘 tooltip 上。
 
 ## 四、Gatekeeper
 
@@ -132,7 +143,7 @@ macOS 10.15 起，任何程序读屏幕像素都要授权。**没授权时截图
 |---|---|
 | 透明窗口 | `tauri.conf.json` 开 `macOSPrivateApi: true` + Cargo `macos-private-api` feature（缺一会启动即报配置不一致） |
 | 不占 Dock | `set_activation_policy(Accessory)`，只在菜单栏留图标 |
-| 屏幕录制权限 | 启动时 preflight + request，未授权打印明确提示 |
+| 屏幕录制权限 | 启动时 preflight + request；**每次截图前再 preflight**，未授权中止截图并弹原生提示（含直达系统设置按钮）+ 托盘 tooltip 告警；成功与否都记日志 |
 | 建窗线程 | macOS 要求 NSWindow 在主线程建：浮层预创建、贴图窗口都改成投递主线程并同步等待；Windows 保持原有的工作线程建窗（主线程会死锁） |
 | 显示器原点单位 | xcap 在 macOS 返回的是**点**、Windows 是**物理像素**，新增 `MonitorShot::logical_origin()` 统一成逻辑像素，避免 Retina 副屏位置算成 1/2 |
 | 打开"关于"链接 | 已有 `open` 分支 |
