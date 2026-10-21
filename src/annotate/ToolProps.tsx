@@ -9,10 +9,12 @@
  * 所有状态都由父组件持有（受控组件），这里只负责渲染与回调。
  */
 import {
+  ERASER_RADIUS,
   MOSAIC_BLOCKS,
   PRESET_COLORS,
   SPOTLIGHT_DIM,
   TEXT_FONT_SIZE,
+  ZOOM_LEVELS,
   type AnnotateTool,
   type Rgba,
 } from './tools'
@@ -25,11 +27,17 @@ interface Props {
   /** 聚光灯压暗强度（0-255） */
   spotDim: number
   mosaicBlock: number
+  /** 橡皮擦半径（逻辑像素） */
+  eraserRadius: number
+  /** 放大镜倍数 */
+  zoomLevel: number
   onColor: (v: Rgba) => void
   onWidth: (v: number) => void
   onFontSize: (v: number) => void
   onSpotDim: (v: number) => void
   onMosaicBlock: (v: number) => void
+  onEraserRadius: (v: number) => void
+  onZoomLevel: (v: number) => void
   /** 画笔 ↔ 荧光笔子模式切换 */
   onTool: (t: AnnotateTool) => void
 }
@@ -98,7 +106,56 @@ export function ToolProps(p: Props) {
     )
   }
 
-  const isTextLike = tool === 'text' || tool === 'badge'
+  // 橡皮擦：只调半径（不涉及颜色——它还原的是原图像素）。
+  // 必须给操作提示：它的语义是"擦掉已画的标注"，不是"擦掉截图内容"，
+  // 不给提示用户会以为工具坏了（按住拖过空白处当然什么都不会变）。
+  if (tool === 'eraser') {
+    return (
+      <>
+        <Slider
+          label="笔尖"
+          title={`擦除半径 ${p.eraserRadius}px`}
+          min={ERASER_RADIUS.min}
+          max={ERASER_RADIUS.max}
+          value={p.eraserRadius}
+          suffix="px"
+          onChange={p.onEraserRadius}
+        />
+        <div className="sb-tip">按住拖过已画的标注即可擦除（不动原图）</div>
+      </>
+    )
+  }
+
+  // 放大镜：倍数档位（与 Rust 最近邻取样一致的离散倍率）
+  if (tool === 'zoom') {
+    return (
+      <div className="sb-seg">
+        {ZOOM_LEVELS.map((z) => (
+          <button key={z} className={p.zoomLevel === z ? 'on' : ''} onClick={() => p.onZoomLevel(z)}>
+            {z}×
+          </button>
+        ))}
+      </div>
+    )
+  }
+
+  // 智能擦除无参数：给一句操作提示，避免面板空着让人以为没反应
+  if (tool === 'smartErase') {
+    return <div className="sb-tip">拖选要抹掉的区域，自动用周围画面补全</div>
+  }
+
+  // 取色器无参数：提示交互方式（按住移动看色，松手复制）
+  if (tool === 'pick') {
+    return <div className="sb-tip">按住移动取色，松开复制 HEX 到剪贴板</div>
+  }
+
+  // 二维码无参数：提示先拖区域
+  if (tool === 'qr') {
+    return <div className="sb-tip">拖选要识别的区域，支持一图多码</div>
+  }
+
+  // 水印与文字/序号共用"颜色 + 字号"（水印块由文字光栅化而来）
+  const isTextLike = tool === 'text' || tool === 'badge' || tool === 'watermark'
 
   return (
     <>
@@ -146,6 +203,8 @@ export function ToolProps(p: Props) {
           onChange={p.onWidth}
         />
       )}
+      {/* 水印的交互藏在"拖选后才弹输入框"里，不给提示用户不知道下一步 */}
+      {tool === 'watermark' && <div className="sb-tip">拖选区域后输入水印文字</div>}
     </>
   )
 }

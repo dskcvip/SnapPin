@@ -22,6 +22,7 @@ export default defineConfig({
         ball: 'ball.html',
         overlay: 'overlay.html',
         pin: 'pin.html',
+        menu: 'menu.html',
         main: 'main.html',
       },
     },

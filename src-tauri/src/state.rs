@@ -1,37 +1,121 @@
 use crate::config::AppConfig;
 use snappin_core_platform::MonitorShot;
+use snappin_core_platform::ocr::OcrEngine;
+use snappin_core_platform::stitch::LongCapture;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64};
-use std::sync::Mutex;
-use std::time::Instant;
+use std::sync::{Arc, Mutex};
 
 /// 贴图窗口元数据（label → 信息）。
 /// 前端通过 pin_context 命令按窗口标签取回，避免 URL 传参的编码问题。
 #[derive(Debug, Clone)]
 pub struct PinMeta {
-    /// 贴图图片的本地路径（PNG）
+    /// 贴图图片的本地路径（PNG）——**当前显示的内容**。
+    /// 做过图像处理（旋转/翻转/灰度…）后指向处理后的临时文件。
     pub src: String,
     /// 逻辑像素显示宽
     pub width: f64,
     /// 逻辑像素显示高
     pub height: f64,
+    /// 图像处理产生的临时文件（None = 原图，未处理过）。
+    /// 关窗/再次处理时删除，避免临时目录无限增长。
+    pub edited: Option<String>,
+}
+
+/// 长截图会话（拼接器 + 结束时要还原的浮层状态）。
+pub struct LongSession {
+    pub capture: LongCapture,
+    /// 浮层窗口索引（label = OVERLAY_PREFIX + idx）
+    pub overlay_idx: usize,
+    /// 浮层顶层窗口句柄（Windows 采集排除用；非 Windows / 未取到为 0）
+    pub overlay_hwnd: isize,
+    /// WDA 不可用时的"采集前后隐藏浮层"兜底是否生效
+    ///（决定收尾时要不要显式 show 回来）。
+    pub used_fallback: bool,
+    /// 缩略图临时路径（驱动循环每步覆盖写，前端状态条预览用）
+    pub thumb: PathBuf,
+}
+
+/// 自绘菜单的种类：决定菜单内容与点击后的动作路由。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuKind {
+    /// 托盘 / 悬浮球菜单（应用级动作，见 lib.rs handle_menu_event）
+    App,
+    /// 贴图右键菜单（动作转发给对应贴图窗，见 commands.rs menu_action）
+    Pin,
+}
+
+/// 自绘菜单锚点（**物理**屏幕坐标 + 目标）。
+///
+/// `Some` = 菜单正处于"打开流程中"（含前端测量尺寸的窗口期）；
+/// `None` = 已关闭。菜单窗是隐藏预建的，前端挂载后靠这个判断
+/// 该不该测量并显示（首次创建窗口时会丢掉 emit 的事件）。
+pub struct MenuAnchor {
+    pub x: f64,
+    pub y: f64,
+    pub kind: MenuKind,
+    /// 贴图菜单的目标窗口 label（kind = Pin 时有效）
+    pub pin_label: Option<String>,
+}
+
+/// 贴图窗的状态快照（界面开关 + 图像处理参数）。
+///
+/// 状态的"事实来源"在贴图窗自己的 React 里，Rust 只缓存一份最新快照，
+/// 供右键菜单渲染勾选标记与当前档位（菜单窗与贴图窗是两个 webview，
+/// 无法直接互访）。前端在挂载时和每次变化后调 `pin_publish_flags` 刷新。
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PinFlags {
+    // ---- 界面开关 ----
+    pub topmost: bool,
+    pub locked: bool,
+    pub shadow: bool,
+    /// 悬停是否显示工具条（菜单"工具栏"开关 / H 键）。
+    /// 关掉后贴图只剩图片 + 边框，右键菜单仍可用（不然就没法再打开）。
+    pub toolbar: bool,
+    /// 窗口整体不透明度（顶部滑块 / 工具条"透明度"滑条 / Alt+滚轮）
+    pub opacity: f64,
+    // ---- 图像处理参数（非累积：每次都从原图重算） ----
+    /// 顺时针旋转角度：0 / 90 / 180 / 270
+    pub rotate: u16,
+    pub flip_h: bool,
+    pub flip_v: bool,
+    pub gray: bool,
+    pub invert: bool,
+    /// 图像自身 alpha（菜单"图像处理 → 不透明度"），与窗口不透明度是两回事
+    pub alpha: f64,
+    /// 亮度系数：1.0 = 原始
+    pub brightness: f64,
+}
+
+impl Default for PinFlags {
+    /// 与贴图窗的初始状态一致（置顶开、未锁定、有阴影、工具条显示、未做任何处理）
+    fn default() -> Self {
+        Self {
+            topmost: true,
+            locked: false,
+            shadow: true,
+            toolbar: true,
+            opacity: 1.0,
+            rotate: 0,
+            flip_h: false,
+            flip_v: false,
+            gray: false,
+            invert: false,
+            alpha: 1.0,
+            brightness: 1.0,
+        }
+    }
 }
 
 /// 全局应用状态。
-pub struct AppState {
-    /// 当前配置（磁盘 config.json 的内存镜像）
+pub struct AppState {    /// 当前配置（磁盘 config.json 的内存镜像）
     pub config: Mutex<AppConfig>,
     /// 当前截图会话：浮层打开期间有效，confirm_selection 据此裁剪
     pub monitors: Mutex<Vec<MonitorShot>>,
     /// 存活贴图窗口的元数据
     pub pins: Mutex<HashMap<String, PinMeta>>,
-    /// Ctrl+V 贴图武装窗口：截图"复制"成功后一段时间内，
-    /// 全局 Ctrl+V 被 SnapPin 拦截用于弹出贴图（PixPin 标志性交互）。
-    /// 过期/贴图后立即解除武装并注销热键，恢复正常粘贴行为。
-    /// Some((generation, deadline))：generation 用于废弃过期的解除任务。
-    pub paste_armed: Mutex<Option<(u64, Instant)>>,
-    /// 武装代数（每次 arm/disarm 递增，用于幂等解除）
-    pub paste_gen: AtomicU64,
     /// 采集互斥：同一时刻只允许一个采集流程。
     ///
     /// 不能靠"浮层窗口是否已存在"来防重入——第一次采集在窗口创建前有
@@ -49,6 +133,31 @@ pub struct AppState {
     /// 采集尚未完成时收到的取消请求（此时前端还没有会话代号）。
     /// 由 do_capture 在显示浮层之前消费。
     pub cancel_pending: AtomicBool,
+    /// OCR 引擎（懒加载，首次识别时初始化；模型缺失时为 None 且不缓存失败）。
+    ///
+    /// 推理是秒级操作（det 全高清约 0.8s），必须放 `spawn_blocking`；
+    /// 引擎本身（两个 rten 模型 + 字典）加载一次约 60ms，缓存避免重复解析。
+    pub ocr: Mutex<Option<OcrEngine>>,
+    /// 长截图会话（None = 未进行）。由驱动循环持锁逐步 `step()`。
+    ///
+    /// 与 `capturing` 互斥的关系：长截图复用同一次截图会话的浮层（用户在
+    /// 浮层上框选后点"长截图"），因此不占用 `capturing`；但会话期间
+    /// 前端会阻止新的截图触发（工具条只露停止按钮）。
+    pub long: Mutex<Option<LongSession>>,
+    /// 长截图停止标志：Esc（全局热键 / 浮层键盘）置位，驱动循环在
+    /// 每步稳态等待期检查（~100ms 响应），随后收尾并发出 done 事件。
+    /// 同时持有在 `LongCapture` 内部（克隆同一枚 Arc）。
+    pub long_stop: Arc<AtomicBool>,
+    /// 长截图是否进行中（不取锁的快照，供全局热键处理器查询——
+    /// 主线程不能阻塞在驱动循环持的 `long` 锁上）。
+    pub long_active: AtomicBool,
+    /// 自绘菜单锚点（见 MenuAnchor）。`None` = 菜单已关闭。
+    pub menu_anchor: Mutex<Option<MenuAnchor>>,
+    /// 贴图界面开关快照（label → flags）。贴图右键菜单据此画勾。
+    pub pin_flags: Mutex<HashMap<String, PinFlags>>,
+    /// 注册失败的内置快捷键名（空 = 全部成功）。
+    /// 自绘菜单据此在顶部显示一条告警——热键注册失败时用户唯一的可见线索。
+    pub shortcut_failed: Mutex<Vec<String>>,
 }
 
 impl AppState {
@@ -57,11 +166,16 @@ impl AppState {
             config: Mutex::new(AppConfig::default()),
             monitors: Mutex::new(Vec::new()),
             pins: Mutex::new(HashMap::new()),
-            paste_armed: Mutex::new(None),
-            paste_gen: AtomicU64::new(0),
             capturing: AtomicBool::new(false),
             session: AtomicU64::new(0),
             cancel_pending: AtomicBool::new(false),
+            ocr: Mutex::new(None),
+            long: Mutex::new(None),
+            long_stop: Arc::new(AtomicBool::new(false)),
+            long_active: AtomicBool::new(false),
+            menu_anchor: Mutex::new(None),
+            pin_flags: Mutex::new(HashMap::new()),
+            shortcut_failed: Mutex::new(Vec::new()),
         }
     }
 }

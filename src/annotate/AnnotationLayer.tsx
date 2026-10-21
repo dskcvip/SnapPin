@@ -5,6 +5,9 @@ import {
   SPOTLIGHT_RADIUS,
   TEXT_FONT_STACK,
   TEXT_LINE_HEIGHT,
+  WATERMARK_DEFAULT_TEXT,
+  WATERMARK_GAP,
+  isActionTool,
   nextBadgeNo,
   toolMeta,
   type AnnotateTool,
@@ -12,12 +15,14 @@ import {
   type ShapeDraft,
 } from './tools'
 
-/** 模块级复用的马赛克缩略画布（避免每次渲染新建）。 */
-const mosaicSmall = document.createElement('canvas')
-const mosaicSmallCtx = mosaicSmall.getContext('2d')
+/** 模块级复用的马赛克源图（按物理像素 1:1 提取冻结图，再做块平均）。 */
+const mosaicSrc = document.createElement('canvas')
 
 /** 模块级复用的聚光灯遮罩画布（尺寸随主画布，见 drawSpotlightPreview）。 */
 const dimCanvas = document.createElement('canvas')
+
+/** 模块级复用的智能擦除边界采样条（2 列 × 区域高，见 drawSmartErasePreview）。 */
+const stripCanvas = document.createElement('canvas')
 
 /** 拖拽成形的最小尺寸（逻辑像素），小于此视为单击忽略。 */
 const MIN_DRAG = 3
@@ -39,8 +44,23 @@ interface Props {
   fontSize: number
   /** 聚光灯压暗强度（0-255） */
   spotlightDim: number
+  /** 橡皮擦半径（逻辑像素） */
+  eraserRadius: number
+  /** 放大镜倍数 */
+  zoomLevel: number
   shapes: ShapeDraft[]
   onShapesChange: (shapes: ShapeDraft[]) => void
+  /** 取色器：指针在选区内移动时持续回调（局部逻辑像素坐标）。
+   *  由外层负责采样像素与渲染取色气泡——本层只管把手势坐标递出去。 */
+  onPickSample?: (x: number, y: number) => void
+  /** 取色器：松开指针时回调一次（外层此时把 HEX 写进剪贴板）。 */
+  onPickEnd?: (x: number, y: number) => void
+  /** 二维码：拖出区域后回调一次（外层调 Rust 识别并展示结果）。 */
+  onQrRegion?: (x: number, y: number, w: number, h: number) => void
+  /** 二维码识别结果的高亮框。定位点为**选区内**逻辑像素坐标
+   *  （Rust 侧已从物理像素换算回来），与本层画布同坐标系。
+   *  null = 不高亮（未识别 / 面板已关）。 */
+  qrHighlights?: { points: [number, number][] }[] | null
 }
 
 /** 文字输入会话（textarea 的临时状态，提交后转为 bitmap 图形）。 */
@@ -73,8 +93,14 @@ export function AnnotationLayer(props: Props) {
     mosaicBlock,
     fontSize,
     spotlightDim,
+    eraserRadius,
+    zoomLevel,
     shapes,
     onShapesChange,
+    onPickSample,
+    onPickEnd,
+    onQrRegion,
+    qrHighlights,
   } = props
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   /** 正在拖拽中的草稿（未提交） */
@@ -86,29 +112,64 @@ export function AnnotationLayer(props: Props) {
   /** 文字输入框状态。用 ref 做唯一真源：提交路径有两条（blur / 点击画布），
    *  两条都会先清空 ref，保证不会重复提交同一段文字。 */
   const editingRef = useRef<TextEdit | null>(null)
+  /** 待生成的水印区域（水印工具拖出区域后开输入框，提交时消费）。
+   *  与 editingRef 分离：输入框可以随时被 Esc 关掉，区域状态要跟着一起清。 */
+  const pendingWmRef = useRef<{ x: number; y: number; w: number; h: number } | null>(null)
   const [editing, setEditingState] = useState<TextEdit | null>(null)
   const editSeq = useRef(0)
   const taRef = useRef<HTMLTextAreaElement | null>(null)
+  /** 二维码拖选中的区域预览。动作类工具不产生 ShapeDraft，
+   *  预览框由本层自己画（虚线，与水印拖拽中的虚线框同一观感）。 */
+  const [actionRect, setActionRect] = useState<{
+    x: number
+    y: number
+    w: number
+    h: number
+  } | null>(null)
   const setEditing = (v: TextEdit | null) => {
     editingRef.current = v
     setEditingState(v)
   }
 
-  /** 在 (x, y) 开一个新的文字输入会话（逻辑像素） */
-  const startText = (x: number, y: number) => {
+  /** 在 (x, y) 开一个新的文字输入会话（逻辑像素）。
+   *  `preset` 为预填文字（水印工具用，省去用户先想写什么的一步）。 */
+  const startText = (x: number, y: number, preset = '') => {
     editSeq.current += 1
-    setEditing({ id: editSeq.current, x, y, value: '', color, fontSize })
+    setEditing({ id: editSeq.current, x, y, value: preset, color, fontSize })
   }
 
-  /** 提交文字：光栅化成位图图形（空内容直接丢弃）。 */
+  /** 提交文字：光栅化成位图图形（空内容直接丢弃）。
+   *  若存在 pendingWmRef（水印工具拖出的区域），则生成水印图形而不是文字位图。 */
   const commitText = (sessionId?: number) => {
     const ed = editingRef.current
     if (!ed) return
     // 旧输入框迟到的 blur（新会话已开始）不处理
     if (sessionId !== undefined && ed.id !== sessionId) return
     setEditing(null)
+    const wm = pendingWmRef.current
+    pendingWmRef.current = null
     const r = rasterizeText(ed.value, ed.color, ed.fontSize, props.scaleFactor)
     if (!r) return
+    if (wm) {
+      // 水印：同一块文字位图按步进平铺进整个区域（Rust 侧只做重复 blit）
+      onShapesChange([
+        ...shapes,
+        {
+          type: 'watermark',
+          x: wm.x,
+          y: wm.y,
+          w: wm.w,
+          h: wm.h,
+          stepX: round2(r.w + WATERMARK_GAP.x),
+          stepY: round2(r.h + WATERMARK_GAP.y),
+          png: r.png,
+          canvas: r.canvas,
+          tileW: round2(r.w),
+          tileH: round2(r.h),
+        },
+      ])
+      return
+    }
     onShapesChange([
       ...shapes,
       {
@@ -152,6 +213,8 @@ export function AnnotationLayer(props: Props) {
     ctx.lineJoin = 'round'
     for (const s of shapes) drawShape(ctx, s, imageEl, scaleFactor)
     if (draftRef.current) drawShape(ctx, draftRef.current, imageEl, scaleFactor)
+    if (actionRect) drawDashRect(ctx, actionRect)
+    if (qrHighlights) drawQrHighlights(ctx, qrHighlights)
   })
 
   const localPoint = (e: ReactPointerEvent<HTMLCanvasElement>) => {
@@ -164,11 +227,23 @@ export function AnnotationLayer(props: Props) {
     e.stopPropagation()
     e.preventDefault()
     const p = localPoint(e)
+    // 动作类工具（取色 / 二维码）：不产生 ShapeDraft，只把手势坐标交给外层。
+    // 提前分流，避免落到下面"按工具造草稿"的分支里被当成 rect 之类处理。
+    if (isActionTool(tool)) {
+      drawingRef.current = true
+      startRef.current = { x: round2(p.x), y: round2(p.y) }
+      setActionRect(null)
+      // 取色器按下即取一次色：单击（不拖动）也能取到色
+      if (tool === 'pick') onPickSample?.(p.x, p.y)
+      return
+    }
     // 文字：单击落点开输入框（不是拖拽成形）。
     // 已有输入框时先提交，并**延后一帧再开新框**——鼠标按下会让旧输入框失焦，
     // 若同帧内就把新会话塞进去，那条迟到的 blur 会把刚开的新输入框直接提交掉
     // （表现为"点第二下打不了字"）。先提交 → 引用置空 → blur 空转 → 再开新框。
     if (tool === 'text') {
+      // 切到普通文字：作废可能残留的水印待生成区域（防御，正常路径已消费）
+      pendingWmRef.current = null
       if (editingRef.current) {
         commitText()
         const nx = round2(p.x)
@@ -206,7 +281,14 @@ export function AnnotationLayer(props: Props) {
     drawingRef.current = true
     const meta = toolMeta(tool)
     startRef.current = { x: round2(p.x), y: round2(p.y) }
-    if (meta.trajectory) {
+    if (tool === 'eraser') {
+      // 橡皮擦走轨迹链路，但半径独立于线宽（擦除半径通常比笔触粗）
+      draftRef.current = {
+        type: 'eraser',
+        points: [[round2(p.x), round2(p.y)]],
+        radius: eraserRadius,
+      }
+    } else if (meta.trajectory) {
       draftRef.current = {
         type: tool === 'pen' ? 'pen' : 'highlighter',
         points: [[round2(p.x), round2(p.y)]],
@@ -232,6 +314,43 @@ export function AnnotationLayer(props: Props) {
         h: 0,
         radius: SPOTLIGHT_RADIUS,
         dim: spotlightDim,
+      }
+    } else if (tool === 'zoom') {
+      // 放大镜：拖出区域即放大（预览与 Rust 都从**原图**取样）
+      draftRef.current = {
+        type: 'zoom',
+        x: round2(p.x),
+        y: round2(p.y),
+        w: 0,
+        h: 0,
+        zoom: zoomLevel,
+        color,
+        width,
+      }
+    } else if (tool === 'smartErase') {
+      // 智能擦除：iterations=0 表示 Rust 侧按区域尺寸自动收敛
+      draftRef.current = {
+        type: 'smartErase',
+        x: round2(p.x),
+        y: round2(p.y),
+        w: 0,
+        h: 0,
+        iterations: 0,
+      }
+    } else if (tool === 'watermark') {
+      // 水印：先拖区域（此时还没有文字位图，预览只画虚线框），
+      // 抬起后再开输入框，见 onPointerUp
+      draftRef.current = {
+        type: 'watermark',
+        x: round2(p.x),
+        y: round2(p.y),
+        w: 0,
+        h: 0,
+        stepX: 0,
+        stepY: 0,
+        png: '',
+        tileW: 0,
+        tileH: 0,
       }
     } else if (tool === 'arrow') {
       draftRef.current = {
@@ -261,9 +380,24 @@ export function AnnotationLayer(props: Props) {
     if (!drawingRef.current) return
     e.stopPropagation()
     const p = localPoint(e)
+    // 动作类工具没有草稿图形，提前分流
+    if (tool === 'pick') {
+      onPickSample?.(p.x, p.y)
+      return
+    }
+    if (tool === 'qr') {
+      const s0 = startRef.current ?? { x: p.x, y: p.y }
+      setActionRect({
+        x: Math.min(s0.x, round2(p.x)),
+        y: Math.min(s0.y, round2(p.y)),
+        w: Math.abs(round2(p.x) - s0.x),
+        h: Math.abs(round2(p.y) - s0.y),
+      })
+      return
+    }
     const d = draftRef.current
     if (!d) return
-    if (d.type === 'pen' || d.type === 'highlighter') {
+    if (d.type === 'pen' || d.type === 'highlighter' || d.type === 'eraser') {
       const last = d.points[d.points.length - 1]
       // 去抖：位移过小不记录（减小数据量与 IPC 体积）
       if (Math.abs(p.x - last[0]) < 0.75 && Math.abs(p.y - last[1]) < 0.75) return
@@ -271,7 +405,7 @@ export function AnnotationLayer(props: Props) {
       redraw(props, draftRef.current, canvasRef.current, imageEl)
       return
     }
-    // 拖拽成形的四种（rect/ellipse/arrow/mosaic）
+    // 拖拽成形的（rect/ellipse/arrow/mosaic/spotlight/zoom/smartErase/watermark）
     if (d.type === 'arrow') {
       d.x2 = round2(p.x)
       d.y2 = round2(p.y)
@@ -292,15 +426,44 @@ export function AnnotationLayer(props: Props) {
     if (!drawingRef.current) return
     e.stopPropagation()
     drawingRef.current = false
+    const p = localPoint(e)
+    const s0 = startRef.current
     startRef.current = null
+    // 动作类工具收尾
+    if (tool === 'pick') {
+      setActionRect(null)
+      // 松开即复制：取色器的完整交互是"按住移动看颜色，松手定下并复制"
+      onPickEnd?.(p.x, p.y)
+      return
+    }
+    if (tool === 'qr') {
+      const w = Math.abs(p.x - (s0?.x ?? p.x))
+      const h = Math.abs(p.y - (s0?.y ?? p.y))
+      setActionRect(null)
+      // 单击（区域过小）不触发识别：多半只是切工具时误点
+      if (s0 && w >= MIN_DRAG && h >= MIN_DRAG) {
+        onQrRegion?.(Math.min(s0.x, p.x), Math.min(s0.y, p.y), w, h)
+      }
+      return
+    }
     const d = draftRef.current
     draftRef.current = null
     if (!d) return
     if (d.type === 'pen' || d.type === 'highlighter') {
       if (d.points.length >= 2) onShapesChange([...shapes, d])
+    } else if (d.type === 'eraser') {
+      // 单击也成立：单点擦一个小圆点（与 Rust eraser_region 的单点圆盘一致）
+      onShapesChange([...shapes, d])
     } else if (d.type === 'arrow') {
       // 箭头用两端点距离判定，太短视为误触
       if (Math.hypot(d.x2 - d.x1, d.y2 - d.y1) >= MIN_DRAG) onShapesChange([...shapes, d])
+    } else if (d.type === 'watermark') {
+      // 区域够大：记住区域并开文字输入框（预填默认文字，用户直接改写）。
+      // 提交逻辑在 commitText：文字光栅化成平铺块，生成水印图形。
+      if (d.w >= MIN_DRAG && d.h >= MIN_DRAG) {
+        pendingWmRef.current = { x: d.x, y: d.y, w: d.w, h: d.h }
+        startText(d.x, d.y, WATERMARK_DEFAULT_TEXT)
+      }
     } else if (d.w >= MIN_DRAG && d.h >= MIN_DRAG) {
       onShapesChange([...shapes, d])
     }
@@ -349,9 +512,10 @@ export function AnnotationLayer(props: Props) {
           onBlur={() => commitText(editing.id)}
           onKeyDown={(e) => {
             if (e.key === 'Escape') {
-              // 只关输入框，不退出截图
+              // 只关输入框，不退出截图；水印的待生成区域一并作废
               e.preventDefault()
               e.stopPropagation()
+              pendingWmRef.current = null
               setEditing(null)
             } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
               e.preventDefault()
@@ -366,6 +530,67 @@ export function AnnotationLayer(props: Props) {
 
 function round2(v: number): number {
   return Math.round(v * 100) / 100
+}
+
+/** 动作类工具的拖选预览：虚线框（二维码选区用）。 */
+function drawDashRect(
+  ctx: CanvasRenderingContext2D,
+  r: { x: number; y: number; w: number; h: number },
+) {
+  if (r.w <= 0 || r.h <= 0) return
+  ctx.save()
+  ctx.setLineDash([4, 3])
+  ctx.strokeStyle = 'rgba(120,120,120,0.9)'
+  ctx.lineWidth = 1
+  ctx.strokeRect(r.x, r.y, r.w, r.h)
+  ctx.restore()
+}
+
+/** 二维码高亮框：定位点的外接框 + 序号圆点（序号与结果面板的行序一致）。
+ *
+ *  为什么要画框：识别结果面板只告诉用户"找到了什么"，框才告诉用户
+ *  "在哪里"——一屏多个码时，没有框根本分不清哪条内容对应哪个码。
+ *  画在标注之上（本函数在 redraw 的最后调用），所以不会被标注盖住。 */
+function drawQrHighlights(
+  ctx: CanvasRenderingContext2D,
+  codes: { points: [number, number][] }[],
+) {
+  codes.forEach((c, i) => {
+    if (c.points.length === 0) return
+    let minX = Infinity
+    let minY = Infinity
+    let maxX = -Infinity
+    let maxY = -Infinity
+    for (const [x, y] of c.points) {
+      if (x < minX) minX = x
+      if (y < minY) minY = y
+      if (x > maxX) maxX = x
+      if (y > maxY) maxY = y
+    }
+    const w = maxX - minX
+    const h = maxY - minY
+    if (w <= 0 || h <= 0) return
+    const pad = 3
+    ctx.save()
+    ctx.strokeStyle = '#2563eb'
+    ctx.lineWidth = 1.6
+    ctx.setLineDash([])
+    ctx.strokeRect(minX - pad, minY - pad, w + pad * 2, h + pad * 2)
+    // 序号圆点：半径按逻辑像素固定，位置在框的左上角外侧
+    const r = 7
+    const cx = minX - pad
+    const cy = minY - pad
+    ctx.beginPath()
+    ctx.arc(cx, cy, r, 0, Math.PI * 2)
+    ctx.fillStyle = '#2563eb'
+    ctx.fill()
+    ctx.fillStyle = '#fff'
+    ctx.font = `600 ${Math.round(r * 1.3)}px system-ui, "Segoe UI", sans-serif`
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    ctx.fillText(String(i + 1), cx, cy + 0.5)
+    ctx.restore()
+  })
 }
 
 /** 全量重绘（草稿 pass=null 表示只画已确认 shapes）。 */
@@ -538,8 +763,14 @@ export function drawShape(
   imageEl: HTMLImageElement | null,
   sf: number,
 ) {
-  // 马赛克 / 位图 / 聚光灯没有描边色与线宽，只有几何参数
-  const hasStroke = s.type !== 'mosaic' && s.type !== 'bitmap' && s.type !== 'spotlight'
+  // 马赛克 / 位图 / 聚光灯 / 橡皮擦 / 水印 / 智能擦除没有描边色与线宽
+  const hasStroke =
+    s.type !== 'mosaic' &&
+    s.type !== 'bitmap' &&
+    s.type !== 'spotlight' &&
+    s.type !== 'eraser' &&
+    s.type !== 'watermark' &&
+    s.type !== 'smartErase'
   if (hasStroke) {
     ctx.strokeStyle = rgba(s.color)
     ctx.fillStyle = rgba(s.color)
@@ -583,6 +814,82 @@ export function drawShape(
         ctx.moveTo(s.points[0][0], s.points[0][1])
         for (const p of s.points.slice(1)) ctx.lineTo(p[0], p[1])
         ctx.stroke()
+      }
+      break
+    case 'eraser': {
+      // 预览用 destination-out 在标注画布上"打洞"，露出下方的冻结图
+      // ——与 Rust「从 base 还原像素」观感等价：画布上本来就只有标注，
+      // 洞外露出的就是原图。按 shapes 顺序绘制，天然获得
+      // "擦掉之前的、保留之后的"语义（与 Rust 的按序光栅化一致）。
+      ctx.save()
+      ctx.globalCompositeOperation = 'destination-out'
+      ctx.fillStyle = '#000'
+      if (s.points.length === 1) {
+        ctx.beginPath()
+        ctx.arc(s.points[0][0], s.points[0][1], s.radius / 2, 0, Math.PI * 2)
+        ctx.fill()
+      } else {
+        ctx.lineWidth = s.radius
+        ctx.beginPath()
+        ctx.moveTo(s.points[0][0], s.points[0][1])
+        for (const p of s.points.slice(1)) ctx.lineTo(p[0], p[1])
+        ctx.stroke()
+      }
+      ctx.restore()
+      break
+    }
+    case 'zoom': {
+      if (s.w <= 0 || s.h <= 0) break
+      if (imageEl) {
+        const iw = imageEl.naturalWidth
+        const ih = imageEl.naturalHeight
+        // 源矩形（物理像素）= 区域按 zoom 缩小，与 Rust 的最近邻映射同源
+        let sx = Math.round(s.x * sf)
+        let sy = Math.round(s.y * sf)
+        let sw = Math.round(s.w * sf) / s.zoom
+        let sh = Math.round(s.h * sf) / s.zoom
+        // 区域伸出画布时按比例裁源矩形，不越界取样
+        if (sx < 0) {
+          sw += sx
+          sx = 0
+        }
+        if (sy < 0) {
+          sh += sy
+          sy = 0
+        }
+        if (sx + sw > iw) sw = iw - sx
+        if (sy + sh > ih) sh = ih - sy
+        if (sw > 0 && sh > 0) {
+          ctx.save()
+          // 关掉平滑 = 最近邻，与 Rust 的 zoom_region 取样方式一致
+          ctx.imageSmoothingEnabled = false
+          ctx.drawImage(imageEl, sx, sy, sw, sh, s.x, s.y, s.w, s.h)
+          ctx.restore()
+        }
+      }
+      // 边框最后画，避免被放大内容盖住（与 Rust 一致）
+      ctx.strokeRect(s.x, s.y, s.w, s.h)
+      break
+    }
+    case 'smartErase':
+      if (s.w > 0 && s.h > 0 && imageEl) drawSmartErasePreview(ctx, s, imageEl, sf)
+      break
+    case 'watermark':
+      if (s.w <= 0 || s.h <= 0) break
+      if (s.canvas) {
+        // 单块位图按步进平铺（与 Rust watermark_region 同一网格）
+        for (let ty = s.y; ty < s.y + s.h; ty += s.stepY) {
+          for (let tx = s.x; tx < s.x + s.w; tx += s.stepX) {
+            ctx.drawImage(s.canvas, tx, ty, s.tileW, s.tileH)
+          }
+        }
+      } else {
+        // 拖拽中（还没有文字）：虚线框标出将要平铺的区域
+        ctx.save()
+        ctx.setLineDash([4, 3])
+        ctx.strokeStyle = 'rgba(120,120,120,0.9)'
+        ctx.strokeRect(s.x, s.y, s.w, s.h)
+        ctx.restore()
       }
       break
     case 'mosaic':
@@ -693,8 +1000,13 @@ function drawArrow(
   }
 }
 
-/** 马赛克预览：先把目标区域缩成 block 大小缩略图（缩小=平均），
- *  再关闭平滑放大回去（放大=块状）。与 Rust 块平均算法同效果。 */
+/** 马赛克预览：**逐块求真平均**，与 core-algo::draw::mosaic_region 同算法。
+ *
+ *  早期版本用"把区域缩小到块大小（靠缩放插值近似平均）再关掉平滑放大"，
+ *  看起来像块平均，实际上是错的：Chrome 的缩小过滤是**稀疏采样**，块越大
+ *  越会漏掉笔画像素，结果整体偏白（黑字被跳过、只剩白底），与 Rust 输出的
+ *  纯色块对不上。所以这里改成读像素、按块累加求均值、再逐块 fillRect。
+ */
 function drawMosaicPreview(
   ctx: CanvasRenderingContext2D,
   s: Extract<ShapeDraft, { type: 'mosaic' }>,
@@ -703,20 +1015,101 @@ function drawMosaicPreview(
 ) {
   if (!imageEl || s.w <= 0 || s.h <= 0) return
   // 源坐标为物理像素（img 自然尺寸）
-  const sx = s.x * sf
-  const sy = s.y * sf
-  const sw = s.w * sf
-  const sh = s.h * sf
+  const sx = Math.round(s.x * sf)
+  const sy = Math.round(s.y * sf)
+  const sw = Math.round(s.w * sf)
+  const sh = Math.round(s.h * sf)
   if (sw < 1 || sh < 1) return
-  const bw = Math.max(1, Math.ceil(sw / Math.max(1, s.block * sf)))
-  const bh = Math.max(1, Math.ceil(sh / Math.max(1, s.block * sf)))
-  mosaicSmall.width = bw
-  mosaicSmall.height = bh
-  if (!mosaicSmallCtx) return
-  mosaicSmallCtx.imageSmoothingEnabled = true
-  mosaicSmallCtx.clearRect(0, 0, bw, bh)
-  mosaicSmallCtx.drawImage(imageEl, sx, sy, sw, sh, 0, 0, bw, bh)
+
+  mosaicSrc.width = sw
+  mosaicSrc.height = sh
+  const g = mosaicSrc.getContext('2d', { willReadFrequently: true })
+  if (!g) return
+  // 1:1 抠出原图区域，不能缩放（缩放会插值，就不是原像素了）
+  g.imageSmoothingEnabled = false
+  g.clearRect(0, 0, sw, sh)
+  g.drawImage(imageEl, sx, sy, sw, sh, 0, 0, sw, sh)
+  const src = g.getImageData(0, 0, sw, sh).data
+
+  // 块边长为物理像素（与截图 DPI 无关，和 Rust 侧换算保持一致）
+  const block = Math.max(2, Math.round(s.block * sf))
+  for (let by = 0; by < sh; by += block) {
+    const bh = Math.min(block, sh - by)
+    for (let bx = 0; bx < sw; bx += block) {
+      const bw = Math.min(block, sw - bx)
+      let r = 0
+      let gg = 0
+      let b = 0
+      let n = 0
+      for (let y = by; y < by + bh; y += 1) {
+        let i = (y * sw + bx) * 4
+        for (let x = 0; x < bw; x += 1) {
+          // 跳过透明像素，避免把均值拉黑（与 Rust 一致）
+          if (src[i + 3] !== 0) {
+            r += src[i]
+            gg += src[i + 1]
+            b += src[i + 2]
+            n += 1
+          }
+          i += 4
+        }
+      }
+      if (n === 0) continue
+      g.fillStyle = `rgb(${Math.round(r / n)},${Math.round(gg / n)},${Math.round(b / n)})`
+      g.fillRect(bx, by, bw, bh)
+    }
+  }
+
+  // 贴回主画布：物理尺寸 → 逻辑尺寸，关掉平滑保证块是纯色硬边
   ctx.imageSmoothingEnabled = false
-  ctx.drawImage(mosaicSmall, 0, 0, bw, bh, s.x, s.y, s.w, s.h)
+  ctx.drawImage(mosaicSrc, 0, 0, sw, sh, s.x, s.y, s.w, s.h)
   ctx.imageSmoothingEnabled = true
+}
+
+/**
+ * 智能擦除预览：**每行水平线性渐变**近似。
+ *
+ * 取区域左右边界外 1 列的原图像素，逐行在两者之间插值。这个近似对
+ * ① 纯色背景（精确）② 水平/垂直/对角等一切"对 x 线性"的图像（精确）
+ * 都是准的——日常要擦掉的文字/图标/水印几乎都长在这类背景上。
+ * 只有真正二维纹理（照片、棋盘格）才会与 Rust 的波前扩散结果有偏差，
+ * 而那种情况下预览本来也只能表达"这一片会被抹掉"。
+ */
+function drawSmartErasePreview(
+  ctx: CanvasRenderingContext2D,
+  s: Extract<ShapeDraft, { type: 'smartErase' }>,
+  imageEl: HTMLImageElement,
+  sf: number,
+) {
+  const iw = imageEl.naturalWidth
+  const ih = imageEl.naturalHeight
+  if (iw <= 0 || ih <= 0) return
+  // 区域（物理像素）与图求交
+  const rx = Math.max(0, Math.round(s.x * sf))
+  const ry = Math.max(0, Math.round(s.y * sf))
+  const rw = Math.min(iw, Math.round((s.x + s.w) * sf)) - rx
+  const rh = Math.min(ih, Math.round((s.y + s.h) * sf)) - ry
+  if (rw <= 0 || rh <= 0) return
+  // 左右边界列：越界时钳回区域自身（Rust 侧则是该侧不参与扩散）
+  const lx = Math.max(0, rx - 1)
+  const rxp = Math.min(iw - 1, rx + rw)
+  if (stripCanvas.height !== rh) stripCanvas.height = rh
+  stripCanvas.width = 2
+  const g = stripCanvas.getContext('2d', { willReadFrequently: true })
+  if (!g) return
+  g.clearRect(0, 0, 2, rh)
+  g.drawImage(imageEl, lx, ry, 1, rh, 0, 0, 1, rh)
+  g.drawImage(imageEl, rxp, ry, 1, rh, 1, 0, 1, rh)
+  const src = g.getImageData(0, 0, 2, rh).data
+  // 逐行水平渐变；行高留一点重叠，避免取整误差留下发丝缝
+  const rowH = 1 / sf + 0.05
+  for (let row = 0; row < rh; row += 1) {
+    const li = row * 8
+    const ri = row * 8 + 4
+    const grad = ctx.createLinearGradient(s.x, 0, s.x + s.w, 0)
+    grad.addColorStop(0, `rgb(${src[li]},${src[li + 1]},${src[li + 2]})`)
+    grad.addColorStop(1, `rgb(${src[ri]},${src[ri + 1]},${src[ri + 2]})`)
+    ctx.fillStyle = grad
+    ctx.fillRect(s.x, s.y + row / sf, s.w, rowH)
+  }
 }

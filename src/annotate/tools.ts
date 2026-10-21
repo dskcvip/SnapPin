@@ -10,7 +10,10 @@
 
 export type Rgba = [number, number, number, number]
 
-/** 标注工具种类（与 Rust ShapePayload 的 tag 一一对应）。 */
+/** 标注工具种类（与 Rust ShapePayload 的 tag 一一对应）。
+ *
+ *  后两类是**动作类**工具（`pick` / `qr`）：不产生标注图形，只做一次
+ *  取色或识别，因此没有对应的 ShapeDraft / ShapePayload 变体。 */
 export type AnnotateTool =
   | 'rect'
   | 'ellipse'
@@ -21,6 +24,12 @@ export type AnnotateTool =
   | 'spotlight'
   | 'text'
   | 'badge'
+  | 'eraser'
+  | 'watermark'
+  | 'zoom'
+  | 'smartErase'
+  | 'pick'
+  | 'qr'
 
 /** 已确认的标注（含工具判别字段，序列化后直传 confirm_selection）。 */
 export type ShapeDraft =
@@ -56,6 +65,41 @@ export type ShapeDraft =
        *  以及撤销后重新编号，**发送前剥离**（Rust 只认 x/y/png）。 */
       badge?: number
     }
+  /** 橡皮擦：轨迹区域还原成原图（擦掉已画上去的标注）。
+   *  `radius` 为擦除半径（逻辑像素），轨迹点同。 */
+  | { type: 'eraser'; points: [number, number][]; radius: number }
+  /** 水印：单块文字位图在 (x,y,w,h) 区域内按 (stepX,stepY) 平铺。
+   *  `png` 为 UI 层光栅化的**单块**水印（物理像素，直传 Rust）；
+   *  `canvas`/`tileW`/`tileH` 仅用于本地预览，**发送前剥离**。 */
+  | {
+      type: 'watermark'
+      x: number
+      y: number
+      w: number
+      h: number
+      stepX: number
+      stepY: number
+      png: string
+      canvas?: HTMLCanvasElement
+      /** 单块水印的逻辑像素尺寸 */
+      tileW: number
+      tileH: number
+    }
+  /** 区域放大（放大镜）：把原图内容按 `zoom` 倍放大画回同一区域，
+   *  `color`/`width` 为放大区域边框。 */
+  | {
+      type: 'zoom'
+      x: number
+      y: number
+      w: number
+      h: number
+      zoom: number
+      color: Rgba
+      width: number
+    }
+  /** 智能擦除：内容感知填充（Rust 侧零依赖波前扩散）。
+   *  `iterations` 为 0 表示按区域尺寸自动收敛。 */
+  | { type: 'smartErase'; x: number; y: number; w: number; h: number; iterations: number }
 
 export interface ToolMeta {
   id: AnnotateTool
@@ -66,21 +110,78 @@ export interface ToolMeta {
   trajectory: boolean
   /** 默认线宽（逻辑像素） */
   defaultWidth: number
+  /** `shape` = 画标注（产生 ShapeDraft）；`action` = 一次性动作，不产生图形。
+   *  动作类工具不进属性面板的线宽/颜色逻辑，也不需要发送给 Rust。 */
+  kind: 'shape' | 'action'
+}
+
+/** 动作类工具集合（取色 / 二维码识别）。 */
+export const ACTION_TOOLS: ReadonlySet<AnnotateTool> = new Set<AnnotateTool>(['pick', 'qr'])
+
+export function isActionTool(t: AnnotateTool): boolean {
+  return ACTION_TOOLS.has(t)
 }
 
 export const TOOLS: ToolMeta[] = [
-  { id: 'rect', label: '矩形', glyph: '□', trajectory: false, defaultWidth: 2 },
-  { id: 'ellipse', label: '椭圆', glyph: '○', trajectory: false, defaultWidth: 2 },
-  { id: 'arrow', label: '箭头', glyph: '↗', trajectory: false, defaultWidth: 2 },
-  { id: 'pen', label: '铅笔', glyph: '✎', trajectory: true, defaultWidth: 2 },
-  { id: 'highlighter', label: '荧光笔', glyph: '▬', trajectory: true, defaultWidth: 14 },
-  { id: 'mosaic', label: '马赛克', glyph: '▦', trajectory: false, defaultWidth: 12 },
+  { id: 'rect', label: '矩形', glyph: '□', trajectory: false, defaultWidth: 2, kind: 'shape' },
+  { id: 'ellipse', label: '椭圆', glyph: '○', trajectory: false, defaultWidth: 2, kind: 'shape' },
+  { id: 'arrow', label: '箭头', glyph: '↗', trajectory: false, defaultWidth: 2, kind: 'shape' },
+  { id: 'pen', label: '铅笔', glyph: '✎', trajectory: true, defaultWidth: 2, kind: 'shape' },
+  {
+    id: 'highlighter',
+    label: '荧光笔',
+    glyph: '▬',
+    trajectory: true,
+    defaultWidth: 14,
+    kind: 'shape',
+  },
+  { id: 'mosaic', label: '马赛克', glyph: '▦', trajectory: false, defaultWidth: 12, kind: 'shape' },
   // 聚光灯不用线宽（defaultWidth 记的是圆角半径，见 SPOTLIGHT_RADIUS）
-  { id: 'spotlight', label: '聚光灯', glyph: '◎', trajectory: false, defaultWidth: 12 },
+  {
+    id: 'spotlight',
+    label: '聚光灯',
+    glyph: '◎',
+    trajectory: false,
+    defaultWidth: 12,
+    kind: 'shape',
+  },
   // 文字不走"拖拽成形"，defaultWidth 对它是**字号**（见 TEXT_FONT_SIZE）
-  { id: 'text', label: '文字', glyph: 'T', trajectory: false, defaultWidth: 16 },
+  { id: 'text', label: '文字', glyph: 'T', trajectory: false, defaultWidth: 16, kind: 'shape' },
   // 序号：单击落点盖一个编号圆点，与文字共用字号（决定圆直径）
-  { id: 'badge', label: '序号', glyph: '①', trajectory: false, defaultWidth: 16 },
+  { id: 'badge', label: '序号', glyph: '①', trajectory: false, defaultWidth: 16, kind: 'shape' },
+  // 橡皮擦是轨迹类；defaultWidth 记的是**擦除半径**（见 ERASER_RADIUS）
+  {
+    id: 'eraser',
+    label: '橡皮擦',
+    glyph: '⌫',
+    trajectory: true,
+    defaultWidth: 16,
+    kind: 'shape',
+  },
+  // 水印：先拖区域，再在弹出的输入框里写文字（文字光栅化成平铺块）
+  {
+    id: 'watermark',
+    label: '水印',
+    glyph: '◫',
+    trajectory: false,
+    defaultWidth: 16,
+    kind: 'shape',
+  },
+  // 放大镜：拖区域即放大；defaultWidth 记的是边框线宽
+  { id: 'zoom', label: '放大镜', glyph: '🔍', trajectory: false, defaultWidth: 2, kind: 'shape' },
+  // 智能擦除：拖区域即内容感知填充，无参数
+  {
+    id: 'smartErase',
+    label: '智能擦除',
+    glyph: '✥',
+    trajectory: false,
+    defaultWidth: 0,
+    kind: 'shape',
+  },
+  // 取色器：动作类。在选区内移动即取色，松开复制 HEX
+  { id: 'pick', label: '取色器', glyph: '⬗', trajectory: false, defaultWidth: 2, kind: 'action' },
+  // 二维码识别：动作类。拖选区域后调 Rust 识别（支持一图多码）
+  { id: 'qr', label: '二维码', glyph: '▤', trajectory: false, defaultWidth: 2, kind: 'action' },
 ]
 
 /** 文字字体栈：优先系统 UI 字体，再回退到三大平台的中文字体。
@@ -102,9 +203,16 @@ export const BADGE_DIAMETER_RATIO = 1.9
  *  把 Canvas 元素混进去虽然不致命，但会给 Rust 侧载荷增加无意义字段。 */
 export function toShapePayloads(shapes: ShapeDraft[]): unknown[] {
   return shapes.map((s) => {
-    if (s.type !== 'bitmap') return s
-    const { canvas: _canvas, badge: _badge, ...rest } = s
-    return rest
+    if (s.type === 'bitmap') {
+      const { canvas: _canvas, badge: _badge, ...rest } = s
+      return rest
+    }
+    if (s.type === 'watermark') {
+      // 水印的 canvas（预览重绘用）与 tile 尺寸（Rust 从 PNG 自解码）都剥离
+      const { canvas: _canvas, tileW: _tileW, tileH: _tileH, ...rest } = s
+      return rest
+    }
+    return s
   })
 }
 
@@ -143,6 +251,20 @@ export const SPOTLIGHT_DIM = { min: 40, max: 230, default: 150 }
 
 /** 聚光灯圆角半径（逻辑像素），随 DPR 转物理像素。 */
 export const SPOTLIGHT_RADIUS = 12
+
+/** 橡皮擦半径（逻辑像素）。下限 4 保证"看得见在擦"，上限 48 避免
+ *  一眨眼擦掉半张图（撤销成本高，feedback 优先保守）。 */
+export const ERASER_RADIUS = { min: 4, max: 48, default: 16 }
+
+/** 放大镜倍数档位（逻辑倍率，Rust 侧最近邻取样，与前端预览一致）。 */
+export const ZOOM_LEVELS = [1.5, 2, 3, 4, 6]
+
+/** 水印平铺步进 = 单块尺寸 + 固定间隙（逻辑像素）。
+ *  横向间隙小于纵向：文字水印按行读，行距大一点更像"背景水印"而不是网格。 */
+export const WATERMARK_GAP = { x: 14, y: 22 }
+
+/** 水印输入框的预填文字：用户直接改写即可，省去"先想写什么"的一步。 */
+export const WATERMARK_DEFAULT_TEXT = 'SnapPin'
 
 export function toolMeta(id: AnnotateTool): ToolMeta {
   return TOOLS.find((t) => t.id === id) ?? TOOLS[0]

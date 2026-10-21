@@ -5,6 +5,9 @@
   place-items: center;
   overflow: hidden;
   cursor: grab;
+  /* 容器查询上下文：工具条按**窗口**宽度自适应（见文末 @container）。
+     窗口 = 图片 + PIN_MARGIN*2，容器就是窗口本身，量到的即用户可见宽度。 */
+  container-type: size;
 }
 
 .pin-root:active {
@@ -37,6 +40,13 @@
   opacity: 0;
   transition: opacity 0.15s ease;
   cursor: default;
+  /* 窄图防裁切（用户实测反馈：图窄时"菜单显示不完整"）：
+     工具条内容定宽 ~384px，而窗口只有 图宽+20px。两条兜底——
+     ① max-width 把工具条盒宽钳进窗口内，right 锚定不变；
+     ② flex-wrap 让装不下的按钮换行，而不是溢出被窗口裁掉。 */
+  max-width: calc(100% - 12px);
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .pin-root:hover .pin-toolbar {
@@ -91,6 +101,26 @@
     0 0 14px 2px rgba(255, 150, 64, 0.3);
 }
 
+/* 关闭"边框阴影"（右键菜单勾选 / Y 键）：内边框 + 外发光一并去掉，
+   贴图变成纯图片（无描边、无投影）。
+   锁定/穿透的状态环是状态指示而非装饰，继续保留。
+   放在 locked/pass-through 之后：同特异性下后来者胜，组合态才正确。 */
+.pin-root.no-shadow .pin-img {
+  box-shadow: none;
+}
+
+.pin-root.no-shadow.locked .pin-img {
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.55),
+    0 0 0 1px rgba(37, 99, 235, 0.85);
+}
+
+.pin-root.no-shadow.pass-through .pin-img {
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.55),
+    0 0 0 1px rgba(56, 189, 248, 0.9);
+}
+
 .pin-toast {
   position: absolute;
   left: 50%;
@@ -119,4 +149,13 @@
 
 .pin-opacity input {
   width: 64px;
+}
+
+/* 窄窗口（图宽 < ~420px）：先收起透明度滑条，让按钮尽量保持一行。
+   透明度并未消失——Alt+滚轮同样可调（label 的 title 有说明）。
+   再窄就连按钮一起换行（上面的 flex-wrap 兜底），保证任何宽度都完整可见。 */
+@container (max-width: 440px) {
+  .pin-opacity {
+    display: none;
+  }
 }

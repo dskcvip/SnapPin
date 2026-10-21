@@ -1,16 +1,21 @@
 //! IPC 命令层：前端的唯一入口。契约见 docs/CONTRACTS.md。
 
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
-use tauri::{AppHandle, Manager, State, Window};
+use tauri::{AppHandle, Emitter, Manager, State, Window};
+use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
 use crate::config::AppConfig;
-use crate::state::{AppState, PinMeta};
+use crate::state::{AppState, LongSession, MenuKind, PinFlags, PinMeta};
 use crate::windows;
+use snappin_core_algo::stitch::StitchOptions;
 use snappin_core_algo::Rect as AlgoRect;
+use snappin_core_platform::stitch::{
+    write_thumbnail, LongCapture, StepOutcome, StitchStepKind, UiCallback,
+};
 
 // ---------- 载荷类型（响应字段统一 camelCase，与前端 TS 契约一致） ----------
 
@@ -91,8 +96,17 @@ pub struct RectPayload {
 /// 用 `#[serde(tag = "type")]` 内部标签判别，前端发
 /// `{ type: "rect", x, y, w, h, color: [r,g,b,a], width }` 形态的对象。
 /// 到 Rust 后由 `to_shapes` 统一乘 DPI 缩放因子转成物理像素。
-#[derive(Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[derive(Deserialize, serde::Serialize)]
+/// **两个 rename 的作用不同，缺一不可**：/// - `rename_all`：变体名 → JSON 的 `type` 值（`Rect` → `"rect"`）；
+/// - `rename_all_fields`：变体**字段**名 → camelCase（`step_x` → `"stepX"`）。
+///
+/// 只写前者时，单词字段（x/y/w/h/color/width…）刚好两边同名，问题被掩盖；
+/// 一旦出现多词字段（水印的 `step_x`/`step_y`）就会报
+/// `missing field step_x` —— 前端按契约发的都是 camelCase。
+///
+/// 派生 `Serialize` 纯粹为了让契约测试能"解析→回写"双向校验字段名，
+/// 运行期只反序列化（载荷方向是前端 → Rust）。
+#[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum ShapePayload {
     Rect {
         x: f32,
@@ -155,6 +169,51 @@ pub enum ShapePayload {
         radius: f32,
         dim: u8,
     },
+    /// 橡皮擦：把轨迹还原成原图（擦掉已画上去的标注）。
+    /// `radius` 为擦除半径（逻辑像素），轨迹点为逻辑像素。
+    Eraser {
+        points: Vec<[f32; 2]>,
+        radius: f32,
+    },
+    /// 水印：把一小块位图按步进平铺进指定区域。
+    ///
+    /// `png` 为 UI 层用系统字体光栅化的**单块**水印（base64 PNG，无
+    /// `data:` 前缀，尺寸已是物理像素）——字体/CJK/emoji 都不进核心层。
+    /// `step` 为平铺步进（逻辑像素），`w`/`h` 为平铺区域（逻辑像素）。
+    Watermark {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        step_x: f32,
+        step_y: f32,
+        png: String,
+    },
+    /// 区域放大（放大镜）：把原图内容按 `zoom` 倍放大画回同一区域，
+    /// `color`/`width` 为放大区域边框样式（逻辑像素）。
+    ///
+    /// `rename = "zoom"`：Rust 变体名 `ZoomRegion` 按 camelCase 会序列化成
+    /// `"zoomRegion"`，而前端 `tools.ts` 的判别字段是 `type: 'zoom'`——
+    /// 不显式指定就会报 `unknown variant zoom`（放大镜标注保存失败）。
+    #[serde(rename = "zoom")]
+    ZoomRegion {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        zoom: f32,
+        color: [u8; 4],
+        width: f32,
+    },
+    /// 智能擦除：内容感知填充（零依赖近似 inpaint）。
+    /// `iterations` 为 0 表示按区域尺寸自动收敛。
+    SmartErase {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        iterations: u32,
+    },
 }
 
 impl ShapePayload {
@@ -202,7 +261,9 @@ impl ShapePayload {
                 y: (*y * sf) as i32,
                 w: (*w * sf).max(1.0) as u32,
                 h: (*h * sf).max(1.0) as u32,
-                block: (*block).max(2),
+                // 块边长同样是逻辑像素：前端按"块看起来多大"调，
+                // 到了物理像素必须一起乘 DPR，否则高 DPI 下块会偏小一半
+                block: ((*block as f32 * sf).round() as u32).max(2),
             },
             // 位图已是物理像素：只把锚点换算过去，尺寸与像素原样使用
             ShapePayload::Bitmap { x, y, png } => {
@@ -223,6 +284,44 @@ impl ShapePayload {
                 radius: (*radius * sf).max(0.0) as u32,
                 dim: *dim,
             },
+            ShapePayload::Eraser { points, radius } => Shape::Eraser {
+                points: points.iter().map(|p| (p[0] * sf, p[1] * sf)).collect(),
+                radius: radius * sf,
+            },
+            // 水印位图已是物理像素（前端按 DPR 光栅化）：只换算锚点、
+            // 平铺区域与步进，tile 尺寸与像素原样使用
+            ShapePayload::Watermark {
+                x, y, w, h, step_x, step_y, png,
+            } => {
+                let (tile_w, tile_h, tile) = decode_png_base64(png)?;
+                Shape::Watermark {
+                    x: (*x * sf) as i32,
+                    y: (*y * sf) as i32,
+                    w: (*w * sf).max(1.0) as u32,
+                    h: (*h * sf).max(1.0) as u32,
+                    // 步进同为逻辑像素：高 DPI 下不乘 sf 会让水印挤成一团
+                    step_x: ((*step_x * sf).round() as u32).max(1),
+                    step_y: ((*step_y * sf).round() as u32).max(1),
+                    tile_w,
+                    tile_h,
+                    tile,
+                }
+            }
+            ShapePayload::ZoomRegion { x, y, w, h, zoom, color, width } => Shape::ZoomRegion {
+                x: (*x * sf) as i32,
+                y: (*y * sf) as i32,
+                w: (*w * sf).max(1.0) as u32,
+                h: (*h * sf).max(1.0) as u32,
+                zoom: *zoom,
+                style: style(*color, *width),
+            },
+            ShapePayload::SmartErase { x, y, w, h, iterations } => Shape::SmartErase {
+                x: (*x * sf) as i32,
+                y: (*y * sf) as i32,
+                w: (*w * sf).max(1.0) as u32,
+                h: (*h * sf).max(1.0) as u32,
+                iterations: *iterations,
+            },
         };
         Ok(shape)
     }
@@ -233,20 +332,7 @@ impl ShapePayload {
 /// 位图来自可信的本应用前端，但仍按不可信输入处理：长度、尺寸、
 /// 解码失败都要给出明确错误，不做任何 `unwrap`。
 fn decode_png_base64(png_b64: &str) -> Result<(u32, u32, Vec<u8>), String> {
-    use base64::Engine as _;
-    // 前端可能带着 data URL 前缀传上来（防御性处理）
-    let body = png_b64
-        .rsplit_once(',')
-        .filter(|(head, _)| head.starts_with("data:"))
-        .map(|(_, tail)| tail)
-        .unwrap_or(png_b64)
-        .trim();
-    if body.is_empty() {
-        return Err("bitmap payload is empty".to_string());
-    }
-    let raw = base64::engine::general_purpose::STANDARD
-        .decode(body)
-        .map_err(|e| format!("bitmap base64 decode failed: {e}"))?;
+    let raw = decode_base64_bytes(png_b64)?;
     let img = image::load_from_memory_with_format(&raw, image::ImageFormat::Png)
         .map_err(|e| format!("bitmap png decode failed: {e}"))?
         .to_rgba8();
@@ -255,6 +341,40 @@ fn decode_png_base64(png_b64: &str) -> Result<(u32, u32, Vec<u8>), String> {
         return Err("bitmap has zero size".to_string());
     }
     Ok((w, h, img.into_raw()))
+}
+
+/// base64（可带 data URL 前缀）→ 原始字节。
+///
+/// 与 `decode_png_base64` 共用同一套防御：空载荷、非法 base64 都返回错误。
+fn decode_base64_bytes(b64: &str) -> Result<Vec<u8>, String> {
+    use base64::Engine as _;
+    let body = b64
+        .rsplit_once(',')
+        .filter(|(head, _)| head.starts_with("data:"))
+        .map(|(_, tail)| tail)
+        .unwrap_or(b64)
+        .trim();
+    if body.is_empty() {
+        return Err("bitmap payload is empty".to_string());
+    }
+    base64::engine::general_purpose::STANDARD
+        .decode(body)
+        .map_err(|e| format!("bitmap base64 decode failed: {e}"))
+}
+
+/// 只校验 PNG 签名与 IHDR，不做完整解码。
+///
+/// 处理后的图直接落盘给 `load_rgba` 用，这里只要能挡住"空/截断/不是 PNG"
+/// 的脏数据即可；完整解码留给读的那一侧（省一次 4K 解码）。
+fn validate_png_header(raw: &[u8]) -> Result<(), String> {
+    const SIG: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    if raw.len() < 24 || raw[..8] != SIG {
+        return Err("处理后的图像不是合法的 PNG".to_string());
+    }
+    if &raw[12..16] != b"IHDR" {
+        return Err("处理后的 PNG 缺少 IHDR 块".to_string());
+    }
+    Ok(())
 }
 
 /// 载荷列表 → core-algo 图形列表。
@@ -461,7 +581,15 @@ pub async fn confirm_selection(
         // 保证所见即所得）。标注坐标同为逻辑像素，这里一起换算。
         if let Some(payloads) = &shapes {
             if !payloads.is_empty() {
-                snappin_core_algo::draw::draw_shapes(&mut cropped, &to_shapes(payloads, sf)?);
+                // base = 画任何标注之前的原始裁剪图。橡皮擦（还原原图）、
+                // 放大镜（放大原图内容）、智能擦除（从原图边界扩散）三个
+                // 变体都要从它取像素；普通图形不受影响。
+                let base = cropped.clone();
+                snappin_core_algo::draw::draw_shapes_with_base(
+                    &mut cropped,
+                    &base,
+                    &to_shapes(payloads, sf)?,
+                );
             }
         }
         let (ox, oy) = m.logical_origin();
@@ -478,9 +606,6 @@ pub async fn confirm_selection(
     match action.as_str() {
         "copy" => {
             snappin_core_platform::clipboard_copy_image(&cropped).map_err(|e| e.to_string())?;
-            // 武装 Ctrl+V：复制成功后短时间内，全局 Ctrl+V 由 SnapPin
-            // 拦截并弹出贴图窗口（跟随鼠标），过期后恢复正常粘贴。
-            crate::arm_paste(&app, &state);
         }
         "pin" => {
             let label = pin_label(&path);
@@ -580,17 +705,305 @@ pub fn ui_log(window: Window, msg: String) {
     eprintln!("[ui:{}] {msg}", window.label());
 }
 
+/// 复制纯文本到剪贴板（取色器的 HEX、二维码识别结果都走这里）。
+///
+/// 不用前端的 `navigator.clipboard`：WebView2 里写入剪贴板需要文档焦点与
+/// 用户手势校验，而截图工具的场景常常是"窗口刚抢走焦点"（点完工具条
+/// 立刻要写剪贴板），浏览器侧容易静默失败。arboard 走系统 API 最稳。
+#[tauri::command]
+pub fn copy_text(text: String) -> Result<(), String> {
+    snappin_core_platform::clipboard_copy_text(&text).map_err(|e| e.to_string())
+}
+
+/// 用系统默认浏览器打开链接（二维码识别结果的"打开链接"按钮）。
+///
+/// **只放行 http/https**：二维码内容是用户不可控的外部数据，绝不能把
+/// `file:`/`ms-msapp:`/任意协议喂给系统的"打开"处理器——一个 `file:` 链接
+/// 就能读到本地文件，属于把工具变成攻击面。
+#[tauri::command]
+pub fn open_url(url: String) -> Result<(), String> {
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err("only http/https links can be opened".to_string());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // 不弹黑色控制台窗口：start 是 cmd 内建命令，借道 cmd 必然带窗口，
+        // 用 CREATE_NO_WINDOW 压掉（0x08000000）。
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        std::process::Command::new("cmd")
+            .arg("/c")
+            .arg("start")
+            .arg("")
+            .arg(&url)
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&url)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&url)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+// ---------- 二维码 / 条码识别 ----------
+
+/// 一个识别到的码。
+///
+/// 坐标约定：定位点相对**选区左上角**、单位为**逻辑像素**——与前端 overlay
+/// 里选区对象的坐标系一致，前端拿到即可直接画高亮框，不需要再换算。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DecodedCodePayload {
+    pub text: String,
+    /// `QR_CODE` / `EAN_13` / `DATA_MATRIX` …
+    pub format: String,
+    pub points: Vec<(f32, f32)>,
+}
+
+/// 识别选区内的二维码 / 条码（支持一图多码）。
+///
+/// 走 `spawn_blocking`：rxing 的多码识别最坏情况要做象限递归，
+/// 在 4K 全屏上是百毫秒到秒级，不能占住主线程。
+///
+/// 没有码时返回空数组（不是错误）。
+#[tauri::command]
+pub async fn decode_qr(
+    app: AppHandle,
+    monitor_id: String,
+    rect: RectPayload,
+    session_id: Option<u64>,
+) -> Result<Vec<DecodedCodePayload>, String> {
+    if let Some(id) = session_id {
+        let current = app.state::<AppState>().session.load(Ordering::SeqCst);
+        if id != current {
+            return Err(format!("stale session {id} != {current}"));
+        }
+    }
+    let app2 = app.clone();
+    let monitor_id2 = monitor_id.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app2.state::<AppState>();
+        let monitors = state.monitors.lock().unwrap();
+        let m = monitors
+            .iter()
+            .find(|m| m.id == monitor_id2)
+            .ok_or_else(|| "no active capture session".to_string())?;
+        let sf = m.scale_factor as f64;
+        // 与 confirm_selection 完全相同的裁剪口径：逻辑像素 → 物理像素
+        let algo_rect = AlgoRect {
+            x: (rect.x as f64 * sf).round() as i32,
+            y: (rect.y as f64 * sf).round() as i32,
+            w: (rect.w as f64 * sf).round().max(1.0) as u32,
+            h: (rect.h as f64 * sf).round().max(1.0) as u32,
+        };
+        let cropped = m.image.crop(&algo_rect).map_err(|e| e.to_string())?;
+        let codes = snappin_core_platform::qr::decode_codes(&cropped)
+            .map_err(|e| e.to_string())?;
+        // 在锁内一起换算：定位点从物理像素换成逻辑像素，与前端选区坐标系对齐
+        Ok(to_decoded_payloads(codes, sf))
+    })
+    .await
+    .map_err(|e| format!("decode task failed: {e}"))?
+}
+
+/// 识别结果转前端载荷：定位点从物理像素换算成逻辑像素。
+///
+/// 单独抽成函数是为了可测——换算错一点，前端的高亮框就会整体偏移，
+/// 而这种偏移在"恰好 1.0 缩放"的显示器上看不出来。
+fn to_decoded_payloads(
+    codes: Vec<snappin_core_platform::qr::DecodedCode>,
+    sf: f64,
+) -> Vec<DecodedCodePayload> {
+    codes
+        .into_iter()
+        .map(|c| DecodedCodePayload {
+            text: c.text,
+            format: c.format,
+            points: c
+                .points
+                .into_iter()
+                .map(|(x, y)| ((x as f64 / sf) as f32, (y as f64 / sf) as f32))
+                .collect(),
+        })
+        .collect()
+}
+
+// ---------- 文字识别（OCR） ----------
+
+/// 一行识别结果（前端契约）。
+///
+/// 坐标约定：框相对**选区左上角**、单位**逻辑像素**——与二维码定位点同一
+/// 口径，前端拿到即可直接画高亮框。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OcrLinePayload {
+    pub text: String,
+    /// 识别置信度 0..1
+    pub score: f32,
+    pub min_x: f32,
+    pub min_y: f32,
+    pub max_x: f32,
+    pub max_y: f32,
+}
+
+/// OCR 模型状态。前端据此把工具按钮标成"需下载模型"，
+/// 而不是等用户点下去才弹推理错误。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OcrModelsPayload {
+    pub available: bool,
+    /// 模型目录（缺失时告诉用户该往哪放）
+    pub dir: String,
+}
+
+/// 解析 OCR 模型目录。优先级：
+///
+/// 1. `SNAPPIN_MODELS_DIR` 环境变量（显式覆盖，测试/特殊部署用）；
+/// 2. debug 构建：仓库根 `models/ocr`（开发期免配置，文件在就走这里）；
+/// 3. release：`{app_data_dir}/models/ocr`——按需下载的固定目录，
+///    与"模型不进安装包"的约定一致（见 models/README.md）。
+fn resolve_models_dir(app: &AppHandle) -> PathBuf {
+    if let Some(dir) = std::env::var_os("SNAPPIN_MODELS_DIR") {
+        return PathBuf::from(dir);
+    }
+    #[cfg(debug_assertions)]
+    {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("models/ocr")
+            .canonicalize()
+            .unwrap_or_default();
+        if snappin_core_platform::ocr::models_present(&repo) {
+            return repo;
+        }
+    }
+    match app.path().app_data_dir() {
+        Ok(base) => base.join("models").join("ocr"),
+        Err(_) => PathBuf::from("models/ocr"),
+    }
+}
+
+/// 查询 OCR 模型是否就绪（不触发加载）。
+#[tauri::command]
+pub fn ocr_models_status(app: AppHandle) -> OcrModelsPayload {
+    let dir = resolve_models_dir(&app);
+    OcrModelsPayload {
+        available: snappin_core_platform::ocr::models_present(&dir),
+        dir: dir.to_string_lossy().to_string(),
+    }
+}
+
+/// 识别选区内的文字（M4 OCR：PP-OCRv4 mobile + rten）。
+///
+/// 走 `spawn_blocking`：det 推理在全高清区域约 0.8s、4K 约 3s，
+/// 不能占住主线程。模型首次调用时懒加载并缓存（约 60ms），
+/// 之后每次识别只付推理的钱。
+///
+/// 模型缺失时返回可操作的错误信息（告诉用户目录在哪），不是panic。
+#[tauri::command]
+pub async fn ocr_recognize(
+    app: AppHandle,
+    monitor_id: String,
+    rect: RectPayload,
+    session_id: Option<u64>,
+) -> Result<Vec<OcrLinePayload>, String> {
+    if let Some(id) = session_id {
+        let current = app.state::<AppState>().session.load(Ordering::SeqCst);
+        if id != current {
+            return Err(format!("stale session {id} != {current}"));
+        }
+    }
+    let app2 = app.clone();
+    let monitor_id2 = monitor_id.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app2.state::<AppState>();
+        let monitors = state.monitors.lock().unwrap();
+        let m = monitors
+            .iter()
+            .find(|m| m.id == monitor_id2)
+            .ok_or_else(|| "no active capture session".to_string())?;
+        let sf = m.scale_factor as f64;
+        // 与 confirm_selection / decode_qr 完全相同的裁剪口径
+        let algo_rect = AlgoRect {
+            x: (rect.x as f64 * sf).round() as i32,
+            y: (rect.y as f64 * sf).round() as i32,
+            w: (rect.w as f64 * sf).round().max(1.0) as u32,
+            h: (rect.h as f64 * sf).round().max(1.0) as u32,
+        };
+        let cropped = m.image.crop(&algo_rect).map_err(|e| e.to_string())?;
+
+        // 引擎懒加载：持锁加载，加载期间其它 OCR 请求排队等待
+        let mut guard = state.ocr.lock().unwrap();
+        if guard.is_none() {
+            let dir = resolve_models_dir(&app2);
+            if !snappin_core_platform::ocr::models_present(&dir) {
+                return Err(format!(
+                    "OCR 模型缺失：请把 det.onnx / rec.onnx / ppocr_keys_v1.txt \
+                     下载到 {}（来源与校验值见仓库 models/README.md）",
+                    dir.display()
+                ));
+            }
+            match snappin_core_platform::ocr::OcrEngine::load(&dir) {
+                Ok(engine) => *guard = Some(engine),
+                Err(e) => return Err(format!("OCR 模型加载失败：{e}")),
+            }
+        }
+        let engine = guard.as_ref().expect("engine just loaded");
+        let lines = engine.recognize(&cropped).map_err(|e| e.to_string())?;
+        // 在锁内一起换算：检测框从裁剪图物理像素换成选区内逻辑像素，
+        // 与前端标注层坐标系对齐（和二维码定位点同一口径）
+        Ok(to_ocr_payloads(lines, sf, algo_rect.x, algo_rect.y))
+    })
+    .await
+    .map_err(|e| format!("ocr task failed: {e}"))?
+}
+
+/// 识别结果转前端载荷：框从裁剪图物理像素换算成**选区内逻辑像素**。
+///
+/// 单独抽成函数是为了可测——换算错一点，前端的高亮框就会整体偏移，
+/// 而这种偏移在"恰好 1.0 缩放"的显示器上看不出来。
+fn to_ocr_payloads(
+    lines: Vec<snappin_core_platform::ocr::OcrLine>,
+    sf: f64,
+    origin_x: i32,
+    origin_y: i32,
+) -> Vec<OcrLinePayload> {
+    lines
+        .into_iter()
+        .map(|l| OcrLinePayload {
+            text: l.text,
+            score: l.score,
+            min_x: to_logical(l.box_.min_x, origin_x, sf),
+            min_y: to_logical(l.box_.min_y, origin_y, sf),
+            max_x: to_logical(l.box_.max_x, origin_x, sf),
+            max_y: to_logical(l.box_.max_y, origin_y, sf),
+        })
+        .collect()
+}
+
+/// 物理像素 → 选区内逻辑像素（相对选区左上角）。
+fn to_logical(v: f32, origin: i32, sf: f64) -> f32 {
+    ((v - origin as f32) / sf as f32).max(0.0)
+}
+
 // ---------- 贴图 ----------
 
 /// 剪贴板贴图的实际逻辑（供命令与托盘/快捷键路径共用）。
-/// `at`: Some((逻辑 x, 逻辑 y)) 时贴图左上角对齐该位置（Ctrl+V 跟随鼠标），
-/// None 时主屏居中。内部会创建贴图 webview 窗口，
-/// 调用方须确保不在主线程同步执行。
-pub fn do_pin_from_clipboard(
-    app: &AppHandle,
-    state: &AppState,
-    at: Option<(f64, f64)>,
-) -> Result<String, String> {
+/// 贴图在主屏居中（原"Ctrl+V 跟随鼠标"的定位分支已随该功能一并移除）。
+/// 内部会创建贴图 webview 窗口，调用方须确保不在主线程同步执行。
+pub fn do_pin_from_clipboard(app: &AppHandle, state: &AppState) -> Result<String, String> {
     let buffer = snappin_core_platform::clipboard_get_image()
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "剪贴板中没有图片".to_string())?;
@@ -602,44 +1015,18 @@ pub fn do_pin_from_clipboard(
     let path_str = path.to_string_lossy().to_string();
     let label = pin_label(&path);
 
-    // 位置换算：光标给的是物理像素，需按所在显示器的缩放因子转逻辑像素
-    let (disp_w, disp_h, x, y) = match at {
-        Some((px, py)) => {
-            let sf = app
-                .monitor_from_point(px, py)
-                .ok()
-                .flatten()
-                .map(|m| m.scale_factor())
-                .unwrap_or(1.0);
-            let dw = (buffer.width as f64 / sf).max(8.0);
-            let dh = (buffer.height as f64 / sf).max(8.0);
-            // 贴图窗口以光标为左上角，但贴到屏幕右/下边缘时回退为贴住边缘
-            let mon = app.monitor_from_point(px, py).ok().flatten();
-            let (mon_w, mon_h) = mon
-                .map(|m| {
-                    let s = m.scale_factor();
-                    let sz = m.size();
-                    (sz.width as f64 / s, sz.height as f64 / s)
-                })
-                .unwrap_or((dw, dh));
-            let mx = px / sf;
-            let my = py / sf;
-            let cx = if mx + dw > mon_w { (mon_w - dw).max(0.0) } else { mx };
-            let cy = if my + dh > mon_h { (mon_h - dh).max(0.0) } else { my };
-            (dw, dh, cx, cy)
-        }
-        None => {
-            let sf = app
-                .primary_monitor()
-                .ok()
-                .flatten()
-                .map(|m| m.scale_factor())
-                .unwrap_or(1.0);
-            let dw = (buffer.width as f64 / sf).max(8.0);
-            let dh = (buffer.height as f64 / sf).max(8.0);
-            let (cx, cy) = windows::place_centered_on_primary(app, dw, dh);
-            (dw, dh, cx, cy)
-        }
+    // 定位：主屏居中（按主显示器缩放因子把物理像素换算成逻辑像素）
+    let (disp_w, disp_h, x, y) = {
+        let sf = app
+            .primary_monitor()
+            .ok()
+            .flatten()
+            .map(|m| m.scale_factor())
+            .unwrap_or(1.0);
+        let dw = (buffer.width as f64 / sf).max(8.0);
+        let dh = (buffer.height as f64 / sf).max(8.0);
+        let (cx, cy) = windows::place_centered_on_primary(app, dw, dh);
+        (dw, dh, cx, cy)
     };
     windows::create_pin_window(app, &label, disp_w, disp_h, x, y)?;
     register_pin(state, &label, &path_str, disp_w, disp_h);
@@ -651,10 +1038,24 @@ pub async fn pin_from_clipboard(app: AppHandle) -> Result<String, String> {
     let app2 = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let state = app2.state::<AppState>();
-        do_pin_from_clipboard(&app2, &state, None)
+        do_pin_from_clipboard(&app2, &state)
     })
     .await
     .map_err(|e| format!("pin task failed: {e}"))?
+}
+
+/// 读取图片原始字节（PNG），以**二进制**经 IPC 返回（JS 侧拿到 ArrayBuffer）。
+///
+/// 用途：截图浮层要把冻结图变成 ImageBitmap 才能**读像素**（取色/放大镜
+/// 颜色读数）。`convertFileSrc` 的 asset 图片在 WebView2 里被当作跨域资源，
+/// `getImageData` 会抛 SecurityError；fetch 是否放行取决于响应头是否被
+/// 正确识别。走 Rust 读文件则完全绕开 CORS，行为确定。
+///
+/// 只在会话开始时读一次（约 1-3MB，一次性开销），不做逐像素 IPC。
+#[tauri::command]
+pub fn read_image_bytes(path: String) -> Result<tauri::ipc::Response, String> {
+    let bytes = std::fs::read(&path).map_err(|e| format!("read image failed: {e}"))?;
+    Ok(tauri::ipc::Response::new(bytes))
 }
 
 /// 贴图窗口取回自己的上下文（按窗口标签查状态表）。
@@ -679,7 +1080,16 @@ pub fn pin_context(
 #[tauri::command]
 pub fn pin_close(app: AppHandle, state: State<'_, AppState>, label: String) -> Result<(), String> {
     windows::close_pin(&app, &label);
-    state.pins.lock().unwrap().remove(&label);
+    let meta = state.pins.lock().unwrap().remove(&label);
+    // 顺手清掉菜单勾选快照，避免 label 复用后读到旧状态
+    state.pin_flags.lock().unwrap().remove(&label);
+    // 图像处理产生的临时文件：窗口没了就没人读它了，删掉免得临时目录越积越多。
+    // 原图（edited = None）不归这里管——它是截图/剪贴板自己的文件。
+    if let Some(meta) = meta {
+        if let Some(edited) = meta.edited {
+            let _ = std::fs::remove_file(edited);
+        }
+    }
     Ok(())
 }
 
@@ -729,11 +1139,74 @@ pub fn pin_copy(app: AppHandle, state: State<'_, AppState>, label: String) -> Re
     Ok(())
 }
 
+/// 应用一次图像处理（旋转 / 翻转 / 灰度 / 反色 / 透明度 / 亮度）。
+///
+/// 分工：**像素处理在前端 canvas 完成**，这里只做"落盘 + 换源 + 调窗口"。
+/// 理由有两条：
+/// 1. 这些操作在 canvas 上是 `filter` 一行的事，塞进 core 层只会让核心算法
+///    依赖编解码与图形 API（`core-algo` 保持零依赖的约定）；
+/// 2. `pin_copy` / `pin_save` 读的正是本命令更新后的 `src`，因此**贴图所见
+///    即所得**——不需要再给复制/保存各实现一套处理。
+///
+/// 参数 `width/height` 是处理后图片的**逻辑**显示尺寸（旋转 90° 时宽高互换），
+/// 窗口按它重设大小并保持中心不动。返回新的上下文，前端据此更新 `<img>`。
+///
+/// async 原因：内部要调 `resize_pin_keep_center`，它会 `run_on_main_thread`
+/// 投递闭包并**等**完成；同步命令本身就在主线程跑，会自等待死锁
+/// （同 update_config / ball_menu 的注释）。
+#[tauri::command]
+pub async fn pin_apply_edit(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    label: String,
+    png_base64: String,
+    width: f64,
+    height: f64,
+) -> Result<PinContextPayload, String> {
+    if !state.pins.lock().unwrap().contains_key(&label) {
+        return Err("pin window not found".to_string());
+    }
+    let raw = decode_base64_bytes(&png_base64)?;
+    validate_png_header(&raw)?;
+
+    let path = snappin_core_platform::new_temp_png_path();
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&path, &raw).map_err(|e| format!("write edited png failed: {e}"))?;
+    let path_str = path.to_string_lossy().to_string();
+
+    // 换源 + 记住这份临时文件；上一份处理结果已无人引用，顺手删掉
+    let prev = {
+        let mut pins = state.pins.lock().unwrap();
+        let meta = pins
+            .get_mut(&label)
+            .ok_or_else(|| "pin window not found".to_string())?;
+        meta.src = path_str.clone();
+        meta.width = width;
+        meta.height = height;
+        meta.edited.replace(path_str.clone())
+    };
+    if let Some(prev) = prev {
+        if prev != path_str {
+            let _ = std::fs::remove_file(prev);
+        }
+    }
+
+    windows::resize_pin_keep_center(&app, &label, width, height)?;
+    Ok(PinContextPayload {
+        label,
+        src: path_str,
+        width,
+        height,
+    })
+}
+
 #[tauri::command]
 pub async fn pin_save(
     app: AppHandle,
     state: State<'_, AppState>,
-    window: Window,
+    _window: Window,
     label: String,
 ) -> Result<bool, String> {
     let save_dir = { state.config.lock().unwrap().save_dir.clone() };
@@ -806,7 +1279,7 @@ pub async fn ball_command(app: AppHandle, cmd: String) -> Result<(), String> {
             let app2 = app.clone();
             let r = tauri::async_runtime::spawn_blocking(move || {
                 let state = app2.state::<AppState>();
-                do_pin_from_clipboard(&app2, &state, None)
+                do_pin_from_clipboard(&app2, &state)
             })
             .await
             .map_err(|e| format!("pin task failed: {e}"))?;
@@ -823,46 +1296,180 @@ pub async fn ball_command(app: AppHandle, cmd: String) -> Result<(), String> {
     Ok(())
 }
 
-/// 悬浮球右键菜单：构建原生菜单并在光标位置弹出。
+/// 悬浮球右键菜单：在光标处打开**自绘菜单窗**。
 ///
 /// 背景：wry 0.57 默认开启 WebView2 浏览器右键菜单（含"打印"等），
 /// 已由 webview 初始化脚本抑制；本命令提供应用自己的右键菜单。
-/// 菜单项与托盘共用 `crate::handle_menu_event` 分发，行为一致。
 ///
-/// 必须是 **async** 命令：同步命令在主线程执行，内部的 run_on_main
-/// 会自等待死锁；async 命令跑在异步运行时线程，run_on_main 才能
-/// 把 popup 闭包投递到主线程（popup_menu 会阻塞主线程直到用户选择，
-/// 这是模态菜单的预期行为）。
+/// 不再用 `popup_menu`（原生 TrackPopupMenu）：样式完全由系统决定，
+/// 做不出"浅色圆角 + 勾选列 + 右侧快捷键"的面板（见 menuwin.rs）。
+///
+/// async 的原因：建 webview 不能在主线程同步做（会死锁/白屏）。
 #[tauri::command]
 pub async fn ball_menu(app: AppHandle) -> Result<(), String> {
-    use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+    tauri::async_runtime::spawn_blocking(move || crate::menuwin::open_menu_at_cursor(&app))
+        .await
+        .map_err(|e| format!("menu task failed: {e}"))?
+}
 
-    let i_capture =
-        MenuItem::with_id(&app, "capture", "截图 (Ctrl+1)", true, None::<&str>)
-            .map_err(|e| e.to_string())?;
-    let i_pin = MenuItem::with_id(&app, "pin-clipboard", "剪贴板贴图 (Ctrl+2)", true, None::<&str>)
-        .map_err(|e| e.to_string())?;
-    let i_hide = MenuItem::with_id(&app, "hide-ball", "隐藏悬浮球", true, None::<&str>)
-        .map_err(|e| e.to_string())?;
-    let i_about =
-        MenuItem::with_id(&app, "about", "关于v0.1", true, None::<&str>).map_err(|e| e.to_string())?;
-    let i_quit =
-        MenuItem::with_id(&app, "quit", "退出", true, None::<&str>).map_err(|e| e.to_string())?;
-    let sep1 = PredefinedMenuItem::separator(&app).map_err(|e| e.to_string())?;
-    let sep2 = PredefinedMenuItem::separator(&app).map_err(|e| e.to_string())?;
-    let menu = Menu::with_items(
-        &app,
-        &[&i_capture, &i_pin, &sep1, &i_hide, &i_about, &sep2, &i_quit],
-    )
-    .map_err(|e| e.to_string())?;
+/// 贴图右键菜单：在光标处打开自绘菜单窗，目标为本调用窗口。
+///
+/// 与 ball_menu 共用同一个菜单窗（单例），Rust 记下 kind=Pin + 本窗 label，
+/// 前端据此渲染贴图菜单（浅色面板 + 勾选项），点击后动作经
+/// `pin-menu-action` 事件转发回本窗执行。
+#[tauri::command]
+pub async fn pin_menu_open(app: AppHandle, window: Window) -> Result<(), String> {
+    let label = window.label().to_string();
+    tauri::async_runtime::spawn_blocking(move || crate::menuwin::open_pin_menu_at_cursor(&app, &label))
+        .await
+        .map_err(|e| format!("pin menu task failed: {e}"))?
+}
 
-    windows::run_on_main(&app, move |app| {
-        if let Some(w) = app.get_webview_window(windows::BALL_LABEL) {
-            if let Err(e) = w.popup_menu(&menu) {
-                eprintln!("[snappin] ball menu popup failed: {e}");
+/// 贴图窗发布自己的状态快照（界面开关 + 图像处理参数）。
+///
+/// 为什么要发：菜单窗与贴图窗是两个独立 webview，菜单要画勾选标记
+/// （✓ 窗口置顶 / ✓ 灰度化 / 不透明度当前档位）就必须知道贴图的当前状态；
+/// 状态的"事实来源"在贴图窗的 React 里，故由它在挂载时和每次切换后
+/// 主动上报，Rust 只缓存。
+#[tauri::command]
+pub fn pin_publish_flags(state: State<'_, AppState>, label: String, flags: PinFlags) {
+    state.pin_flags.lock().unwrap().insert(label, flags);
+}
+
+/// 读取贴图界面开关快照（无记录 = 默认值：置顶开、未锁、有阴影）。
+#[tauri::command]
+pub fn pin_flags(state: State<'_, AppState>, label: String) -> PinFlags {
+    state
+        .pin_flags
+        .lock()
+        .unwrap()
+        .get(&label)
+        .copied()
+        .unwrap_or_default()
+}
+
+/// `pin-set-opacity` 事件载荷（Rust → 贴图窗）。
+#[derive(Clone, serde::Serialize)]
+struct PinOpacityPayload {
+    value: f64,
+}
+
+/// 菜单里的「不透明度」滑块：把实时值转给目标贴图窗。
+///
+/// 为什么不让菜单窗直接改：贴图窗的透明度是它自己 CSS 上的 `opacity`
+/// （`<img>` 的 style），跨 webview 改不到；所以走
+/// 菜单 → Rust → `pin-set-opacity` 事件 → 贴图窗 setState 这一跳。
+///
+/// 顺手把值写进 `pin_flags` 快照：菜单关掉再打开时滑块要停在原处，
+/// 否则会"跳回 100%"（快照只能由贴图窗发布，拖动期间它还没发）。
+#[tauri::command]
+pub fn pin_set_opacity(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    label: String,
+    value: f64,
+) -> Result<(), String> {
+    // 与工具条滑条 / Alt+滚轮同一个下限，避免拖到 0 后贴图"消失找不回来"
+    let v = value.clamp(0.15, 1.0);
+    state
+        .pin_flags
+        .lock()
+        .unwrap()
+        .entry(label.clone())
+        .or_default()
+        .opacity = v;
+    match app.get_webview_window(&label) {
+        Some(w) => w
+            .emit("pin-set-opacity", PinOpacityPayload { value: v })
+            .map_err(|e| format!("emit pin-set-opacity failed: {e}")),
+        // 窗口已关（菜单还没收）时静默：拖动最后几帧撞上关闭属正常
+        None => Ok(()),
+    }
+}
+
+/// 前端量出菜单尺寸后调用：按锚点定位、resize、显示、抢焦点。
+#[tauri::command]
+pub async fn menu_fit(app: AppHandle, width: f64, height: f64) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || crate::menuwin::fit_and_show(&app, width, height))
+        .await
+        .map_err(|e| format!("menu fit task failed: {e}"))?
+}
+
+/// 关闭菜单（Esc / 点击菜单项后）。同步命令：只 hide，不建窗。
+#[tauri::command]
+pub fn menu_close(app: AppHandle) {
+    crate::menuwin::hide_menu(&app);
+}
+
+/// 菜单初始状态。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MenuStatePayload {
+    /// 是否处于"打开流程中"（窗口刚建好时前端收不到 emit，靠它补一刀）
+    pub open: bool,
+    /// 注册失败的内置快捷键名（空 = 正常）
+    pub shortcut_failed: Vec<String>,
+    /// 当前菜单种类：`app`（托盘/悬浮球）或 `pin`（贴图右键）。
+    /// 首次创建菜单窗时 `menu-open` 事件会丢（前端还没注册监听），
+    /// 靠它补上正确的菜单内容，否则第一次右键贴图会弹出托盘菜单。
+    pub kind: &'static str,
+    /// 贴图菜单的目标窗口 label（kind = pin 时有值）
+    pub pin_label: Option<String>,
+}
+
+#[tauri::command]
+pub fn menu_state(app: AppHandle, state: State<'_, AppState>) -> MenuStatePayload {
+    let (kind, pin_label) = {
+        let guard = state.menu_anchor.lock().unwrap();
+        match guard.as_ref() {
+            Some(a) => (a.kind, a.pin_label.clone()),
+            None => (MenuKind::App, None),
+        }
+    };
+    MenuStatePayload {
+        open: crate::menuwin::menu_is_open(&app),
+        shortcut_failed: state.shortcut_failed.lock().unwrap().clone(),
+        kind: match kind {
+            MenuKind::App => "app",
+            MenuKind::Pin => "pin",
+        },
+        pin_label,
+    }
+}
+
+/// `pin-menu-action` 事件载荷（Rust → 贴图窗）。
+#[derive(Clone, serde::Serialize)]
+struct PinMenuActionPayload {
+    id: String,
+}
+
+/// 菜单项点击：先关菜单再分发动作。
+///
+/// 复用 `handle_menu_event`——与托盘菜单共用同一套动作，避免两处行为漂移。
+/// **贴图菜单例外**：动作转发给对应贴图窗（`pin-menu-action` 事件），
+/// 由它的 React 执行——置顶/锁定/阴影等界面状态的事实来源在那里。
+#[tauri::command]
+pub fn menu_action(app: AppHandle, id: String) -> Result<(), String> {
+    // 先取锚点再 hide（hide 会清空锚点）
+    let route = {
+        let state = app.state::<AppState>();
+        let guard = state.menu_anchor.lock().unwrap();
+        guard
+            .as_ref()
+            .map(|a| (a.kind, a.pin_label.clone()))
+    };
+    crate::menuwin::hide_menu(&app);
+    match route {
+        Some((MenuKind::Pin, Some(label))) => {
+            if let Some(w) = app.get_webview_window(&label) {
+                w.emit("pin-menu-action", PinMenuActionPayload { id })
+                    .map_err(|e| format!("emit pin-menu-action failed: {e}"))?;
+            } else {
+                crate::logln!("pin menu action but window gone: {label}");
             }
         }
-    });
+        _ => crate::handle_menu_event(&app, &id),
+    }
     Ok(())
 }
 
@@ -958,6 +1565,7 @@ fn register_pin(state: &AppState, label: &str, src: &str, width: f64, height: f6
             src: src.to_string(),
             width,
             height,
+            edited: None,
         },
     );
 }
@@ -1005,10 +1613,716 @@ async fn save_dialog(
     .flatten()
 }
 
+// ---------- 长截图（M5） ----------
+
+/// 丢弃长截图会话（不产出图）：会话结束 / 用户取消截图时调用。
+///
+/// 由 `windows::end_capture_session` 在每条退出路径上统一调用——
+/// 包括用户没点结果面板按钮就直接取消截图的情形（会话不能滞留，
+/// 否则下次长截图会撞上 "already in progress"）。
+/// 驱动循环（若还在跑）下一步发现会话没了会自行退出，不做收尾。
+pub fn discard_long_session(app: &AppHandle, state: &AppState, why: &str) {
+    let session = { state.long.lock().unwrap().take() };
+    let Some(session) = session else {
+        return;
+    };
+    eprintln!(
+        "[snappin] discard long capture (why={why}, height={}px, steps={})",
+        session.capture.height(),
+        session.capture.steps()
+    );
+    // 先叫停再还原：驱动循环可能在当前步的稳态等待里
+    state.long_stop.store(true, Ordering::SeqCst);
+    restore_long_overlay(
+        app,
+        session.overlay_idx,
+        session.overlay_hwnd,
+        session.used_fallback,
+    );
+    state.long_active.store(false, Ordering::SeqCst);
+    unregister_long_esc(app);
+}
+
+/// 会话显示器 ID `"m{idx}"` → `xcap::Monitor::all()` 下标。
+///
+/// ID 由 `capture_all_monitors` 按枚举顺序生成（见 core-platform `capture_shot`），
+/// 长截图据此重新取同一枚显示器。解析必须严格：错一位就会拼错屏幕的内容。
+fn monitor_index(monitor_id: &str) -> Result<usize, String> {
+    monitor_id
+        .strip_prefix('m')
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| format!("invalid monitor id: {monitor_id}"))
+}
+
+/// 长截图进度事件名（前端 `listen("long-capture-progress")`）。
+pub const LONG_EVENT: &str = "long-capture-progress";
+
+/// 驱动循环步数上限：600 步 × 默认 3 行 ≈ 1800 行滚动，
+/// 对应 32000px 的算法高度上限，正常长截图远到不了（防死循环兜底）。
+const LONG_MAX_STEPS: u32 = 600;
+/// 连续 NoMatch 达到此次数后改为轻滚（1 行）重试——大跨度滚动后
+/// 页面常有惯性/动画，小步滚动更容易重新建立重叠。
+const LONG_NO_MATCH_RETRY: u32 = 2;
+/// 连续 NoMatch 上限（含轻滚重试）：超过即认为页面不再滚动或内容
+/// 被整体替换（切 tab / 无限加载流），收尾出图。
+const LONG_NO_MATCH_GIVE_UP: u32 = 4;
+/// 贴图封顶比例：长图逻辑尺寸相对主屏幅面的上限（0.7 = 70%）。
+const LONG_PIN_MAX_RATIO: f64 = 0.7;
+
+/// 长截图进度载荷（`long-capture-progress` 事件）。
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct LongProgressPayload {
+    /// "scrolling" 滚动拼接中 | "done" 正常结束 | "error" 出错
+    pub phase: String,
+    /// 当前累积高度（物理像素）
+    pub height: u32,
+    /// 累计步数
+    pub steps: u32,
+    /// 最近一次匹配置信度 0..1（Still 步为帧相似度）
+    pub score: f32,
+    /// 缩略图临时 PNG 路径（前端 convertFileSrc 加载）
+    pub thumb: String,
+    /// 状态条文案
+    pub message: String,
+}
+
+/// 开始长截图：复用当前截图会话的浮层，把选区交给驱动循环自动滚动拼接。
+///
+/// 流程（重活在 `begin_long_session`，放在阻塞线程里做）：
+/// 1. 校验会话代号 / 防重入 / 逻辑→物理选区换算
+/// 2. 浮层改为光标穿透（滚轮事件落到下层页面）
+/// 3. Windows 给浮层设 WDA 采集排除；失败则退化为"采集前后隐藏浮层"
+/// 4. 注册全局 Esc（长截图期间专用，结束即注销）
+/// 5. 采第一帧建会话 → 启动驱动循环
+#[tauri::command]
+pub async fn long_capture_start(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    monitor_id: String,
+    rect: RectPayload,
+    scroll_lines: Option<i32>,
+    session_id: Option<u64>,
+) -> Result<(), String> {
+    // 陈旧会话防护（与 confirm_selection 同口径）
+    if let Some(id) = session_id {
+        let current = state.session.load(Ordering::SeqCst);
+        if id != current {
+            return Err(format!("stale session {id} != {current}"));
+        }
+    }
+    // 防重入（驱动循环持锁期间这里会立刻失败）
+    if state.long.lock().unwrap().is_some() {
+        return Err("long capture already in progress".to_string());
+    }
+    // monitor_id "m0" → xcap::Monitor::all()[0]（id 即采集下标，见 capture_shot）
+    let idx = monitor_index(&monitor_id)?;
+
+    // 逻辑像素选区 → 物理像素（与 confirm_selection 完全相同的口径）
+    let phys_rect = {
+        let monitors = state.monitors.lock().unwrap();
+        let m = monitors
+            .iter()
+            .find(|m| m.id == monitor_id)
+            .ok_or_else(|| "no active capture session".to_string())?;
+        let sf = m.scale_factor as f64;
+        AlgoRect {
+            x: (rect.x as f64 * sf).round() as i32,
+            y: (rect.y as f64 * sf).round() as i32,
+            w: (rect.w as f64 * sf).round().max(1.0) as u32,
+            h: (rect.h as f64 * sf).round().max(1.0) as u32,
+        }
+    };
+    let scroll_lines = scroll_lines.unwrap_or(3).clamp(1, 20);
+
+    let app2 = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Err(e) = begin_long_session(&app2, idx, phys_rect, scroll_lines) {
+            eprintln!("[snappin] long capture start failed: {e}");
+            emit_long(&app2, "error", 0, 0, 0.0, "", format!("长截图启动失败：{e}"));
+        }
+    })
+    .await
+    .map_err(|e| format!("long capture task failed: {e}"))?;
+    Ok(())
+}
+
+/// 建会话 + 改窗口状态 + 启动驱动循环（阻塞线程）。
+fn begin_long_session(
+    app: &AppHandle,
+    idx: usize,
+    rect: AlgoRect,
+    scroll_lines: i32,
+) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    // 防重入（命令体已查过一次；await 之间可能有并发启动）
+    if state.long.lock().unwrap().is_some() {
+        return Err("long capture already in progress".to_string());
+    }
+    // 选区太小拼不动（重叠要求最低 24 行，再算上边距留量）
+    if rect.h < 80 {
+        return Err(format!("选区太矮（{}px），长截图至少需要 80px 高", rect.h));
+    }
+    let overlay_label = format!("{}{}", windows::OVERLAY_PREFIX, idx);
+    let overlay_hwnd = overlay_window_hwnd(app, &overlay_label);
+
+    // 采集排除：Windows 优先 WDA（浮层照常显示但不进采集帧）；
+    // 失败（旧系统 / 非 Windows）退化为采集前后隐藏浮层。
+    let excluded = overlay_hwnd != 0
+        && snappin_core_platform::stitch::set_hwnd_capture_excluded(overlay_hwnd, true);
+    let (hide_ui, show_ui) = if excluded {
+        (None, None)
+    } else {
+        eprintln!(
+            "[snappin] WDA capture-exclude unavailable (hwnd={overlay_hwnd}), \
+             falling back to hide/show overlay around each grab"
+        );
+        overlay_hide_show(app, idx)
+    };
+    // 光标穿透：滚轮与点击都要落到下层的目标窗口
+    windows::set_window_ignore_cursor_events(app, &overlay_label, true);
+
+    // 停止标志复位（上次异常退出可能留着 true），克隆进会话
+    let stop = state.long_stop.clone();
+    stop.store(false, Ordering::SeqCst);
+    let thumb = snappin_core_platform::new_temp_png_path();
+
+    let monitor = snappin_core_platform::monitor_by_index(idx).map_err(|e| e.to_string())?;
+    let capture = LongCapture::new(
+        monitor,
+        rect,
+        StitchOptions::for_frame(rect.h),
+        scroll_lines,
+        hide_ui,
+        show_ui,
+        Some(stop),
+    );
+    let capture = match capture {
+        Ok(c) => c,
+        Err(e) => {
+            // 第一帧就失败：还原已改的窗口状态，别把浮层卡在穿透/排除态
+            restore_long_overlay(app, idx, overlay_hwnd, !excluded);
+            return Err(e);
+        }
+    };
+
+    *state.long.lock().unwrap() = Some(LongSession {
+        capture,
+        overlay_idx: idx,
+        overlay_hwnd,
+        used_fallback: !excluded,
+        thumb,
+    });
+    state.long_active.store(true, Ordering::SeqCst);
+    register_long_esc(app);
+
+    // 驱动循环：独立阻塞线程，逐步 step() 到底/停止/出错
+    let app2 = app.clone();
+    tauri::async_runtime::spawn_blocking(move || run_long_driver(&app2));
+    Ok(())
+}
+
+/// 停止长截图（Esc / 前端停止按钮）：置位标志即返回，
+/// 驱动循环在稳态等待间隙（~100ms）发现后收尾。
+///
+/// 同步命令在主线程执行，**不能取 `long` 锁**——驱动循环一步要持锁约 1s，
+/// 取了会冻结 UI。改用 `long_active` 原子快照判断会话是否存在。
+#[tauri::command]
+pub fn long_capture_stop(state: State<'_, AppState>) -> Result<(), String> {
+    if !state.long_active.load(Ordering::SeqCst) {
+        return Err("long capture session not found".to_string());
+    }
+    state.long_stop.store(true, Ordering::SeqCst);
+    Ok(())
+}
+
+/// 长截图收尾出口：copy=复制到剪贴板 / pin=贴图 / save=保存。
+///
+/// 取出会话 → 还原浮层 → 落盘最终长图 → 执行动作 → 结束截图会话。
+/// 驱动循环应已在 done 事件前退出；若仍在滚动（异常路径），
+/// 拿锁后它会自行发现会话被取走而退出。
+#[tauri::command]
+pub async fn long_capture_commit(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    action: String,
+) -> Result<ConfirmPayload, String> {
+    // 先叫停再取：驱动循环可能在当前步的稳态等待里
+    state.long_stop.store(true, Ordering::SeqCst);
+    let session = { state.long.lock().unwrap().take() };
+    let Some(session) = session else {
+        return Err("long capture session not found".to_string());
+    };
+    let canvas = session.capture.into_canvas();
+    restore_long_overlay(
+        &app,
+        session.overlay_idx,
+        session.overlay_hwnd,
+        session.used_fallback,
+    );
+    state.long_active.store(false, Ordering::SeqCst);
+    unregister_long_esc(&app);
+
+    let save_dir = { state.config.lock().unwrap().save_dir.clone() };
+    let path = snappin_core_platform::new_temp_png_path();
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    snappin_core_platform::save_png(&canvas, &path).map_err(|e| e.to_string())?;
+    let path_str = path.to_string_lossy().to_string();
+
+    match action.as_str() {
+        "copy" => {
+            snappin_core_platform::clipboard_copy_image(&canvas).map_err(|e| e.to_string())?;
+        }
+        "pin" => {
+            let label = pin_label(&path);
+            // 长图按 70% 屏幅封顶缩放，主屏居中（长图经常远超屏幕）
+            let (disp_w, disp_h, x, y) = long_pin_geometry(&app, canvas.width, canvas.height);
+            let app2 = app.clone();
+            let label2 = label.clone();
+            #[cfg(windows)]
+            tauri::async_runtime::spawn_blocking(move || {
+                windows::create_pin_window(&app2, &label2, disp_w, disp_h, x, y)
+            })
+            .await
+            .map_err(|e| format!("pin window task failed: {e}"))??;
+            #[cfg(not(windows))]
+            windows::create_pin_window(&app2, &label2, disp_w, disp_h, x, y)?;
+            register_pin(&state, &label, &path_str, disp_w, disp_h);
+        }
+        "save" => {
+            // 先结束会话再弹对话框（always-on-top 浮层会盖住系统保存框，
+            // 同 confirm_selection 的 save 分支）
+            windows::end_capture_session(&app, &state, "long-save-before-dialog");
+            let dest = save_dialog(
+                &app,
+                &snappin_core_platform::default_save_name(),
+                save_dir,
+            )
+            .await;
+            if let Some(dest) = dest {
+                let buffer =
+                    snappin_core_platform::load_rgba(Path::new(&path_str)).map_err(|e| e.to_string())?;
+                snappin_core_platform::save_image(&buffer, &dest).map_err(|e| e.to_string())?;
+                // 记住此次目录，下次保存对话框默认打开这里
+                if let Some(parent) = dest.parent() {
+                    let dir_str = parent.to_string_lossy().to_string();
+                    let mut guard = state.config.lock().unwrap();
+                    if guard.save_dir.as_deref() != Some(dir_str.as_str()) {
+                        guard.save_dir = Some(dir_str.clone());
+                        let snapshot = guard.clone();
+                        drop(guard);
+                        if let Ok(dir) = app.path().app_config_dir() {
+                            let _ = crate::config::save(&dir, &snapshot);
+                        }
+                    }
+                }
+            }
+            return Ok(ConfirmPayload { path: path_str });
+        }
+        other => return Err(format!("unknown action: {}", other)),
+    }
+
+    windows::end_capture_session(&app, &state, "long-confirm-ok");
+    Ok(ConfirmPayload { path: path_str })
+}
+
+/// 长截图驱动循环（阻塞线程）：滚动 → 稳态 → 采集 → 拼接，直到
+/// 到底 / 用户停止 / 连续无匹配 / 出错，然后发 done 事件并还原浮层。
+fn run_long_driver(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let mut no_match = 0u32;
+    let mut last_score = 0.0f32;
+    let mut last_steps = 0u32;
+    let mut error: Option<String> = None;
+    let mut reason = "done";
+
+    'outer: for _ in 0..LONG_MAX_STEPS {
+        if state.long_stop.load(Ordering::SeqCst) {
+            reason = "stopped";
+            break;
+        }
+        // 一步可能耗时 1s 上下（稳态等待 + 两次全屏采集），全程持锁；
+        // commit 只在 done 之后发生，不会与这里并发。
+        let stepped = {
+            let mut guard = state.long.lock().unwrap();
+            let Some(session) = guard.as_mut() else {
+                // 会话已被 commit 取走（异常路径）：直接退出，收尾由 commit 负责
+                return;
+            };
+            let lc = &mut session.capture;
+            let r = if no_match >= LONG_NO_MATCH_RETRY {
+                lc.step(1)
+            } else {
+                lc.step_default()
+            };
+            match r {
+                Ok(StepOutcome::Stopped) => {
+                    reason = "stopped";
+                    break 'outer;
+                }
+                Ok(StepOutcome::Stepped(step)) => {
+                    // 缩略图每步覆盖写（240px 宽，几毫秒），前端状态条实时预览
+                    let _ = write_thumbnail(lc.canvas(), &session.thumb);
+                    (step, session.thumb.to_string_lossy().to_string())
+                }
+                Err(e) => {
+                    error = Some(e);
+                    break 'outer;
+                }
+            }
+        };
+        let (step, thumb) = stepped;
+        last_score = step.score;
+        last_steps = step.steps;
+        match step.kind {
+            StitchStepKind::Appended => {
+                no_match = 0;
+                emit_long(
+                    app,
+                    "scrolling",
+                    step.height,
+                    step.steps,
+                    step.score,
+                    &thumb,
+                    format!("正在拼接… 已 {} px", step.height),
+                );
+            }
+            StitchStepKind::NoMatch => {
+                no_match += 1;
+                emit_long(
+                    app,
+                    "scrolling",
+                    step.height,
+                    step.steps,
+                    step.score,
+                    &thumb,
+                    "画面变化中，调整滚动…",
+                );
+                if no_match >= LONG_NO_MATCH_GIVE_UP {
+                    reason = "no-match";
+                    break 'outer;
+                }
+            }
+            StitchStepKind::Still => {
+                emit_long(
+                    app,
+                    "scrolling",
+                    step.height,
+                    step.steps,
+                    step.score,
+                    &thumb,
+                    "已到底部，正在收尾…",
+                );
+                // 到底判定（连续 still_rounds 轮没动）在算法层
+                if step.still_count >= 2 {
+                    reason = "bottom";
+                    break 'outer;
+                }
+            }
+        }
+    }
+
+    // 会话可能已被 commit 取走：那就由它收尾，这里什么都不做
+    let final_info = {
+        let guard = state.long.lock().unwrap();
+        guard
+            .as_ref()
+            .map(|s| (s.capture.height(), s.thumb.to_string_lossy().to_string()))
+    };
+    let Some((height, thumb)) = final_info else {
+        state.long_active.store(false, Ordering::SeqCst);
+        return;
+    };
+
+    let (phase, message) = match &error {
+        Some(e) => ("error", format!("长截图出错：{e}")),
+        None => (
+            "done",
+            match reason {
+                "stopped" => "已停止".to_string(),
+                "no-match" => "页面不再滚动，已收尾".to_string(),
+                "bottom" => format!("已到底部，共 {height} px"),
+                _ => format!("已完成，共 {height} px"),
+            },
+        ),
+    };
+    emit_long(
+        app,
+        phase,
+        height,
+        last_steps,
+        last_score,
+        &thumb,
+        &message,
+    );
+
+    // 还原浮层 + 注销 Esc（幂等；commit 也会做一遍，双保险）
+    let anchor = {
+        let guard = state.long.lock().unwrap();
+        guard
+            .as_ref()
+            .map(|s| (s.overlay_idx, s.overlay_hwnd, s.used_fallback))
+    };
+    if let Some((idx, hwnd, used_fallback)) = anchor {
+        restore_long_overlay(app, idx, hwnd, used_fallback);
+    }
+    state.long_active.store(false, Ordering::SeqCst);
+    // 没有新会话顶着才注销 Esc（用户极快速重开长截图的竞态）
+    if state.long.lock().unwrap().is_none() {
+        unregister_long_esc(app);
+    }
+}
+
+/// 发一条长截图进度事件。
+fn emit_long(
+    app: &AppHandle,
+    phase: &str,
+    height: u32,
+    steps: u32,
+    score: f32,
+    thumb: &str,
+    message: impl Into<String>,
+) {
+    let payload = LongProgressPayload {
+        phase: phase.to_string(),
+        height,
+        steps,
+        score,
+        thumb: thumb.to_string(),
+        message: message.into(),
+    };
+    let _ = app.emit(LONG_EVENT, payload);
+}
+
+/// 还原长截图期间改过的浮层状态：光标穿透解除、采集排除解除、
+/// 兜底路径隐藏过的浮层显式唤回。
+fn restore_long_overlay(app: &AppHandle, idx: usize, hwnd: isize, ensure_visible: bool) {
+    let label = format!("{}{}", windows::OVERLAY_PREFIX, idx);
+    windows::set_window_ignore_cursor_events(app, &label, false);
+    if hwnd != 0 {
+        snappin_core_platform::stitch::set_hwnd_capture_excluded(hwnd, false);
+    }
+    if ensure_visible {
+        let _ = overlay_set_visible(app, &label, true);
+    }
+}
+
+/// 取浮层顶层窗口的 Win32 HWND（非 Windows / 失败返回 0）。
+#[cfg(windows)]
+fn overlay_window_hwnd(app: &AppHandle, label: &str) -> isize {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let Some(w) = app.get_webview_window(label) else {
+        return 0;
+    };
+    match w.window_handle() {
+        Ok(h) => match h.as_raw() {
+            RawWindowHandle::Win32(h32) => h32.hwnd.get(),
+            _ => 0,
+        },
+        Err(e) => {
+            eprintln!("[snappin] window_handle failed for {label}: {e}");
+            0
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn overlay_window_hwnd(_app: &AppHandle, _label: &str) -> isize {
+    0
+}
+
+/// 构造"采集前后隐藏/显示浮层"的回调对（WDA 不可用时的兜底）。
+/// 主线程同步等待（macOS 建窗约束同 create_pin_window）。
+fn overlay_hide_show(app: &AppHandle, idx: usize) -> (Option<UiCallback>, Option<UiCallback>) {
+    let label = format!("{}{}", windows::OVERLAY_PREFIX, idx);
+    // 回调是 'static 的（跨线程/跨阶段执行），必须各自持有一份 AppHandle 与 label，
+    // 不能借用入参 `app`（release 下此函数被内联路径要求 'static，debug 未触发该约束）。
+    let (app_hide, label_hide): (AppHandle, String) = (AppHandle::clone(app), label.clone());
+    let hide: UiCallback = Box::new(move || {
+        if let Err(e) = overlay_set_visible(&app_hide, &label_hide, false) {
+            eprintln!("[snappin] hide overlay before grab failed: {e}");
+        }
+    });
+    let (app_show, label_show): (AppHandle, String) = (AppHandle::clone(app), label);
+    let show: UiCallback = Box::new(move || {
+        if let Err(e) = overlay_set_visible(&app_show, &label_show, true) {
+            eprintln!("[snappin] show overlay after grab failed: {e}");
+        }
+    });
+    (Some(hide), Some(show))
+}
+
+/// 在主线程显示/隐藏浮层（同步等待结果）。
+fn overlay_set_visible(app: &AppHandle, label: &str, visible: bool) -> Result<(), String> {
+    let (tx, rx) = mpsc::channel::<Result<(), String>>();
+    let label = label.to_string();
+    let app_cb = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let r = match app_cb.get_webview_window(&label) {
+            Some(w) => {
+                if visible {
+                    w.show().map_err(|e| e.to_string())
+                } else {
+                    w.hide().map_err(|e| e.to_string())
+                }
+            }
+            None => Ok(()),
+        };
+        let _ = tx.send(r);
+    });
+    rx.recv_timeout(Duration::from_secs(2))
+        .unwrap_or_else(|_| Err("overlay visibility: main thread timeout".to_string()))
+}
+
+/// 长截图期间注册全局 Esc（拦截系统级按键；结束必须注销）。
+/// 与其它动态热键同一模式：动态注册、按时注销，不常驻——
+/// 后台工具常驻拦截无修饰键 Esc 会打扰其它程序。
+fn register_long_esc(app: &AppHandle) {
+    let esc = crate::long_esc_shortcut();
+    windows::post_to_main(app, move |app| {
+        if let Err(e) = app.global_shortcut().register(esc) {
+            eprintln!("[snappin] register Esc for long capture failed: {e}");
+        }
+    });
+}
+
+/// 注销长截图的全局 Esc（幂等，未注册时返回错误，忽略）。
+fn unregister_long_esc(app: &AppHandle) {
+    let esc = crate::long_esc_shortcut();
+    windows::post_to_main(app, move |app| {
+        let _ = app.global_shortcut().unregister(esc);
+    });
+}
+
+/// 贴图几何：长图逻辑尺寸按 70% 主屏幅面封顶缩放，主屏居中。
+fn long_pin_geometry(app: &AppHandle, w: u32, h: u32) -> (f64, f64, f64, f64) {
+    let (mon_w, mon_h, sf) = app
+        .primary_monitor()
+        .ok()
+        .flatten()
+        .map(|m| {
+            let s = m.scale_factor();
+            let sz = m.size();
+            (sz.width as f64 / s, sz.height as f64 / s, s)
+        })
+        .unwrap_or((1920.0, 1080.0, 1.0));
+    let dw = (w as f64 / sf).max(8.0);
+    let dh = (h as f64 / sf).max(8.0);
+    let scale = ((mon_w * LONG_PIN_MAX_RATIO) / dw)
+        .min((mon_h * LONG_PIN_MAX_RATIO) / dh)
+        .min(1.0);
+    let dw = dw * scale;
+    let dh = dh * scale;
+    let (x, y) = windows::place_centered_on_primary(app, dw, dh);
+    (dw, dh, x, y)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use base64::Engine as _;
+
+    /// 显示器 ID 解析：错一位就会拼错屏幕的内容，必须严格。
+    #[test]
+    fn monitor_id_parses_to_index() {
+        assert_eq!(monitor_index("m0").unwrap(), 0);
+        assert_eq!(monitor_index("m1").unwrap(), 1);
+        assert_eq!(monitor_index("m10").unwrap(), 10);
+        assert!(monitor_index("x0").is_err());
+        assert!(monitor_index("m").is_err());
+        assert!(monitor_index("m-1").is_err());
+        assert!(monitor_index("m1.5").is_err());
+        assert!(monitor_index("").is_err());
+    }
+
+    /// **IPC 契约回归**：`confirm_selection` 的 `shapes` 直接来自前端
+    /// `src/annotate/tools.ts` 的 `ShapeDraft`（camelCase 字段 + 各工具的 `type` 判别值）。
+    ///
+    /// 这类不匹配只在运行时才炸，用户看到的是
+    /// `invalid args shapes for command confirm_selection: missing field step_x`
+    /// 这种完全指不出根因的错误，所以只有单测能兜住。已踩过两次：
+    /// 1. 枚举只写了 `rename_all`（作用变体名），漏了 `rename_all_fields`
+    ///    （作用字段名）——单词字段恰好同名掩盖了问题，水印的 `stepX/stepY` 一用就炸；
+    /// 2. `ZoomRegion` 变体名按 camelCase 是 `zoomRegion`，而前端发的是 `zoom`。
+    #[test]
+    fn shape_payload_matches_frontend_tool_payloads() {
+        let png = sample_png_b64();
+        let cases: Vec<(&str, String)> = vec![
+            (
+                "rect",
+                r#"{"type":"rect","x":1,"y":2,"w":3,"h":4,"color":[255,0,0,255],"width":2}"#
+                    .into(),
+            ),
+            (
+                "ellipse",
+                r#"{"type":"ellipse","x":1,"y":2,"w":3,"h":4,"color":[255,0,0,255],"width":2}"#
+                    .into(),
+            ),
+            (
+                "arrow",
+                r#"{"type":"arrow","x1":1,"y1":2,"x2":3,"y2":4,"color":[255,0,0,255],"width":2}"#
+                    .into(),
+            ),
+            (
+                "pen",
+                r#"{"type":"pen","points":[[1,2],[3,4]],"color":[255,0,0,255],"width":2}"#.into(),
+            ),
+            (
+                "highlighter",
+                r#"{"type":"highlighter","points":[[1,2]],"color":[255,0,0,255],"width":2}"#.into(),
+            ),
+            (
+                "mosaic",
+                r#"{"type":"mosaic","x":1,"y":2,"w":3,"h":4,"block":8}"#.into(),
+            ),
+            (
+                "spotlight",
+                r#"{"type":"spotlight","x":1,"y":2,"w":3,"h":4,"radius":6,"dim":128}"#.into(),
+            ),
+            (
+                "bitmap",
+                // 前端还会带 w/h（预览用），Rust 侧忽略未知字段
+                format!(r#"{{"type":"bitmap","x":1,"y":2,"w":3,"h":4,"png":"{png}"}}"#),
+            ),
+            (
+                "eraser",
+                r#"{"type":"eraser","points":[[1,2]],"radius":3}"#.into(),
+            ),
+            (
+                "watermark",
+                format!(
+                    r#"{{"type":"watermark","x":1,"y":2,"w":30,"h":40,"stepX":25,"stepY":35,"png":"{png}"}}"#
+                ),
+            ),
+            (
+                "zoom",
+                r#"{"type":"zoom","x":1,"y":2,"w":3,"h":4,"zoom":2,"color":[0,0,0,255],"width":2}"#
+                    .into(),
+            ),
+            (
+                "smartErase",
+                r#"{"type":"smartErase","x":1,"y":2,"w":3,"h":4,"iterations":0}"#.into(),
+            ),
+        ];
+
+        for (name, json) in cases {
+            let parsed: ShapePayload = serde_json::from_str(&json)
+                .unwrap_or_else(|e| panic!("[{name}] 前端载荷解析失败：{e}\n载荷：{json}"));
+
+            // 回写方向同样要求 camelCase（将来前端若"回读"不必猜字段名）
+            let value = serde_json::to_value(&parsed).expect("serialize");
+            if let Some(obj) = value.as_object() {
+                for key in obj.keys() {
+                    assert!(
+                        !key.contains('_'),
+                        "[{name}] 字段名须为 camelCase，出现了 {key}"
+                    );
+                }
+            }
+        }
+    }
 
     /// 2x1 的 PNG（左红右绿），base64 编码——模拟前端 `toDataURL` 的尾巴
     fn sample_png_b64() -> String {
@@ -1028,6 +2342,78 @@ mod tests {
         assert_eq!((w, h), (2, 1));
         assert_eq!(&rgba[0..4], &[255, 0, 0, 255]);
         assert_eq!(&rgba[4..8], &[0, 255, 0, 255]);
+    }
+
+    #[test]
+    fn decoded_points_scale_back_to_logical_pixels() {
+        let codes = vec![snappin_core_platform::qr::DecodedCode {
+            text: "https://example.com".to_string(),
+            format: "QR_CODE".to_string(),
+            // 物理像素：1.75 缩放的 4K 屏上，逻辑 (100,200) → 物理 (175,350)
+            points: vec![(175.0, 350.0), (525.0, 350.0)],
+        }];
+        let out = to_decoded_payloads(codes, 1.75);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].text, "https://example.com");
+        assert_eq!(out[0].format, "QR_CODE");
+        assert_eq!(out[0].points, vec![(100.0, 200.0), (300.0, 200.0)]);
+    }
+
+    #[test]
+    fn decoded_points_unchanged_at_unity_scale() {
+        // 100% 缩放的显示器：换算必须是恒等，不能因为浮点误差抖出 0.9999
+        let codes = vec![snappin_core_platform::qr::DecodedCode {
+            text: "x".to_string(),
+            format: "QR_CODE".to_string(),
+            points: vec![(10.5, 20.25)],
+        }];
+        let out = to_decoded_payloads(codes, 1.0);
+        assert_eq!(out[0].points, vec![(10.5, 20.25)]);
+    }
+
+    fn sample_ocr_line(min_x: f32, min_y: f32, max_x: f32, max_y: f32) -> snappin_core_platform::ocr::OcrLine {
+        snappin_core_platform::ocr::OcrLine {
+            text: "测试文字".to_string(),
+            score: 0.95,
+            box_: snappin_core_algo::ocr::DetBox {
+                min_x,
+                min_y,
+                max_x,
+                max_y,
+                score: 0.9,
+            },
+        }
+    }
+
+    #[test]
+    fn ocr_boxes_are_selection_relative_logical_pixels() {
+        // 裁剪图原点是显示器物理像素 (350, 700)，sf=1.75；
+        // 框在裁剪图物理坐标 (525, 1050)-(875, 1050) → 选区内逻辑 (100, 200)-(300, 200)
+        let lines = vec![sample_ocr_line(525.0, 1050.0, 875.0, 1050.0)];
+        let out = to_ocr_payloads(lines, 1.75, 350, 700);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].text, "测试文字");
+        assert_eq!(out[0].min_x, 100.0);
+        assert_eq!(out[0].min_y, 200.0);
+        assert_eq!(out[0].max_x, 300.0);
+        assert_eq!(out[0].max_y, 200.0);
+    }
+
+    #[test]
+    fn ocr_boxes_unchanged_at_unity_scale_and_zero_origin() {
+        let lines = vec![sample_ocr_line(10.0, 20.0, 110.0, 45.0)];
+        let out = to_ocr_payloads(lines, 1.0, 0, 0);
+        assert_eq!((out[0].min_x, out[0].min_y), (10.0, 20.0));
+        assert_eq!((out[0].max_x, out[0].max_y), (110.0, 45.0));
+    }
+
+    #[test]
+    fn ocr_boxes_never_go_negative() {
+        // 选区原点不一定与框原点严格对齐（取整误差），负值夹到 0，
+        // 否则前端会把高亮框画到选区外（被 overflow 裁掉）
+        let lines = vec![sample_ocr_line(-3.0, -1.0, 10.0, 10.0)];
+        let out = to_ocr_payloads(lines, 1.0, 5, 5);
+        assert_eq!((out[0].min_x, out[0].min_y), (0.0, 0.0));
     }
 
     #[test]
@@ -1060,8 +2446,7 @@ mod tests {
     }
 
     #[test]
-    fn spotlight_payload_scales_geometry_but_not_dim() {
-        let p = ShapePayload::Spotlight {
+    fn spotlight_payload_scales_geometry_but_not_dim() {        let p = ShapePayload::Spotlight {
             x: 1.0,
             y: 2.0,
             w: 30.0,
@@ -1076,5 +2461,249 @@ mod tests {
             }
             other => panic!("expect spotlight, got {other:?}"),
         }
+    }
+
+    /// 端到端：载荷 → to_shapes → draw_shapes 后，像素必须真的被压暗。
+    /// （单测覆盖过 spotlight_region 本身，这里锁的是"从 IPC 载荷到最终图"
+    ///   这条链路——也就是用户保存出来的那张图。）
+    #[test]
+    fn spotlight_payload_actually_dims_saved_pixels() {
+        let (w, h) = (120u32, 80u32);
+        let mut data = vec![255u8; w as usize * h as usize * 4];
+        for px in data.chunks_exact_mut(4) {
+            px[3] = 255;
+        }
+        let mut buf = snappin_core_algo::RgbaBuffer::new(w, h, data).expect("buffer");
+
+        let payloads = vec![ShapePayload::Spotlight {
+            x: 40.0,
+            y: 25.0,
+            w: 40.0,
+            h: 30.0,
+            radius: 8.0,
+            dim: 171,
+        }];
+        let shapes = to_shapes(&payloads, 1.0).expect("to_shapes");
+        snappin_core_algo::draw::draw_shapes(&mut buf, &shapes);
+
+        // 洞内保持纯白
+        assert_eq!(buf.pixel(60, 40), Some([255, 255, 255, 255]), "洞内不该被压暗");
+        // 角落压到 255 × (1 - 171/255) ≈ 84
+        let corner = buf.pixel(1, 1).expect("corner");
+        assert!(
+            (corner[0] as i32 - 84).abs() <= 2,
+            "角落应压到约 84，实际 {corner:?}"
+        );
+        assert_eq!(corner[3], 255, "alpha 不该被改动");
+    }
+
+    // ---- M3 新增载荷：橡皮擦 / 水印 / 放大镜 / 智能擦除 ----
+
+    #[test]
+    fn eraser_payload_scales_points_and_radius() {
+        let p = ShapePayload::Eraser {
+            points: vec![[10.0, 20.0], [30.0, 40.0]],
+            radius: 3.0,
+        };
+        match p.to_shape(2.0).expect("to_shape") {
+            snappin_core_algo::shapes::Shape::Eraser { points, radius } => {
+                assert_eq!(points, vec![(20.0, 40.0), (60.0, 80.0)]);
+                assert_eq!(radius, 6.0);
+            }
+            other => panic!("expect eraser, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn watermark_payload_scales_geometry_and_step() {
+        let p = ShapePayload::Watermark {
+            x: 5.0,
+            y: 6.0,
+            w: 20.0,
+            h: 10.0,
+            step_x: 7.0,
+            step_y: 9.0,
+            png: sample_png_b64(),
+        };
+        match p.to_shape(2.0).expect("to_shape") {
+            snappin_core_algo::shapes::Shape::Watermark {
+                x, y, w, h, step_x, step_y, tile_w, tile_h, tile,
+            } => {
+                // 几何量与步进都乘 DPR（步进不乘，高 DPI 下水印会挤成一团）
+                assert_eq!((x, y, w, h), (10, 12, 40, 20));
+                assert_eq!((step_x, step_y), (14, 18));
+                // tile 尺寸与像素来自 PNG 解码，不再缩放
+                assert_eq!((tile_w, tile_h), (2, 1));
+                assert_eq!(tile.len(), 8);
+            }
+            other => panic!("expect watermark, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn zoom_payload_keeps_multiplier_and_scales_geometry() {
+        let p = ShapePayload::ZoomRegion {
+            x: 1.0,
+            y: 2.0,
+            w: 8.0,
+            h: 6.0,
+            zoom: 3.0,
+            color: [0, 0, 0, 255],
+            width: 2.0,
+        };
+        match p.to_shape(2.0).expect("to_shape") {
+            snappin_core_algo::shapes::Shape::ZoomRegion { x, y, w, h, zoom, style } => {
+                assert_eq!((x, y, w, h), (2, 4, 16, 12));
+                // 倍率是"看起来放大几倍"，与 DPI 无关，绝不能乘
+                assert_eq!(zoom, 3.0);
+                // 边框线宽是几何量，要乘
+                assert_eq!(style.width, 4.0);
+            }
+            other => panic!("expect zoom, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn smart_erase_payload_scales_geometry_only() {
+        let p = ShapePayload::SmartErase {
+            x: 3.0,
+            y: 4.0,
+            w: 10.0,
+            h: 8.0,
+            iterations: 5,
+        };
+        match p.to_shape(2.0).expect("to_shape") {
+            snappin_core_algo::shapes::Shape::SmartErase { x, y, w, h, iterations } => {
+                assert_eq!((x, y, w, h), (6, 8, 20, 16));
+                // 轮数上限是算法参数，不是几何量
+                assert_eq!(iterations, 5);
+            }
+            other => panic!("expect smartErase, got {other:?}"),
+        }
+    }
+
+    /// 端到端：四个新载荷 → to_shapes → draw_shapes_with_base 后，
+    /// 保存图上的像素必须真的按各自语义变化（而不是被静默忽略）。
+    /// 单测覆盖过算法本身，这里锁的是"从 IPC 载荷到最终图"这条链路。
+    #[test]
+    fn new_payloads_actually_change_saved_pixels() {
+        // base：水平灰度渐变（灰度 = x*6），左右可区分、放大后可验证取样
+        let (w, h) = (40u32, 40u32);
+        let mut base_data = vec![0u8; w as usize * h as usize * 4];
+        for y in 0..h {
+            for x in 0..w {
+                let i = (y * w + x) as usize * 4;
+                let v = (x as u8).wrapping_mul(6);
+                base_data[i] = v;
+                base_data[i + 1] = v;
+                base_data[i + 2] = v;
+                base_data[i + 3] = 255;
+            }
+        }
+        let base = snappin_core_algo::RgbaBuffer::new(w, h, base_data).expect("base");
+
+        // ① 橡皮擦：先画盖住 (10,10)-(20,20) 的红矩形，再擦中心 → 露出 base
+        let mut buf = base.clone();
+        let payloads = vec![
+            ShapePayload::Rect {
+                x: 10.0,
+                y: 10.0,
+                w: 10.0,
+                h: 10.0,
+                color: [255, 0, 0, 255],
+                width: 2.0,
+            },
+            ShapePayload::Eraser {
+                points: vec![[15.0, 15.0]],
+                radius: 3.0,
+            },
+        ];
+        let shapes = to_shapes(&payloads, 1.0).expect("to_shapes");
+        snappin_core_algo::draw::draw_shapes_with_base(&mut buf, &base, &shapes);
+        assert_eq!(buf.pixel(15, 15), Some([90, 90, 90, 255]), "擦除处应还原为 base 渐变");
+        assert_eq!(buf.pixel(10, 10), Some([255, 0, 0, 255]), "矩形其余部分应保留");
+
+        // ② 放大镜：放大 (2,2,12,12) zoom=2 → 内部取样 base（黑画布上应出现渐变灰）
+        let mut buf2 = snappin_core_algo::RgbaBuffer::new(
+            w,
+            h,
+            {
+                let mut d = vec![0u8; w as usize * h as usize * 4];
+                for px in d.chunks_exact_mut(4) {
+                    px[3] = 255;
+                }
+                d
+            },
+        )
+        .expect("buf");
+        let payloads = vec![ShapePayload::ZoomRegion {
+            x: 2.0,
+            y: 2.0,
+            w: 12.0,
+            h: 12.0,
+            zoom: 2.0,
+            color: [255, 0, 0, 255],
+            width: 2.0,
+        }];
+        let shapes = to_shapes(&payloads, 1.0).expect("to_shapes");
+        snappin_core_algo::draw::draw_shapes_with_base(&mut buf2, &base, &shapes);
+        // (8,8) 在描边之内：源坐标 = 2 + (8-2)/2 = 5 → base 灰度 5*6 = 30
+        assert_eq!(buf2.pixel(8, 8), Some([30, 30, 30, 255]), "放大镜应取样 base 内容");
+        assert_eq!(buf2.pixel(0, 0), Some([0, 0, 0, 255]), "区域外不该被动到");
+
+        // ③ 智能擦除：白底中间 8x8 涂黑 → 擦除后还原为白
+        let mut white = vec![255u8; w as usize * h as usize * 4];
+        for px in white.chunks_exact_mut(4) {
+            px[3] = 255;
+        }
+        let flat = snappin_core_algo::RgbaBuffer::new(w, h, white).expect("flat");
+        let mut buf3 = flat.clone();
+        for y in 16..24 {
+            for x in 16..24 {
+                let i = (y * w + x) as usize * 4;
+                buf3.data[i] = 0;
+                buf3.data[i + 1] = 0;
+                buf3.data[i + 2] = 0;
+            }
+        }
+        let payloads = vec![ShapePayload::SmartErase {
+            x: 16.0,
+            y: 16.0,
+            w: 8.0,
+            h: 8.0,
+            iterations: 0,
+        }];
+        let shapes = to_shapes(&payloads, 1.0).expect("to_shapes");
+        snappin_core_algo::draw::draw_shapes_with_base(&mut buf3, &flat, &shapes);
+        assert_eq!(buf3.pixel(20, 20), Some([255, 255, 255, 255]), "智能擦除应补全为白");
+
+        // ④ 水印：2x1（左红右绿）tile 按步进 2 平铺进 (0,0,6,4) → 网格落位
+        let mut buf4 = snappin_core_algo::RgbaBuffer::new(
+            w,
+            h,
+            {
+                let mut d = vec![0u8; w as usize * h as usize * 4];
+                for px in d.chunks_exact_mut(4) {
+                    px[3] = 255;
+                }
+                d
+            },
+        )
+        .expect("buf");
+        let payloads = vec![ShapePayload::Watermark {
+            x: 0.0,
+            y: 0.0,
+            w: 6.0,
+            h: 4.0,
+            step_x: 2.0,
+            step_y: 2.0,
+            png: sample_png_b64(),
+        }];
+        let shapes = to_shapes(&payloads, 1.0).expect("to_shapes");
+        snappin_core_algo::draw::draw_shapes(&mut buf4, &shapes);
+        assert_eq!(buf4.pixel(0, 0), Some([255, 0, 0, 255]), "第 1 行第 1 块 = 红");
+        assert_eq!(buf4.pixel(1, 0), Some([0, 255, 0, 255]), "第 1 行第 1 块 = 绿");
+        assert_eq!(buf4.pixel(4, 0), Some([255, 0, 0, 255]), "第 3 块平铺到位");
+        assert_eq!(buf4.pixel(0, 2), Some([255, 0, 0, 255]), "第 2 行平铺到位");
     }
 }

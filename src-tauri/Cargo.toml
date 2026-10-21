@@ -5,10 +5,17 @@ edition = "2021"
 rust-version = "1.77.2"
 description = "SnapPin - cross-platform screenshot & pin-to-screen desktop tool"
 license = "MIT"
+# 关闭自动 bin 探测，改由下方 [[bin]] 显式声明，
+# 使产物可执行文件名为 SnapPin.exe（而不是 cargo 包名 snappin.exe）
+autobins = false
 
 [lib]
 name = "snappin_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "SnapPin"
+path = "src/main.rs"
 
 [build-dependencies]
 tauri-build = { version = "2.7", features = [] }
@@ -30,5 +37,8 @@ serde_json = { workspace = true }
 image = { workspace = true }
 base64 = { workspace = true }
 anyhow = { workspace = true }
+# 长截图：从浮层窗口对象取 Win32 HWND（设 WDA 采集排除用）。
+# 版本与 tauri 内部依赖锁定一致（workspace lock 0.6.2）。
+raw-window-handle = "0.6"
 snappin-core-algo = { path = "../core/core-algo" }
 snappin-core-platform = { path = "../core/core-platform" }

@@ -123,6 +123,53 @@ export const SequenceIcon = (p: IconProps) => (
   </Icon>
 )
 
+/** 橡皮擦（倾斜的橡皮 + 擦除面分割线） */
+export const EraserIcon = (p: IconProps) => (
+  <Icon scale={1.2} {...p}>
+    <g transform="rotate(-45 12 12)">
+      <rect x="4.6" y="8.8" width="14.8" height="6.4" rx="1.9" />
+      <path d="M9.2 8.8v6.4" />
+    </g>
+  </Icon>
+)
+
+/** 水印（边框 + 3×3 点阵，表达"平铺"） */
+export const WatermarkIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <rect x="3.6" y="3.6" width="16.8" height="16.8" rx="2.8" />
+    <g fill="currentColor" stroke="none">
+      {[7.2, 12, 16.8].map((cx) =>
+        [7.2, 12, 16.8].map((cy) => (
+          <circle key={`w${cx}-${cy}`} cx={cx} cy={cy} r="1.05" />
+        )),
+      )}
+    </g>
+  </Icon>
+)
+
+/** 放大镜（圆镜 + 手柄 + 镜片内的加粗内容线，暗示"放大"） */
+export const ZoomIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <circle cx="10.4" cy="10.4" r="6.1" />
+    <path d="M14.9 14.9 20.2 20.2" />
+    <path d="M8 10.4h4.8" strokeWidth={2.4} />
+  </Icon>
+)
+
+/** 智能擦除（倾斜的橡皮 + 右上角闪光，表达"内容感知"） */
+export const SmartEraseIcon = (p: IconProps) => (
+  <Icon scale={1.05} {...p}>
+    <g transform="rotate(-45 12 12)">
+      <rect x="4.2" y="9.6" width="11.6" height="5.2" rx="1.6" />
+    </g>
+    <path
+      d="M18.4 4.6l.75 1.95 1.95.75-1.95.75-.75 1.95-.75-1.95-1.95-.75 1.95-.75Z"
+      fill="currentColor"
+      stroke="none"
+    />
+  </Icon>
+)
+
 /** 翻译（A / 文 两个叠放的方框） */
 export const TranslateIcon = (p: IconProps) => (
   <Icon scale={1.22} {...p}>
@@ -225,5 +272,34 @@ export const CloseIcon = (p: IconProps) => (
 export const CheckIcon = (p: IconProps) => (
   <Icon scale={1.4} {...p}>
     <path d="M5.2 12.6 9.8 17.1 18.8 7.5" />
+  </Icon>
+)
+
+/** 取色器（吸管）：斜置滴管 + 管内液滴 + 右上取液点。
+ *  与橡皮擦图标（EraserIcon）刻意区分：橡皮擦是"横握擦具体"，
+ *  吸管是"斜握点液体"，且多一个取样点。 */
+export const PickIcon = (p: IconProps) => (
+  <Icon scale={1.12} {...p}>
+    <path d="M13.6 4.2 19.8 10.4" />
+    <path d="M17.2 3.1a2.05 2.05 0 0 1 2.9 2.9l-1.6 1.6-2.9-2.9 1.6-1.6Z" />
+    <path d="M13.6 4.2 5.9 11.9a2 2 0 0 0-.5 2.1l.6 1.9-2.6 2.6a1.4 1.4 0 0 0 2 2l2.6-2.6 1.9.6a2 2 0 0 0 2.1-.5l7.7-7.7" />
+  </Icon>
+)
+
+/** 二维码：三个定位角（回形）+ 数据区点阵。
+ *  定位角用"外框 + 实心方点"画成回字形，数据区用实心小方块，
+ *  与放大镜图标（圆 + 粗线）区分度更高。 */
+export const QrIcon = (p: IconProps) => (
+  <Icon scale={1.1} {...p}>
+    <rect x="3.4" y="3.4" width="6.6" height="6.6" rx="1.5" />
+    <rect x="14" y="3.4" width="6.6" height="6.6" rx="1.5" />
+    <rect x="3.4" y="14" width="6.6" height="6.6" rx="1.5" />
+    <rect x="6.1" y="6.1" width="1.9" height="1.9" rx="0.5" fill="currentColor" stroke="none" />
+    <rect x="16.7" y="6.1" width="1.9" height="1.9" rx="0.5" fill="currentColor" stroke="none" />
+    <rect x="6.1" y="16.7" width="1.9" height="1.9" rx="0.5" fill="currentColor" stroke="none" />
+    <rect x="14.2" y="14.2" width="2.8" height="2.8" rx="0.6" fill="currentColor" stroke="none" />
+    <rect x="18.2" y="18.2" width="2.4" height="2.4" rx="0.6" fill="currentColor" stroke="none" />
+    <rect x="18.2" y="14.2" width="2.4" height="2.4" rx="0.6" fill="currentColor" stroke="none" />
+    <rect x="14.2" y="18.2" width="2.4" height="2.4" rx="0.6" fill="currentColor" stroke="none" />
   </Icon>
 )

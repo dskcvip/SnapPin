@@ -116,6 +116,65 @@ pub enum Shape {
         /// 压暗强度：0 = 不压暗，255 = 全黑
         dim: u8,
     },
+    /// 橡皮擦：把轨迹区域**还原成底图**（擦掉已画上去的标注）。
+    ///
+    /// 与"用白色涂抹"有本质区别：橡皮擦不引入任何颜色，它从 `base`
+    /// （绘制任何标注之前的原始裁剪图）把像素拷回来。因此调用方必须
+    /// 通过 `draw::draw_shapes_with_base` 传入 base 缓冲；单独调用
+    /// `draw_shape` 时本变体按"无操作"处理（没有 base 就无从还原）。
+    Eraser {
+        /// 轨迹点（物理像素）
+        points: Vec<(f32, f32)>,
+        /// 擦除半径（物理像素）
+        radius: f32,
+    },
+    /// 水印：把一小块位图按步进平铺进指定区域（半透明文字/图片水印）。
+    ///
+    /// 位图由 UI 层用系统字体光栅化后上传（见 `Bitmap` 的说明），
+    /// 核心层只做重复 blit——字体、CJK、emoji 都不进核心层。
+    Watermark {
+        x: i32,
+        y: i32,
+        w: u32,
+        h: u32,
+        /// 平铺步进（物理像素）：>tile 的部分即水印间距
+        step_x: u32,
+        step_y: u32,
+        /// 单块水印位图尺寸（物理像素）
+        tile_w: u32,
+        tile_h: u32,
+        /// RGBA8，行优先，长度 = tile_w*tile_h*4，**非预乘 alpha**
+        tile: Vec<u8>,
+    },
+    /// 区域放大（放大镜）：把 base 中 (x,y,w,h) 区域按 `zoom` 倍放大后
+    /// 画回同一区域，外加一圈描边。取样用最近邻，与前端预览一致。
+    ///
+    /// 同样依赖 base：放大的是"原图内容"，不是已画上的标注。
+    ZoomRegion {
+        x: i32,
+        y: i32,
+        w: u32,
+        h: u32,
+        /// 放大倍数（≥1.0，可为小数）
+        zoom: f32,
+        /// 描边颜色（放大区域边框）
+        style: ShapeStyle,
+    },
+    /// 智能擦除：内容感知填充（零依赖近似 inpaint）。
+    ///
+    /// 做法：把区域内像素清空，再从区域**外沿向内**做多轮"最近外界
+    /// 像素扩散"（每轮只允许推进一个像素，取该像素四个已填充邻居的
+    /// 均值），收敛后得到与周围纹理连续的填充。对小物体（文字、图标、
+    /// 人脸、水印）在平坦背景上效果接近 OpenCV inpaint；强纹理背景
+    /// 只能做到"抹平"，做不到"无痕"——这是算法定位，不是缺陷。
+    SmartErase {
+        x: i32,
+        y: i32,
+        w: u32,
+        h: u32,
+        /// 扩散轮数上限（0 = 自动，按区域短边估算）
+        iterations: u32,
+    },
 }
 
 impl Shape {
@@ -142,7 +201,17 @@ impl Shape {
                 *x += dx as i32;
                 *y += dy as i32;
             }
-            Shape::Spotlight { x, y, .. } => {
+            Shape::Eraser { points, .. } => {
+                // 橡皮擦平移整条轨迹（没有点时不移动）
+                for p in points.iter_mut() {
+                    p.0 += dx;
+                    p.1 += dy;
+                }
+            }
+            Shape::Spotlight { x, y, .. }
+            | Shape::Watermark { x, y, .. }
+            | Shape::ZoomRegion { x, y, .. }
+            | Shape::SmartErase { x, y, .. } => {
                 *x += dx as i32;
                 *y += dy as i32;
             }
@@ -156,13 +225,38 @@ impl Shape {
             | Shape::Ellipse { x, y, w, h, .. }
             | Shape::Mosaic { x, y, w, h, .. }
             | Shape::Spotlight { x, y, w, h, .. }
-            | Shape::Bitmap { x, y, w, h, .. } => Some(Rect {
+            | Shape::Bitmap { x, y, w, h, .. }
+            | Shape::Watermark { x, y, w, h, .. }
+            | Shape::ZoomRegion { x, y, w, h, .. }
+            | Shape::SmartErase { x, y, w, h, .. } => Some(Rect {
                 x: *x,
                 y: *y,
                 w: *w,
                 h: *h,
             }),
             Shape::Arrow { x1, y1, x2, y2, .. } => Some(Rect::from_drag(*x1, *y1, *x2, *y2)),
+            Shape::Eraser { points, radius } => {
+                if points.is_empty() {
+                    return None;
+                }
+                let r = *radius;
+                let mut min_x = f32::MAX;
+                let mut min_y = f32::MAX;
+                let mut max_x = f32::MIN;
+                let mut max_y = f32::MIN;
+                for &(px, py) in points {
+                    min_x = min_x.min(px - r);
+                    min_y = min_y.min(py - r);
+                    max_x = max_x.max(px + r);
+                    max_y = max_y.max(py + r);
+                }
+                Some(Rect {
+                    x: min_x as i32,
+                    y: min_y as i32,
+                    w: (max_x - min_x).max(0.0) as u32,
+                    h: (max_y - min_y).max(0.0) as u32,
+                })
+            }
             Shape::Pen { points, .. } | Shape::Highlighter { points, .. } => {
                 if points.is_empty() {
                     return None;
@@ -187,16 +281,18 @@ impl Shape {
         }
     }
 
-    /// 轨迹类图形（Pen/Highlighter）的点序列，其他返回 None。
+    /// 轨迹类图形（Pen/Highlighter/Eraser）的点序列，其他返回 None。
     pub fn points(&self) -> Option<&[(f32, f32)]> {
         match self {
-            Shape::Pen { points, .. } | Shape::Highlighter { points, .. } => Some(points),
+            Shape::Pen { points, .. }
+            | Shape::Highlighter { points, .. }
+            | Shape::Eraser { points, .. } => Some(points),
             _ => None,
         }
     }
 
-    /// 线宽（马赛克无线宽，返回块边长近似；位图图层与线宽无关，返回 0；
-    /// 聚光灯同理，返回圆角半径近似）。
+    /// 线宽（马赛克/智能擦除无线宽，返回块边长/0 近似；位图图层与水印
+    /// 平铺和线宽无关，返回 0；聚光灯返回圆角半径近似；橡皮擦返回半径）。
     pub fn width_or_block(&self) -> f32 {
         match self {
             Shape::Rect { style, .. }
@@ -207,6 +303,10 @@ impl Shape {
             Shape::Mosaic { block, .. } => *block as f32,
             Shape::Bitmap { .. } => 0.0,
             Shape::Spotlight { radius, .. } => *radius as f32,
+            Shape::Eraser { radius, .. } => *radius,
+            Shape::Watermark { .. } => 0.0,
+            Shape::ZoomRegion { style, .. } => style.width,
+            Shape::SmartErase { .. } => 0.0,
         }
     }
 }
@@ -300,5 +400,90 @@ mod tests {
         assert_eq!(s.points(), None);
         s.translate(2.0, -3.0);
         assert_eq!(s.bounds(), Some(Rect { x: 7, y: 3, w: 40, h: 20 }));
+    }
+
+    #[test]
+    fn eraser_translates_trajectory_and_reports_bounds() {
+        let mut e = Shape::Eraser {
+            points: vec![(10.0, 10.0), (20.0, 15.0)],
+            radius: 4.0,
+        };
+        // 半径参与 bounds
+        assert_eq!(e.bounds(), Some(Rect { x: 6, y: 6, w: 18, h: 13 }));
+        // 橡皮擦是轨迹类图形，points() 应可读
+        assert_eq!(e.points(), Some(&[(10.0, 10.0), (20.0, 15.0)][..]));
+        // 线宽查询返回半径
+        assert_eq!(e.width_or_block(), 4.0);
+        e.translate(5.0, -5.0);
+        assert_eq!(e.points(), Some(&[(15.0, 5.0), (25.0, 10.0)][..]));
+        assert_eq!(e.bounds(), Some(Rect { x: 11, y: 1, w: 18, h: 13 }));
+    }
+
+    #[test]
+    fn empty_eraser_has_no_bounds() {
+        let e = Shape::Eraser { points: vec![], radius: 3.0 };
+        assert_eq!(e.bounds(), None);
+        assert_eq!(e.points(), Some(&[][..]));
+    }
+
+    #[test]
+    fn watermark_reports_rect_bounds() {
+        let wm = Shape::Watermark {
+            x: 4,
+            y: 8,
+            w: 100,
+            h: 60,
+            step_x: 50,
+            step_y: 30,
+            tile_w: 40,
+            tile_h: 16,
+            tile: vec![0; 40 * 16 * 4],
+        };
+        assert_eq!(wm.bounds(), Some(Rect { x: 4, y: 8, w: 100, h: 60 }));
+        assert_eq!(wm.width_or_block(), 0.0);
+        assert_eq!(wm.points(), None);
+    }
+
+    #[test]
+    fn zoom_region_reports_style_width() {
+        let z = Shape::ZoomRegion {
+            x: 0,
+            y: 0,
+            w: 80,
+            h: 80,
+            zoom: 2.5,
+            style: ShapeStyle::new([0, 0, 0, 255], 3.0),
+        };
+        assert_eq!(z.bounds(), Some(Rect { x: 0, y: 0, w: 80, h: 80 }));
+        assert_eq!(z.width_or_block(), 3.0);
+    }
+
+    #[test]
+    fn smart_erase_reports_rect_bounds() {
+        let s = Shape::SmartErase { x: 2, y: 3, w: 30, h: 20, iterations: 0 };
+        assert_eq!(s.bounds(), Some(Rect { x: 2, y: 3, w: 30, h: 20 }));
+        assert_eq!(s.width_or_block(), 0.0);
+        assert_eq!(s.points(), None);
+    }
+
+    #[test]
+    fn translate_moves_new_rect_like_variants() {
+        let mut wm = Shape::Watermark {
+            x: 0, y: 0, w: 10, h: 10,
+            step_x: 10, step_y: 10, tile_w: 5, tile_h: 5,
+            tile: vec![0; 5 * 5 * 4],
+        };
+        wm.translate(3.0, 4.0);
+        assert_eq!(wm.bounds(), Some(Rect { x: 3, y: 4, w: 10, h: 10 }));
+
+        let mut z = Shape::ZoomRegion {
+            x: 0, y: 0, w: 10, h: 10, zoom: 2.0, style: style(),
+        };
+        z.translate(-1.0, -1.0);
+        assert_eq!(z.bounds(), Some(Rect { x: -1, y: -1, w: 10, h: 10 }));
+
+        let mut se = Shape::SmartErase { x: 0, y: 0, w: 10, h: 10, iterations: 0 };
+        se.translate(7.0, 8.0);
+        assert_eq!(se.bounds(), Some(Rect { x: 7, y: 8, w: 10, h: 10 }));
     }
 }

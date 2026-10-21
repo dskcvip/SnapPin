@@ -1,0 +1,258 @@
+/**
+ * 自绘菜单窗样式（托盘点击 / 悬浮球右键 / 贴图右键，三者共用一套配色）。
+ *
+ * 设计参考：**浅色**圆角面板 + 深色文字 + 右侧灰色快捷键 + 细分隔线 +
+ * 左侧勾选列（开关项）。原生菜单（TrackPopupMenu）做不出这些，
+ * 故整体自绘（见 src-tauri/src/menuwin.rs）。
+ *
+ * ⚠️ 三处必须保持一致，否则面板会被窗口裁掉或出现白边：
+ *   1. 这里的 `.menu-stage` padding
+ *   2. `src-tauri/src/menuwin.rs` 的 `MENU_SHADOW_PAD`
+ *   3. `MenuWindow.tsx` 的 `SHADOW_PAD`
+ */
+
+.menu-stage {
+  width: 100vw;
+  height: 100vh;
+  /* 给 box-shadow 留出空间（透明窗口会裁掉超出部分） */
+  padding: 18px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-start;
+}
+
+.sp-menu {
+  /* 应用菜单（托盘 / 悬浮球）的根面板宽度。贴图菜单更窄，见下方 .is-pin 规则 */
+  width: 224px;
+  /* 面板内边距：子菜单偏移要按它换算（.sp-node 的 100% 是内容盒宽度，
+     不含 padding，直接用 calc(100% + Npx) 会把子菜单压进本面板） */
+  --sp-pad: 6px;
+  /* flex column：避免子项 margin 与父级折叠，面板高度才能被前端精确量出 */
+  display: flex;
+  flex-direction: column;
+  padding: var(--sp-pad);
+  border-radius: 12px;
+  background: #ffffff;
+  color: #1f2933;
+  font-size: 13.5px;
+  line-height: 1.2;
+  box-shadow:
+    0 6px 16px rgba(15, 23, 42, 0.18),
+    0 1px 3px rgba(15, 23, 42, 0.12),
+    0 0 0 1px rgba(15, 23, 42, 0.08);
+  color-scheme: light;
+}
+
+/* 分组标题（对应参考图的 "Recent"） */
+.sp-label {
+  height: 26px;
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+  color: rgba(15, 23, 42, 0.45);
+  font-size: 12px;
+  letter-spacing: 0.2px;
+}
+
+.sp-sep {
+  flex: none;
+  height: 1px;
+  margin: 6px 8px;
+  background: rgba(15, 23, 42, 0.09);
+}
+
+.sp-item {
+  width: 100%;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 10px;
+  border-radius: 7px;
+  /* 显式清掉浏览器默认的按钮外观：本文件不依赖 global.css 的 button reset
+     （菜单窗是独立页面，样式必须自洽） */
+  border: 0;
+  background: transparent;
+  color: #1f2933;
+  text-align: left;
+  transition: background-color 90ms ease;
+}
+
+.sp-item:hover {
+  background: rgba(15, 23, 42, 0.06);
+}
+
+.sp-item:active {
+  background: rgba(15, 23, 42, 0.1);
+}
+
+.sp-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* 右侧次要文字（对应参考图右侧的 "答题"，这里是快捷键） */
+.sp-key {
+  flex: none;
+  color: rgba(15, 23, 42, 0.45);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.2px;
+}
+
+/* 快捷键注册失败的告警（只在真失败时出现） */
+.sp-warn {
+  height: 30px;
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+  font-size: 12px;
+  color: #c2410c;
+}
+
+/* 勾选列：固定宽度，保证有无勾选的项文字左边缘对齐 */
+.sp-check {
+  flex: none;
+  width: 16px;
+  text-align: center;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.sp-check.on {
+  color: #1f2933;
+  font-weight: 700;
+}
+
+/* ---------- 滑块行（贴图菜单第一项「不透明度」） ---------- */
+
+/* 两行结构：上排「标签 + 百分比」，下排整行轨道。
+   不套 .sp-item：滑块要吃掉 pointer 事件做拖动，不能是按钮。 */
+.sp-slider {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 3px 10px 7px;
+}
+
+.sp-slider-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  height: 18px;
+}
+
+/* 轨道填充：Chromium（WebView2）的 range 无法用纯 CSS 表达"已填充部分"，
+   由内联 `--p` 给出百分比，这里画成两段渐变。 */
+.sp-range {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 14px;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.sp-range::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 2px;
+  background: linear-gradient(
+    to right,
+    #1f2933 0,
+    #1f2933 var(--p, 100%),
+    rgba(15, 23, 42, 0.14) var(--p, 100%),
+    rgba(15, 23, 42, 0.14) 100%
+  );
+}
+
+.sp-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 13px;
+  height: 13px;
+  /* (4 - 13) / 2：让滑块圆心落在轨道的垂直中线上 */
+  margin-top: -4.5px;
+  border-radius: 50%;
+  background: #ffffff;
+  border: 1px solid rgba(15, 23, 42, 0.35);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.25);
+}
+
+.sp-range:focus-visible {
+  outline: none;
+}
+
+.sp-range:focus-visible::-webkit-slider-thumb {
+  border-color: #1f2933;
+  box-shadow: 0 0 0 3px rgba(15, 23, 42, 0.14);
+}
+
+/* ---------- 子菜单（贴图右键的"图像处理 ▸"等） ---------- */
+
+/* 贴图一级菜单 200px：条目比应用菜单短（最长的是"不透明度"3 字），
+   224 会显得两侧发空。只改根面板——二级菜单仍是 max-content。 */
+.menu-stage.is-pin .sp-menu.sp-root {
+  width: 200px;
+}
+
+/* 一级与二级之间留 1px 缝：两块面板的 1px 外描边（box-shadow 0 0 0 1px）
+   会各占一侧，视觉上是一条细缝而不是"粘在一起"。 */
+
+/* 每个菜单项一个定位容器：子面板挂在它右边，随项垂直对齐 */
+.sp-node {
+  position: relative;
+  flex: none;
+}
+
+/* 子面板：默认隐藏但仍**占布局盒**——测尺寸要把它的外扩范围算进去，
+   否则窗口会按根面板大小创建，子菜单一展开就被窗口边缘裁掉。 */
+.sp-subwrap {
+  position: absolute;
+  /* 贴到「父面板外沿 + 1px」：100% 是子项（.sp-node）宽度 = 面板内容盒，
+     所以还要补上父面板的右内边距 --sp-pad。漏掉它会让子菜单压进父面板。 */
+  left: calc(100% + var(--sp-pad) + 1px);
+  top: calc(-1 * var(--sp-pad));
+  visibility: hidden;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.sp-subwrap.on {
+  visibility: visible;
+  pointer-events: auto;
+}
+
+/* 子面板宽度由内容决定：中文标签 + 快捷键/箭头，比根面板窄 */
+.sp-menu.sp-sub {
+  width: max-content;
+  min-width: 152px;
+  padding: var(--sp-pad);
+}
+
+/* 右箭头：替代快捷键位的位置（有子菜单时不显示 hint） */
+.sp-arrow {
+  flex: none;
+  font-size: 11px;
+  line-height: 1;
+  color: rgba(15, 23, 42, 0.4);
+}
+
+/* 已展开 / 悬停的父项：浅色底 + 深色字（与参考图的蓝色块区分开，
+   这里沿用整套浅色中性配色） */
+.sp-item.has-sub.open {
+  background: rgba(15, 23, 42, 0.08);
+}
+
+/* 子菜单里的只读信息行（如"当前 110%"）：不可点、不加悬停底色 */
+.sp-item.is-note,
+.sp-item.is-note:hover {
+  height: 26px;
+  background: transparent;
+  color: rgba(15, 23, 42, 0.45);
+  font-size: 12px;
+  cursor: default;
+}

@@ -12,7 +12,9 @@
 use std::fmt;
 
 pub mod draw;
+pub mod ocr;
 pub mod shapes;
+pub mod stitch;
 
 /// 算法层错误。零依赖，因此手写 `Display` / `Error`。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,6 +25,12 @@ pub enum AlgoError {
     ZeroSize,
     /// 选区完全位于图像之外
     RectOutOfBounds,
+    /// 帧高度 < 2，无法拼接
+    FrameTooShort { h: u32 },
+    /// 新帧宽度与累积图不一致（长截图要求等宽）
+    WidthMismatch { expected: u32, actual: u32 },
+    /// 累积图超过高度上限
+    TooTall { max: u32 },
 }
 
 impl fmt::Display for AlgoError {
@@ -35,6 +43,15 @@ impl fmt::Display for AlgoError {
             ),
             AlgoError::ZeroSize => write!(f, "image width/height must be non-zero"),
             AlgoError::RectOutOfBounds => write!(f, "selection rect is fully outside the image"),
+            AlgoError::FrameTooShort { h } => {
+                write!(f, "frame height {} is too short to stitch", h)
+            }
+            AlgoError::WidthMismatch { expected, actual } => write!(
+                f,
+                "frame width {} does not match canvas width {}",
+                actual, expected
+            ),
+            AlgoError::TooTall { max } => write!(f, "stitched image exceeds max height {}", max),
         }
     }
 }

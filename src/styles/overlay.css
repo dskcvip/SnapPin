@@ -94,6 +94,7 @@
 }
 
 .sbtn {
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -250,6 +251,15 @@
   font-size: 11px;
   line-height: 1;
   color: #6b7280;
+  user-select: none;
+}
+
+/* 无参数工具的静态说明（智能擦除）：让面板不空着，也告诉用户怎么用 */
+.sb-tip {
+  font-size: 12px;
+  line-height: 1;
+  color: #6b7280;
+  white-space: nowrap;
   user-select: none;
 }
 
@@ -449,4 +459,560 @@
 .tbtn.ghost {
   background: transparent;
   color: var(--text-dim);
+}
+
+/* ===================== 取色器（M4） ===================== */
+
+/* 跟随指针的取色气泡：色块 + HEX + RGB。
+   不放在 .annotate-wrap 里——它要能伸到选区外（取色时光标可能贴边）。 */
+.pick-chip {
+  position: fixed;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  box-sizing: border-box;
+  height: 28px;
+  padding: 0 10px 0 6px;
+  background: rgba(15, 23, 42, 0.92);
+  border-radius: 8px;
+  color: #fff;
+  font-size: 12px;
+  line-height: 1;
+  pointer-events: none;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.pick-swatch {
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+}
+
+/* HEX 用等宽数字：取色时颜色在快速变化，比例数字会左右抖 */
+.pick-hex {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.pick-rgb {
+  color: rgba(255, 255, 255, 0.62);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 复制成功提示：固定在选区左上角内侧，避免和气泡抢同一个位置 */
+.pick-toast {
+  position: fixed;
+  z-index: 20;
+  left: 50%;
+  top: 116px;
+  transform: translateX(-50%);
+  padding: 6px 12px;
+  background: rgba(0, 179, 117, 0.94);
+  border-radius: 6px;
+  color: #fff;
+  font-size: 12px;
+  line-height: 1;
+  pointer-events: none;
+  user-select: none;
+  white-space: nowrap;
+}
+
+/* ===================== 选区阶段放大镜（悬停/拖选） ===================== */
+
+/* 深色气泡：140px 可视区（最近邻放大）+ 26px 底部色条。
+   ⚠️ 尺寸必须与 `DragMagnifier.tsx` 的 MAG_SIZE / MAG_FOOT 一致
+   （翻转到另一侧的位置计算按 MAG_SIZE 推）。
+   整体 pointer-events:none——它只是"看"，不能挡住下面的框选操作。 */
+.drag-mag {
+  position: fixed;
+  z-index: 30;
+  /* 必须与 DragMagnifier.tsx 的 MAG_SIZE 一致 */
+  width: 156px;
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  box-shadow: 0 4px 16px rgba(15, 23, 42, 0.35);
+  overflow: hidden;
+  pointer-events: none;
+  user-select: none;
+}
+
+.drag-mag-view {
+  position: relative;
+  width: 156px;
+  height: 156px;
+}
+
+.drag-mag-view canvas {
+  display: block;
+}
+
+/* 中心十字：标出"正在取色/对准的是这一个像素"。
+   用叠加层而不是画进 canvas——不污染放大的画面内容。 */
+.drag-mag-view::before,
+.drag-mag-view::after {
+  content: '';
+  position: absolute;
+  background: rgba(255, 255, 255, 0.65);
+  pointer-events: none;
+}
+
+.drag-mag-view::before {
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+}
+
+.drag-mag-view::after {
+  top: 50%;
+  left: 0;
+  right: 0;
+  height: 1px;
+}
+
+.drag-mag-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  box-sizing: border-box;
+  height: 26px;
+  padding: 0 8px;
+  font-size: 12px;
+  color: #fff;
+  white-space: nowrap;
+}
+
+.drag-mag-foot .pick-swatch {
+  width: 16px;
+  height: 16px;
+}
+
+.drag-mag-tip {
+  color: rgba(255, 255, 255, 0.62);
+}
+
+/* "已复制 #XXXXXX"：贴在气泡下方（气泡翻到上方时贴其上） */
+.drag-mag-copied {
+  position: fixed;
+  z-index: 30;
+  padding: 4px 10px;
+  background: rgba(0, 179, 117, 0.94);
+  border-radius: 6px;
+  color: #fff;
+  font-size: 11px;
+  line-height: 1;
+  pointer-events: none;
+  user-select: none;
+  white-space: nowrap;
+}
+
+/* 选区阶段首次提示：顶部居中（此时工具条还没出现，不抢位置） */
+.sel-hint {
+  position: fixed;
+  z-index: 25;
+  left: 50%;
+  top: 14px;
+  transform: translateX(-50%);
+  padding: 6px 12px;
+  background: rgba(15, 23, 42, 0.82);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1;
+  border-radius: 4px;
+  white-space: nowrap;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* ===================== 二维码识别结果面板（M4） ===================== */
+
+.qr-panel {
+  position: fixed;
+  z-index: 20;
+  width: 300px;
+  max-height: 220px;
+  overflow: auto;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  background: #fafafa;
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.16);
+  font-size: 12px;
+  color: #1f2937;
+}
+
+.qr-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+  font-weight: 600;
+  color: #374151;
+}
+
+.qr-close {
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: #6b7280;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.qr-close:hover {
+  background: rgba(15, 23, 42, 0.08);
+  color: #111827;
+}
+
+.qr-empty,
+.qr-error {
+  padding: 8px 0;
+  color: #6b7280;
+}
+
+.qr-error {
+  color: #b91c1c;
+}
+
+.qr-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 0;
+  border-top: 1px solid rgba(15, 23, 42, 0.07);
+}
+
+.qr-row:first-of-type {
+  border-top: none;
+}
+
+/* 格式徽标：QR_CODE / EAN_13 …，固定宽度避免长短不一把文本顶得跳 */
+.qr-format {
+  flex: none;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(59, 130, 246, 0.12);
+  color: #1d4ed8;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+/* 码内容：超长 URL 单行省略，完整文本在 title 里 */
+.qr-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+
+.qr-btn {
+  flex: none;
+  padding: 3px 8px;
+  border: 1px solid rgba(15, 23, 42, 0.14);
+  border-radius: 5px;
+  background: #fff;
+  color: #374151;
+  font-size: 11px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.qr-btn:hover {
+  border-color: rgba(15, 23, 42, 0.28);
+  background: #f3f4f6;
+}
+
+/* ===================== 文字识别结果面板（M4 OCR） ===================== */
+
+.ocr-panel {
+  position: fixed;
+  z-index: 20;
+  width: 320px;
+  max-height: 300px;
+  overflow: auto;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  background: #fafafa;
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.16);
+  font-size: 12px;
+  color: #1f2937;
+}
+
+.ocr-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-weight: 600;
+  color: #374151;
+}
+
+/* 标题占满剩余宽度，把「复制全部」和关闭按钮推到右边 */
+.ocr-head > span:first-child {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ocr-close {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: #6b7280;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.ocr-close:hover {
+  background: rgba(15, 23, 42, 0.08);
+  color: #111827;
+}
+
+.ocr-empty,
+.ocr-error {
+  padding: 8px 0;
+  color: #6b7280;
+}
+
+.ocr-error {
+  color: #b91c1c;
+  /* 模型缺失的提示很长（含目录路径），允许换行读全 */
+  white-space: pre-wrap;
+  word-break: break-all;
+  line-height: 1.5;
+}
+
+.ocr-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 0;
+  border-top: 1px solid rgba(15, 23, 42, 0.07);
+}
+
+.ocr-row:first-of-type {
+  border-top: none;
+}
+
+/* 置信度：两位数定宽，避免 100 与 61 把文本顶得跳动 */
+.ocr-score {
+  flex: none;
+  width: 22px;
+  color: #9ca3af;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+/* 识别文本：中文长行最多两行、超出省略；完整文本在 title 里 */
+.ocr-text {
+  flex: 1;
+  min-width: 0;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-all;
+  line-height: 1.45;
+}
+
+.ocr-btn {
+  flex: none;
+  padding: 3px 8px;
+  border: 1px solid rgba(15, 23, 42, 0.14);
+  border-radius: 5px;
+  background: #fff;
+  color: #374151;
+  font-size: 11px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.ocr-btn:hover {
+  border-color: rgba(15, 23, 42, 0.28);
+  background: #f3f4f6;
+}
+
+/* 工具条按钮右上角的小圆点：OCR 模型缺失时常驻提醒 */
+.sb-dot {
+  position: absolute;
+  top: 7px;
+  right: 6px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #ef4444;
+}
+
+/* ===================== 长截图（M5） ===================== */
+
+/* 滚动拼接中 / 结果态：隐藏冻结图、工具条与标注层。
+   冻结图一隐藏，整块浮层只剩 .sel 的压暗与边框，**真实桌面直接透出**——
+   用户能亲眼看到页面在选区里滚动（长截图的核心反馈）。
+   工具条此时点不到（Rust 已把浮层设为整体光标穿透），故一并隐藏，
+   状态/操作由 .long-bar / .long-result 承担。 */
+.overlay-root.long-running .frozen,
+.overlay-root.long-result .frozen {
+  visibility: hidden;
+}
+
+.overlay-root.long-running .shot-bar,
+.overlay-root.long-result .shot-bar,
+.overlay-root.long-running .annotate-wrap,
+.overlay-root.long-result .annotate-wrap {
+  display: none;
+}
+
+/* 长截图公共面板外观（与 .ocr-panel 同语言） */
+.long-bar,
+.long-result {
+  position: fixed;
+  z-index: 20;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  background: #fafafa;
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.16);
+  font-size: 12px;
+  color: #1f2937;
+}
+
+/* 状态条：缩略图窄条（长图按高度封顶，宽度自适应）+ 右侧信息列 */
+.long-bar {
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+  width: 300px;
+}
+
+.long-thumb {
+  flex: none;
+  height: 72px;
+  min-width: 8px;
+  border-radius: 4px;
+  background: #e5e7eb;
+  object-fit: cover;
+}
+
+.long-thumb-empty {
+  width: 8px;
+}
+
+.long-info {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.long-msg {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.long-sub {
+  color: #6b7280;
+  font-size: 11px;
+}
+
+/* 结果面板：缩略大图（高度封顶，内部可滚动看全图）+ 信息 + 动作行 */
+.long-result {
+  width: 340px;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.long-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-weight: 600;
+}
+
+.long-close {
+  border: none;
+  background: none;
+  color: #6b7280;
+  font-size: 16px;
+  line-height: 1;
+  padding: 2px 4px;
+  cursor: pointer;
+}
+
+.long-close:hover {
+  color: #111827;
+}
+
+.long-thumb-big {
+  display: block;
+  max-width: 100%;
+  max-height: 180px;
+  margin: 8px auto;
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  border-radius: 6px;
+  background: #fff;
+}
+
+.long-msg-row {
+  color: #6b7280;
+  line-height: 1.5;
+}
+
+.long-error {
+  margin-top: 6px;
+  color: #b91c1c;
+  line-height: 1.5;
+  word-break: break-all;
+}
+
+.long-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.long-btn {
+  flex: 1;
+  padding: 5px 0;
+  border: 1px solid rgba(15, 23, 42, 0.14);
+  border-radius: 6px;
+  background: #fff;
+  color: #374151;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.long-btn:hover:not(:disabled) {
+  border-color: rgba(15, 23, 42, 0.28);
+  background: #f3f4f6;
+}
+
+.long-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
 }

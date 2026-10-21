@@ -11,40 +11,61 @@ import {
   cancelCapture,
   closeSelf,
   confirmSelection,
+  copyText,
+  decodeQr,
   imgSrc,
+  longCaptureCommit,
+  longCaptureStart,
+  longCaptureStop,
+  openUrl,
+  ocrModelsStatus,
+  ocrRecognize,
   overlayContext,
+  readImageBytes,
   uiLog,
+  type DecodedCode,
+  type LongProgress,
+  type OcrLine,
   type OverlayContext,
   type Rect,
   type ShotAction,
 } from '../lib/api'
 import { AnnotationLayer } from '../annotate/AnnotationLayer'
+import { DragMagnifier } from '../annotate/DragMagnifier'
 import { ToolProps } from '../annotate/ToolProps'
 import {
   ArrowIcon,
   CheckIcon,
   CloseIcon,
   EllipseIcon,
+  EraserIcon,
   LongShotIcon,
   MosaicIcon,
   OcrIcon,
   PenIcon,
   PinIcon,
+  QrIcon,
   RectIcon,
   SaveIcon,
   SequenceIcon,
-  ShareIcon,
+  // ShareIcon,  // 分享按钮已按要求注释掉（见工具条处注释）
+  SmartEraseIcon,
   SpotlightIcon,
-  StickerIcon,
+  // StickerIcon,  // 贴纸工具未开发，按钮已临时撤下（见工具条处注释）
   TextIcon,
   TranslateIcon,
   UndoIcon,
+  WatermarkIcon,
+  ZoomIcon,
 } from '../annotate/icons'
 import {
-  PRESET_COLORS,
+  ERASER_RADIUS,
   MOSAIC_BLOCKS,
+  PRESET_COLORS,
   SPOTLIGHT_DIM,
   TEXT_FONT_SIZE,
+  ZOOM_LEVELS,
+  isActionTool,
   toShapePayloads,
   toolMeta,
   type AnnotateTool,
@@ -54,6 +75,12 @@ import {
 import '../styles/overlay.css'
 
 const MIN_SIZE = 3
+
+/** RGB → `#RRGGBB`（大写十六进制，与主流取色器的输出一致）。 */
+function toHex([r, g, b]: [number, number, number]): string {
+  const h = (v: number) => v.toString(16).padStart(2, '0')
+  return `#${h(r)}${h(g)}${h(b)}`.toUpperCase()
+}
 
 const ACTION_LABEL: Record<ShotAction, string> = {
   copy: '复制',
@@ -94,6 +121,83 @@ export function OverlayWindow() {
   const [fontSize, setFontSize] = useState(TEXT_FONT_SIZE.default)
   /** 聚光灯压暗强度（0-255）；同样独立存，不借用 width */
   const [spotDim, setSpotDim] = useState(SPOTLIGHT_DIM.default)
+  /** 橡皮擦半径（逻辑像素）；切工具不重置，保留用户上次的选择 */
+  const [eraserRadius, setEraserRadius] = useState(ERASER_RADIUS.default)
+  /** 放大镜倍数 */
+  const [zoomLevel, setZoomLevel] = useState(ZOOM_LEVELS[1])
+  /** 取色器：当前采样到的颜色（null = 未在取色）。
+   *  `x`/`y` 是**屏幕坐标**（CSS px），气泡跟随指针渲染。 */
+  const [pick, setPick] = useState<{
+    x: number
+    y: number
+    rgb: [number, number, number]
+    hex: string
+  } | null>(null)
+  /** 取色器：刚刚复制成功的 HEX（null = 无提示）。
+   *  存字符串而不是布尔：松手时气泡已经收起，需要记住"复制的是哪个色"。 */
+  const [copiedHex, setCopiedHex] = useState<string | null>(null)
+  const pickCopiedTimer = useRef<number | undefined>(undefined)
+  /** 选区阶段（拖选/悬停，未出 rect）光标处颜色：放大镜气泡底部展示，
+   *  并按 C 直接复制。与取色器（选区内 pick 工具）各管一个阶段。 */
+  const [dragColor, setDragColor] = useState<{
+    rgb: [number, number, number]
+    hex: string
+  } | null>(null)
+  /** 选区阶段首次提示（每个应用会话只出一次，不每次截图都刷屏） */
+  const [selHint, setSelHint] = useState<string | null>(null)
+  const selHintTimer = useRef<number | undefined>(undefined)
+  const selHintShownRef = useRef(false)
+  /** 二维码识别结果（null = 未识别 / 未打开面板） */
+  const [qrCodes, setQrCodes] = useState<DecodedCode[] | null>(null)
+  const [qrBusy, setQrBusy] = useState(false)
+  const [qrError, setQrError] = useState<string | null>(null)
+  /** OCR 识别结果（null = 未识别 / 未打开面板） */
+  const [ocrLines, setOcrLines] = useState<OcrLine[] | null>(null)
+  const [ocrBusy, setOcrBusy] = useState(false)
+  const [ocrError, setOcrError] = useState<string | null>(null)
+  /** OCR 模型是否就绪（null = 还没查到）。false 时按钮提示去下载模型。 */
+  const [ocrModelsOk, setOcrModelsOk] = useState<boolean | null>(null)
+  /** 长截图（M5）：off=未开始 / running=滚动拼接中 / result=结果面板 */
+  const [longMode, setLongMode] = useState<'off' | 'running' | 'result'>('off')
+  const [longProgress, setLongProgress] = useState<LongProgress | null>(null)
+  /** 结果面板动作执行中（null = 空闲；保存对话框期间保持禁用） */
+  const [longCommit, setLongCommit] = useState<ShotAction | null>(null)
+  const [longActError, setLongActError] = useState<string | null>(null)
+  /** 1×1 取色 Scratch 画布（模块级复用会与其它预览画布抢状态，故随组件） */
+  const pickCanvasRef = useRef<HTMLCanvasElement | null>(null)
+  /** 冻结图的 ImageBitmap（Rust 读字节 → Blob → 解码）。
+   *
+   *  为什么不直接拿 <img> 读像素：`convertFileSrc` 的 asset 图片在 WebView2 里
+   *  属于跨域资源，`drawImage` 能画（所以放大镜看得见画面），但
+   *  `getImageData` 会被判为污染画布而抛 SecurityError——取色因此拿不到值
+   *  （用户实测：气泡底部只剩"按 C 复制颜色"兜底文案）。
+   *  Blob 解码出的 ImageBitmap 是本地数据，读取永远合法；顺带省掉每帧解码。
+   *  位图未就绪时回退 <img>（只绘制不读取，两者等价）。 */
+  const [bitmap, setBitmap] = useState<ImageBitmap | null>(null)
+  /** 取样异常只记一次日志（每次移动都抛的话会把日志刷爆） */
+  const sampleErrLoggedRef = useRef(false)
+
+  /**
+   * 调暗度：**同时改最近一个聚光灯**。
+   *
+   * 滑条如果只影响"下一次拖出来的"框，用户画完再拖滑条会看不到任何变化
+   * （实际踩到的反馈：调到 16% 和 67% 截两张图，两张一模一样）。
+   * 所以对"最近这一个"做即时回改；再画新的仍然用当前滑条值。
+   */
+  const applySpotDim = (v: number) => {
+    setSpotDim(v)
+    setShapes((prev) => {
+      for (let i = prev.length - 1; i >= 0; i -= 1) {
+        const s = prev[i]
+        if (s.type === 'spotlight') {
+          const next = prev.slice()
+          next[i] = { ...s, dim: v }
+          return next
+        }
+      }
+      return prev
+    })
+  }
   /** 未实现工具的提示气泡（1.8s 自动消失） */
   const [hint, setHint] = useState<string | null>(null)
   const hintTimer = useRef<number | undefined>(undefined)
@@ -120,6 +224,38 @@ export function OverlayWindow() {
     uiLog('overlay mounted')
     return () => uiLog('overlay unmounted')
   }, [])
+
+  // 冻结图 → ImageBitmap：取色（getImageData）与放大镜绘制的统一数据源。
+  // 字节由 Rust 直读（read_image_bytes）→ Blob → 解码，完全绕开
+  // asset 协议的跨域判定；直接对 asset <img> 读像素会抛 SecurityError。
+  useEffect(() => {
+    if (!ctx) return
+    let disposed = false
+    let bmp: ImageBitmap | null = null
+    setBitmap(null)
+    sampleErrLoggedRef.current = false
+    readImageBytes(ctx.imagePath)
+      .then((buf) => new Blob([buf], { type: 'image/png' }))
+      .then((b) => createImageBitmap(b))
+      .then((b) => {
+        if (disposed) {
+          b.close()
+          return
+        }
+        bmp = b
+        setBitmap(b)
+        uiLog(`bitmap ready ${b.width}x${b.height}`)
+      })
+      .catch((err) => {
+        // 不阻断截图流程：位图缺失时放大镜仍用 <img> 绘制，
+        // 只是取色退化为空值（曾因这条路径静默失败排查很久，故留日志）
+        uiLog(`bitmap load failed: ${String(err)}`)
+      })
+    return () => {
+      disposed = true
+      bmp?.close()
+    }
+  }, [ctx])
 
   // 浮层窗口在采集前已预创建（隐藏态），挂载时可能不可见：
   // 隐藏页面的定时器会被浏览器节流，故轮询不能只依赖 visibilitychange
@@ -208,6 +344,31 @@ export function OverlayWindow() {
       setHint(null)
       setCursor(null)
       setBusy(false)
+      setPick(null)
+      setCopiedHex(null)
+      setDragColor(null)
+      setQrCodes(null)
+      setQrError(null)
+      setQrBusy(false)
+      setOcrLines(null)
+      setOcrError(null)
+      setOcrBusy(false)
+      setLongMode('off')
+      setLongProgress(null)
+      setLongCommit(null)
+      setLongActError(null)
+      // 每轮会话查一次模型状态（跨会话可能已下载好），失败不阻塞截图
+      ocrModelsStatus()
+        .then((s) => setOcrModelsOk(s.available))
+        .catch(() => setOcrModelsOk(null))
+      // 首次进入截图态提示选区阶段的新交互（放大镜 / C 取色）。
+      // 只提示一次：重复弹同一句话会变成骚扰。
+      if (!selHintShownRef.current) {
+        selHintShownRef.current = true
+        setSelHint('移动显示放大镜 · 按 C 复制颜色')
+        if (selHintTimer.current !== undefined) window.clearTimeout(selHintTimer.current)
+        selHintTimer.current = window.setTimeout(() => setSelHint(null), 3200)
+      }
       kick()
     })
       .then((fn) => {
@@ -236,6 +397,8 @@ export function OverlayWindow() {
   }, [])
 
   // 键盘：Esc 取消截图；Enter 完成（复制）；Ctrl+Enter 同；Ctrl+Z 撤销标注
+  // 长截图进行中（M5）：Esc 改为"停止滚动并收尾出图"，不是退出截图——
+  // 用户拼到一半按 Esc 的预期是"就到这里"，而不是"全部白干"。
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       // 文字输入中：键盘事件归输入框自己处理（否则 Enter/Esc/Ctrl+Z 会被
@@ -245,13 +408,40 @@ export function OverlayWindow() {
       if (tag === 'TEXTAREA' || tag === 'INPUT') return
       if (e.key === 'Escape') {
         e.preventDefault()
-        void exitCapture()
-      } else if (e.key === 'Enter' && rect && !busy) {
+        if (longMode === 'running') {
+          uiLog('long: stop requested (Esc)')
+          void longCaptureStop().catch(() => {})
+        } else {
+          void exitCapture()
+        }
+      } else if (e.key === 'Enter' && rect && !busy && longMode === 'off') {
         e.preventDefault()
         void finish('copy')
       } else if (e.ctrlKey && e.key.toLowerCase() === 'z') {
         e.preventDefault()
         setShapes((s) => s.slice(0, -1))
+      } else if (
+        (e.key === 'c' || e.key === 'C') &&
+        !e.ctrlKey &&
+        !e.metaKey &&
+        !e.altKey &&
+        cursor &&
+        !rect &&
+        longMode === 'off'
+      ) {
+        // 选区阶段取色：复制光标处颜色（放大镜气泡同位置出"已复制"提示）。
+        // 不要求先出选区——这正是"这一步直接取色"的入口。
+        e.preventDefault()
+        const s = dragColor ?? sampleMonitorPixel(cursor.x, cursor.y)
+        if (s) {
+          void copyText(s.hex)
+            .then(() => {
+              setCopiedHex(s.hex)
+              if (pickCopiedTimer.current !== undefined) window.clearTimeout(pickCopiedTimer.current)
+              pickCopiedTimer.current = window.setTimeout(() => setCopiedHex(null), 1200)
+            })
+            .catch((e2) => uiLog(`copy hex failed: ${String(e2)}`))
+        }
       }
     }
     window.addEventListener('keydown', onKey)
@@ -291,23 +481,211 @@ export function OverlayWindow() {
   }
 
   // 未实现工具：给出短提示，不做静默失败（用户点了要有反馈）
-  const showHint = (text: string, el?: HTMLElement | null) => {
+  // `suffix` 传空串 = 原文展示（如"请先框选…"这类引导语，不是"开发中"）
+  const showHint = (text: string, el?: HTMLElement | null, suffix = ' 正在开发中') => {
     if (el) {
       const r = el.getBoundingClientRect()
       setHintAnchor({ x: r.left + r.width / 2, bottom: r.bottom })
     }
-    setHint(`${text} 正在开发中`)
+    setHint(suffix ? `${text}${suffix}` : text)
     if (hintTimer.current !== undefined) window.clearTimeout(hintTimer.current)
     hintTimer.current = window.setTimeout(() => setHint(null), 1800)
   }
 
   /** 选工具：再次点击已选中的工具则回到"选择"态（工具条无高亮）。
-   *  荧光笔没有独立按钮（挂在画笔的二级面板里），点画笔等于收起它。 */
+   *  荧光笔没有独立按钮（挂在画笔的二级面板里），点画笔等于收起它。
+   *  动作类工具（取色/二维码）不覆盖线宽——它们没有线宽语义，
+   *  覆盖了会让用户回到标注工具时线宽变 0（看不见的笔触）。 */
   const pickTool = (t: AnnotateTool) => {
     const same = tool === t || (t === 'pen' && tool === 'highlighter')
     setTool(same ? null : t)
-    if (!same) setWidth(toolMeta(t).defaultWidth)
+    if (!same && !isActionTool(t)) setWidth(toolMeta(t).defaultWidth)
   }
+
+  /** 从冻结图采样 (mx, my)（**显示器逻辑像素**）处的像素。
+   *
+   *  坐标链路：显示器逻辑 → 物理像素（×sf）。
+   *  与 AnnotationLayer 里马赛克/放大镜的取样口径保持一致。
+   *  返回 null 表示越界（图外或图还没解码完）。 */
+  const sampleMonitorPixel = (mx: number, my: number) => {
+    const img = imgRef.current
+    if (!img) return null
+    const px = Math.round(mx * sf)
+    const py = Math.round(my * sf)
+    const w = bitmap?.width ?? img.naturalWidth
+    const h = bitmap?.height ?? img.naturalHeight
+    if (px < 0 || py < 0 || px >= w || py >= h) return null
+    const c = pickCanvasRef.current ?? (pickCanvasRef.current = document.createElement('canvas'))
+    c.width = 1
+    c.height = 1
+    const g = c.getContext('2d', { willReadFrequently: true })
+    if (!g) return null
+    g.clearRect(0, 0, 1, 1)
+    g.imageSmoothingEnabled = false
+    // 优先用 ImageBitmap（读取合法）；位图未就绪时回退 <img>（可能读不出来，
+    // 但 try/catch 保证不炸事件处理链路）
+    g.drawImage(bitmap ?? img, px, py, 1, 1, 0, 0, 1, 1)
+    let d: Uint8ClampedArray
+    try {
+      d = g.getImageData(0, 0, 1, 1).data
+    } catch (err) {
+      // 跨域污染画布（asset 图片尚未换成位图时会发生）：只记一次，避免刷屏
+      if (!sampleErrLoggedRef.current) {
+        sampleErrLoggedRef.current = true
+        uiLog(`sample pixel failed: ${String(err)}`)
+      }
+      return null
+    }
+    const rgb: [number, number, number] = [d[0], d[1], d[2]]
+    return { rgb, hex: toHex(rgb) }
+  }
+
+  /** 取色器：从冻结图采样 (lx, ly)（**选区内**逻辑像素）处的像素。
+   *  选区内逻辑 → 显示器逻辑（+rect 原点）后转交 sampleMonitorPixel。 */
+  const samplePixel = (lx: number, ly: number) => {
+    if (!rect) return null
+    return sampleMonitorPixel(rect.x + lx, rect.y + ly)
+  }
+
+  /** 取色器：移动中持续刷新气泡 */
+  const onPickSample = (lx: number, ly: number) => {
+    const s = samplePixel(lx, ly)
+    if (!s) {
+      setPick(null)
+      return
+    }
+    setPick({ x: rect ? rect.x + lx : lx, y: rect ? rect.y + ly : ly, ...s })
+  }
+
+  /** 取色器：松手定色并复制 HEX */
+  const onPickEnd = (lx: number, ly: number) => {
+    const s = samplePixel(lx, ly)
+    setPick(null)
+    if (!s) return
+    void copyText(s.hex)
+      .then(() => {
+        setCopiedHex(s.hex)
+        if (pickCopiedTimer.current !== undefined) window.clearTimeout(pickCopiedTimer.current)
+        pickCopiedTimer.current = window.setTimeout(() => setCopiedHex(null), 1200)
+      })
+      .catch((e) => uiLog(`copy hex failed: ${String(e)}`))
+  }
+
+  /** 二维码：拖出子区域后只识别这块（不是整个选区）。
+   *
+   *  坐标换算：AnnotationLayer 给的是**选区内**逻辑像素，而 decode_qr 的
+   *  rect 与 confirm_selection 同口径（显示器逻辑像素），所以要加上选区原点。
+   *  若直接传整个选区，用户在选区里圈一小块就会识别到圈外的码。 */
+  const onQrRegion = async (x: number, y: number, w: number, h: number) => {
+    if (!ctx || !rect) return
+    setQrBusy(true)
+    setQrError(null)
+    setQrCodes(null)
+    try {
+      const codes = await decodeQr(
+        ctx.monitorId,
+        { x: rect.x + x, y: rect.y + y, w, h },
+        ctx.sessionId,
+      )
+      setQrCodes(codes)
+      if (codes.length === 0) uiLog('qr: no code found in region')
+    } catch (e) {
+      uiLog(`qr decode failed: ${String(e)}`)
+      setQrError(String(e))
+    } finally {
+      setQrBusy(false)
+    }
+  }
+
+  /** OCR：对当前整个选区跑文字识别（点按钮即用，不需要拖子区域）。
+   *
+   *  与二维码的区别：二维码要用户指明"识别哪一块"（一图多码时拖选），
+   *  而 OCR 的输入就是选区本身——先框选、再点按钮，符合主流截图工具习惯。
+   *  没有选区时给提示，不静默失败。
+   *
+   *  模型缺失时 Rust 返回带目录的错误，原样展示给用户（含下载说明）。 */
+  const runOcr = async (anchor?: HTMLElement | null) => {
+    if (!ctx || !rect) {
+      if (anchor) showHint('请先框选要识别的区域', anchor)
+      return
+    }
+    if (ocrBusy) return
+    setOcrBusy(true)
+    setOcrError(null)
+    setOcrLines(null)
+    try {
+      const lines = await ocrRecognize(ctx.monitorId, rect, ctx.sessionId)
+      setOcrLines(lines)
+      if (lines.length === 0) uiLog('ocr: no text found in selection')
+    } catch (e) {
+      uiLog(`ocr recognize failed: ${String(e)}`)
+      setOcrError(String(e))
+    } finally {
+      setOcrBusy(false)
+    }
+  }
+
+  /** 长截图（M5）：把当前选区交给 Rust 自动滚动拼接。
+   *
+   *  启动失败不走 reject：Rust 会补发一条 phase="error" 的进度事件，
+   *  UI 统一由事件驱动切到结果面板（避免"命令 reject 与 error 事件"
+   *  抢状态导致面板闪跳）。选区太矮时前端先挡一道（Rust 也有同样校验）。
+   *
+   *  滚动期间浮层整体光标穿透 + 采集排除（Rust 侧设置），用户看到的是
+   *  真实桌面在选区里滚动；本窗只负责状态条与结果面板。 */
+  const startLong = async () => {
+    if (!ctx || !rect || longMode === 'running') return
+    if (rect.h * sf < 80) {
+      showHint('选区太矮，长截图至少需要 80px 高', null, '')
+      return
+    }
+    setLongMode('running')
+    setLongProgress(null)
+    setLongActError(null)
+    try {
+      // 每步 3 行滚轮（一格 ≈ 3 行）：长页面步进太小人肉等不及，太大易丢重叠
+      await longCaptureStart(ctx.monitorId, rect, 3, ctx.sessionId)
+    } catch (e) {
+      uiLog(`long start failed: ${String(e)}`)
+    }
+  }
+
+  /** 结果面板动作：保存 / 复制 / 贴图。成功后 Rust 已结束会话，自关兜底。 */
+  const commitLong = async (action: ShotAction) => {
+    if (longCommit) return
+    setLongCommit(action)
+    setLongActError(null)
+    try {
+      await longCaptureCommit(action)
+      closeSelf().catch(() => {})
+    } catch (e) {
+      uiLog(`long commit failed (${action}): ${String(e)}`)
+      setLongActError(`${ACTION_LABEL[action]}失败：${String(e)}`)
+      setLongCommit(null)
+    }
+  }
+
+  // 长截图进度事件（M5）：驱动循环每步一发；done/error 时切结果面板。
+  // 缩略图同一路径每步覆盖写，用 `?t=<steps>` 绕开 WebView 缓存。
+  useEffect(() => {
+    let unlisten: (() => void) | undefined
+    listen<LongProgress>('long-capture-progress', (ev) => {
+      const p = ev.payload
+      setLongProgress(p)
+      if (p.phase === 'done' || p.phase === 'error') {
+        setLongMode('result')
+        uiLog(`long ${p.phase}: ${p.message} (${p.height}px, ${p.steps} steps)`)
+      }
+    })
+      .then((fn) => {
+        unlisten = fn
+      })
+      .catch(() => {})
+    return () => {
+      unlisten?.()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   /** 二级菜单贴着当前工具按钮：取按钮矩形的水平中心与底边 */
   useLayoutEffect(() => {
@@ -350,14 +728,27 @@ export function OverlayWindow() {
 
   const onPointerMove = (e: ReactPointerEvent<HTMLDivElement>) => {
     const d = dragRef.current
-    if (!d) return
-    setDraft({
-      x: Math.min(d.x, e.clientX),
-      y: Math.min(d.y, e.clientY),
-      w: Math.abs(e.clientX - d.x),
-      h: Math.abs(e.clientY - d.y),
-    })
+    if (d) {
+      setDraft({
+        x: Math.min(d.x, e.clientX),
+        y: Math.min(d.y, e.clientY),
+        w: Math.abs(e.clientX - d.x),
+        h: Math.abs(e.clientY - d.y),
+      })
+    } else if (rect || tool || longMode !== 'off') {
+      // 已出选区 / 正在标注 / 长截图中：光标交给各自的交互层，
+      // 不再跟踪（避免无谓的重渲染，也避免与标注层抢光标语义）。
+      return
+    }
+    // 选区阶段（悬停或拖选）：持续跟踪光标，驱动放大镜 + 颜色读数。
+    // 两次 setState 在同一事件里，React 自动批合成一次重渲染。
     setCursor({ x: e.clientX, y: e.clientY })
+    setDragColor(sampleMonitorPixel(e.clientX, e.clientY))
+  }
+
+  // 光标移出浮层：收起放大镜（拖选中不移出——指针被窗口捕获）
+  const onPointerLeave = () => {
+    if (!dragRef.current) setCursor(null)
   }
 
   const onPointerUp = () => {
@@ -396,10 +787,13 @@ export function OverlayWindow() {
 
   return (
     <div
-      className="overlay-root"
+      className={`overlay-root${longMode === 'running' ? ' long-running' : ''}${
+        longMode === 'result' ? ' long-result' : ''
+      }`}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
+      onPointerLeave={onPointerLeave}
       onContextMenu={(e) => {
         e.preventDefault()
         if (rect) setRect(null)
@@ -440,8 +834,14 @@ export function OverlayWindow() {
             mosaicBlock={mosaicBlock}
             fontSize={fontSize}
             spotlightDim={spotDim}
+            eraserRadius={eraserRadius}
+            zoomLevel={zoomLevel}
             shapes={shapes}
             onShapesChange={setShapes}
+            onPickSample={onPickSample}
+            onPickEnd={onPickEnd}
+            onQrRegion={(x, y, w, h) => void onQrRegion(x, y, w, h)}
+            qrHighlights={qrCodes ? qrCodes.map((c) => ({ points: c.points })) : null}
           />
         </div>
       )}
@@ -452,6 +852,23 @@ export function OverlayWindow() {
           <div className="crosshair-h" style={{ top: cursor.y }} />
         </>
       )}
+
+      {/* 选区阶段放大镜：悬停 / 拖选时跟随光标，底部带颜色读数。
+          仅"未出选区"时显示——出选区后取色由工具条里的取色器负责，
+          两个阶段各有一个入口，不重叠也不冲突。 */}
+      {cursor && !rect && longMode === 'off' && (
+        <DragMagnifier
+          cursor={cursor}
+          imageEl={imgRef.current}
+          bitmap={bitmap}
+          scaleFactor={sf}
+          hex={dragColor?.hex ?? null}
+          copiedHex={copiedHex}
+        />
+      )}
+
+      {/* 选区阶段首次提示（每个应用会话一次，3.2s 自消） */}
+      {selHint && !rect && longMode === 'off' && <div className="sel-hint">{selHint}</div>}
 
       {active && (
         <div
@@ -494,6 +911,8 @@ export function OverlayWindow() {
               >
                 <EllipseIcon />
               </button>
+              {/* 贴纸工具尚未开发：按用户要求先撤下，等做到这里再放开。
+                  对应 import 也一并注释（tsconfig 开了 noUnusedLocals）。
               <button
                 className="sbtn"
                 title="贴纸"
@@ -501,6 +920,7 @@ export function OverlayWindow() {
               >
                 <StickerIcon />
               </button>
+              */}
               <button
                 data-tool="arrow"
                 className={`sbtn ${tool === 'arrow' ? 'active' : ''}`}
@@ -549,19 +969,79 @@ export function OverlayWindow() {
               >
                 <SequenceIcon />
               </button>
+              <button
+                data-tool="eraser"
+                className={`sbtn ${tool === 'eraser' ? 'active' : ''}`}
+                title="橡皮擦（擦掉已画的标注）"
+                onClick={() => pickTool('eraser')}
+              >
+                <EraserIcon />
+              </button>
+              <button
+                data-tool="watermark"
+                className={`sbtn ${tool === 'watermark' ? 'active' : ''}`}
+                title="水印（拖选区域后输入文字）"
+                onClick={() => pickTool('watermark')}
+              >
+                <WatermarkIcon />
+              </button>
+              <button
+                data-tool="zoom"
+                className={`sbtn ${tool === 'zoom' ? 'active' : ''}`}
+                title="放大镜"
+                onClick={() => pickTool('zoom')}
+              >
+                <ZoomIcon />
+              </button>
+              <button
+                data-tool="smartErase"
+                className={`sbtn ${tool === 'smartErase' ? 'active' : ''}`}
+                title="智能擦除（内容感知填充）"
+                onClick={() => pickTool('smartErase')}
+              >
+                <SmartEraseIcon />
+              </button>
             </div>
 
             <i className="sb-divider" />
 
-            {/* 第二组：识别类（尚未实现，按参考图置灰） */}
+            {/* 第二组：识别类 */}
             <div className="sb-group">
               <button className="sbtn" disabled title="翻译（即将支持）">
                 <TranslateIcon />
               </button>
-              <button className="sbtn" disabled title="文字识别（即将支持）">
+              <button
+                className={`sbtn ${ocrLines || ocrBusy || ocrError ? 'active' : ''}`}
+                title={
+                  ocrModelsOk === false
+                    ? '文字识别（模型缺失：点我查看下载说明）'
+                    : '文字识别（识别当前选区内的文字，支持中文）'
+                }
+                onClick={(e) => void runOcr(e.currentTarget)}
+              >
                 <OcrIcon />
+                {ocrModelsOk === false && <i className="sb-dot" title="模型缺失" />}
               </button>
-              <button className="sbtn" title="长截图" onClick={(e) => showHint('长截图', e.currentTarget)}>
+              <button
+                data-tool="qr"
+                className={`sbtn ${tool === 'qr' ? 'active' : ''}`}
+                title="二维码识别（拖选区域，支持一图多码）"
+                onClick={() => pickTool('qr')}
+              >
+                <QrIcon />
+              </button>
+              <button
+                className="sbtn"
+                title="长截图（自动滚动拼接整个页面，Esc 停止）"
+                disabled={longMode === 'running'}
+                onClick={(e) => {
+                  if (!rect) {
+                    showHint('请先框选要长截图的区域', e.currentTarget, '')
+                    return
+                  }
+                  void startLong()
+                }}
+              >
                 <LongShotIcon />
               </button>
             </div>
@@ -594,6 +1074,7 @@ export function OverlayWindow() {
               >
                 <PinIcon />
               </button>
+              {/* 分享按钮：按要求暂时注释掉，功能与「完成并复制」重复，保留代码便于恢复
               <button
                 className="sbtn"
                 title="复制并分享"
@@ -602,6 +1083,7 @@ export function OverlayWindow() {
               >
                 <ShareIcon />
               </button>
+              */}
               <button className="sbtn close" title="取消截图 (Esc)" onClick={() => void exitCapture()}>
                 <CloseIcon />
               </button>
@@ -628,19 +1110,6 @@ export function OverlayWindow() {
               }
               onPointerDown={(e) => e.stopPropagation()}
             >
-              {(tool === 'pen' || tool === 'highlighter') && (
-                <div className="sb-seg">
-                  <button className={tool === 'pen' ? 'on' : ''} onClick={() => setTool('pen')}>
-                    画笔
-                  </button>
-                  <button
-                    className={tool === 'highlighter' ? 'on' : ''}
-                    onClick={() => setTool('highlighter')}
-                  >
-                    荧光笔
-                  </button>
-                </div>
-              )}
               <ToolProps
                 tool={tool}
                 color={color}
@@ -648,11 +1117,15 @@ export function OverlayWindow() {
                 fontSize={fontSize}
                 spotDim={spotDim}
                 mosaicBlock={mosaicBlock}
+                eraserRadius={eraserRadius}
+                zoomLevel={zoomLevel}
                 onColor={setColor}
                 onWidth={setWidth}
                 onFontSize={setFontSize}
-                onSpotDim={setSpotDim}
+                onSpotDim={applySpotDim}
                 onMosaicBlock={setMosaicBlock}
+                onEraserRadius={setEraserRadius}
+                onZoomLevel={setZoomLevel}
                 onTool={setTool}
               />
             </div>
@@ -671,6 +1144,249 @@ export function OverlayWindow() {
               {hint}
             </div>
           )}
+
+          {/* 取色器气泡：跟随指针，左侧色块 + HEX + RGB。
+              指针靠近右/下边缘时翻到另一侧，避免被屏幕裁掉。 */}
+          {tool === 'pick' && pick && (
+            <div
+              className="pick-chip"
+              style={{
+                left: pick.x + 18 + 132 > window.innerWidth ? pick.x - 150 : pick.x + 18,
+                top: pick.y + 18 + 64 > window.innerHeight ? pick.y - 70 : pick.y + 18,
+              }}
+            >
+              <i className="pick-swatch" style={{ background: pick.hex }} />
+              <span className="pick-hex">{pick.hex}</span>
+              <span className="pick-rgb">
+                {pick.rgb[0]},{pick.rgb[1]},{pick.rgb[2]}
+              </span>
+            </div>
+          )}
+          {tool === 'pick' && copiedHex && <div className="pick-toast">已复制 {copiedHex}</div>}
+
+          {/* 二维码识别结果面板：贴在选区下方（空间不足时翻到上方）。
+              空结果与错误都明确告知，不做静默失败。 */}
+          {(qrBusy || qrCodes !== null || qrError) && rect && (
+            <div
+              className="qr-panel"
+              style={{
+                left: Math.max(0, Math.min(rect.x, window.innerWidth - 300)),
+                top:
+                  rect.y + rect.h + 8 + 220 > window.innerHeight
+                    ? Math.max(0, rect.y - 228)
+                    : rect.y + rect.h + 8,
+              }}
+            >
+              <div className="qr-head">
+                <span>{qrBusy ? '识别中…' : `识别到 ${qrCodes?.length ?? 0} 个码`}</span>
+                <button
+                  className="qr-close"
+                  title="关闭"
+                  onClick={() => {
+                    setQrCodes(null)
+                    setQrError(null)
+                  }}
+                >
+                  ×
+                </button>
+              </div>
+              {qrError && <div className="qr-error">{qrError}</div>}
+              {!qrBusy && !qrError && qrCodes?.length === 0 && (
+                <div className="qr-empty">未识别到二维码 / 条码</div>
+              )}
+              {qrCodes?.map((c, i) => (
+                <div className="qr-row" key={`${c.format}-${i}`}>
+                  <span className="qr-format">{c.format}</span>
+                  <span className="qr-text" title={c.text}>
+                    {c.text}
+                  </span>
+                  <button
+                    className="qr-btn"
+                    onClick={() => void copyText(c.text).catch((e) => uiLog(`copy failed: ${String(e)}`))}
+                  >
+                    复制
+                  </button>
+                  {/^https?:\/\//i.test(c.text) && (
+                    <button className="qr-btn" onClick={() => void openUrl(c.text).catch(() => {})}>
+                      打开
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* OCR 识别结果面板：贴在选区下方（空间不足时翻到上方）。
+              行多时内部滚动；「复制全部」按阅读顺序拼成多行文本。 */}
+          {(ocrBusy || ocrLines !== null || ocrError) && rect && (
+            <div
+              className="ocr-panel"
+              style={{
+                left: Math.max(0, Math.min(rect.x, window.innerWidth - 320)),
+                top:
+                  rect.y + rect.h + 8 + 300 > window.innerHeight
+                    ? Math.max(0, rect.y - 308)
+                    : rect.y + rect.h + 8,
+              }}
+            >
+              <div className="ocr-head">
+                <span>
+                  {ocrBusy
+                    ? '识别中…'
+                    : ocrError
+                      ? '识别失败'
+                      : `识别到 ${ocrLines?.length ?? 0} 行文字`}
+                </span>
+                {!ocrBusy && !ocrError && ocrLines && ocrLines.length > 0 && (
+                  <button
+                    className="ocr-btn"
+                    title="按阅读顺序复制全部文字"
+                    onClick={() =>
+                      void copyText(ocrLines.map((l) => l.text).join('\n')).catch((e) =>
+                        uiLog(`copy all failed: ${String(e)}`),
+                      )
+                    }
+                  >
+                    复制全部
+                  </button>
+                )}
+                <button
+                  className="ocr-close"
+                  title="关闭"
+                  onClick={() => {
+                    setOcrLines(null)
+                    setOcrError(null)
+                  }}
+                >
+                  ×
+                </button>
+              </div>
+              {ocrError && <div className="ocr-error">{ocrError}</div>}
+              {!ocrBusy && !ocrError && ocrLines?.length === 0 && (
+                <div className="ocr-empty">未识别到文字</div>
+              )}
+              {ocrLines?.map((l, i) => (
+                <div className="ocr-row" key={`${i}-${l.minY}-${l.minX}`}>
+                  <span className="ocr-score" title={`置信度 ${(l.score * 100).toFixed(0)}%`}>
+                    {(l.score * 100).toFixed(0)}
+                  </span>
+                  <span className="ocr-text" title={l.text}>
+                    {l.text}
+                  </span>
+                  <button
+                    className="ocr-btn"
+                    title="复制这一行"
+                    onClick={() =>
+                      void copyText(l.text).catch((e) => uiLog(`copy failed: ${String(e)}`))
+                    }
+                  >
+                    复制
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* 长截图状态条（滚动拼接中，M5）：缩略图实时长高 + 高度/步数 + Esc 提示。
+              此时浮层整体光标穿透（Rust 侧设置），工具条点不到，故常驻此条。 */}
+          {longMode === 'running' && rect && (
+            <div
+              className="long-bar"
+              onPointerDown={(e) => e.stopPropagation()}
+              style={{
+                left: Math.max(0, Math.min(rect.x, window.innerWidth - 300)),
+                top:
+                  rect.y + rect.h + 8 + 120 > window.innerHeight
+                    ? Math.max(0, rect.y - 128)
+                    : rect.y + rect.h + 8,
+              }}
+            >
+              {longProgress?.thumb ? (
+                <img
+                  className="long-thumb"
+                  src={`${imgSrc(longProgress.thumb)}?t=${longProgress.steps}`}
+                  alt=""
+                  draggable={false}
+                />
+              ) : (
+                <div className="long-thumb long-thumb-empty" />
+              )}
+              <div className="long-info">
+                <span className="long-msg">{longProgress?.message ?? '正在启动…'}</span>
+                <span className="long-sub">
+                  {longProgress
+                    ? `${longProgress.height} px · ${longProgress.steps} 步`
+                    : '准备中'}{' '}
+                  · 按 Esc 停止
+                </span>
+              </div>
+            </div>
+          )}
+
+          {/* 长截图结果面板（M5）：缩略大图 + 保存/复制/贴图 + 退出。
+              到底 / Esc 停止 / 出错都会到这里；出错时仍可保存已拼部分。 */}
+          {longMode === 'result' && rect && (
+            <div
+              className="long-result"
+              onPointerDown={(e) => e.stopPropagation()}
+              style={{
+                left: Math.max(0, Math.min(rect.x, window.innerWidth - 340)),
+                top:
+                  rect.y + rect.h + 8 + 320 > window.innerHeight
+                    ? Math.max(0, rect.y - 328)
+                    : rect.y + rect.h + 8,
+              }}
+            >
+              <div className="long-head">
+                <span>
+                  {longProgress?.phase === 'error'
+                    ? '长截图出错'
+                    : `长截图完成 · ${longProgress?.height ?? 0} px`}
+                </span>
+                <button
+                  className="long-close"
+                  title="退出截图 (Esc)"
+                  onClick={() => void exitCapture()}
+                >
+                  ×
+                </button>
+              </div>
+              {longProgress?.thumb && (
+                <img
+                  className="long-thumb-big"
+                  src={`${imgSrc(longProgress.thumb)}?t=done`}
+                  alt=""
+                  draggable={false}
+                />
+              )}
+              <div className="long-msg-row">{longProgress?.message ?? '长截图已结束'}</div>
+              {longActError && <div className="long-error">{longActError}</div>}
+              <div className="long-actions">
+                <button
+                  className="long-btn"
+                  disabled={longCommit !== null}
+                  onClick={() => void commitLong('save')}
+                >
+                  {longCommit === 'save' ? '保存中…' : '保存'}
+                </button>
+                <button
+                  className="long-btn"
+                  disabled={longCommit !== null}
+                  onClick={() => void commitLong('copy')}
+                >
+                  {longCommit === 'copy' ? '复制中…' : '复制'}
+                </button>
+                <button
+                  className="long-btn"
+                  disabled={longCommit !== null}
+                  onClick={() => void commitLong('pin')}
+                >
+                  {longCommit === 'pin' ? '贴图中…' : '贴图'}
+                </button>
+              </div>
+            </div>
+          )}
+
           {actError && <div className="sb-hint error">{actError}</div>}
         </>
       )}

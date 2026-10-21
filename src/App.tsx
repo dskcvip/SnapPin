@@ -2,13 +2,15 @@ import { BallWindow } from './windows/BallWindow'
 import { OverlayWindow } from './windows/OverlayWindow'
 import { PinWindow } from './windows/PinWindow'
 import { MainWindow } from './windows/MainWindow'
+import { MenuWindow } from './windows/MenuWindow'
 import { getWindowKind } from './lib/windowKind'
 
 /**
- * 单一 SPA 承载全部窗口，通过 URL 查询参数 ?window=<kind> 区分：
+ * 单一 SPA 承载全部窗口，由各 HTML 入口的内联全局 __SNAPPIN_WINDOW__ 区分：
  * - ball     悬浮球
  * - overlay  截图选区浮层（每显示器一个）
  * - pin      贴图窗口
+ * - menu     自绘菜单（托盘点击 / 悬浮球右键）
  * - main     主窗口（设置/动作）
  */
 export function App() {
@@ -19,6 +21,8 @@ export function App() {
       return <OverlayWindow />
     case 'pin':
       return <PinWindow />
+    case 'menu':
+      return <MenuWindow />
     default:
       return <MainWindow />
   }

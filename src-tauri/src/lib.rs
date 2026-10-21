@@ -1,30 +1,30 @@
 mod commands;
 mod config;
+mod logfile;
+mod menuwin;
 mod state;
 mod windows;
 
 use tauri::{AppHandle, Manager};
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
 use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut, ShortcutState};
-use std::time::{Duration, Instant};
 
 use crate::state::AppState;
 
-/// Ctrl+V 武装有效期：截图"复制"成功后在此时间内按 Ctrl+V 弹贴图。
-/// 到期自动注销热键，恢复正常粘贴（RegisterHotKey 注册期间会系统级
-/// 拦截该组合键，必须按时注销，不能常驻）。
-pub const PASTE_ARM_TTL: Duration = Duration::from_secs(20);
-
-/// 构造 Ctrl+V 快捷键。
-pub fn paste_shortcut() -> Shortcut {
-    Shortcut::new(Some(Modifiers::CONTROL), Code::KeyV)
+/// 构造长截图专用的 Esc 快捷键（无修饰键）。
+/// 仅在长截图进行期间动态注册，结束即注销（见 commands::register_long_esc）。
+pub fn long_esc_shortcut() -> Shortcut {
+    Shortcut::new(None, Code::Escape)
 }
 
 pub fn run() {
+    // 最先初始化日志：release 无控制台，所有 eprintln! 靠它落盘才有取证价值
+    logfile::init();
+
     // 内置快捷键（自定义快捷键为 ROADMAP M7 项）
     let capture_sc = Shortcut::new(Some(Modifiers::CONTROL), Code::Digit1);
     let pin_sc = Shortcut::new(Some(Modifiers::CONTROL), Code::Digit2);
-    let paste_sc = paste_shortcut();
+    let esc_sc = long_esc_shortcut();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -39,20 +39,31 @@ pub fn run() {
                 .with_handler({
                     let capture_sc = capture_sc;
                     let pin_sc = pin_sc;
-                    let paste_sc = paste_sc;
+                    let esc_sc = esc_sc;
                     move |app, shortcut, event| {
                         // 插件对**按下**和**抬起**各回调一次，只认 Pressed。
                         // 否则一次按键会执行两遍：截图侧表现为「start 紧接 busy」，
-                        // Ctrl+V 侧会真的粘贴两次。
+                        // 其它动作也会被重复执行两次。
                         if event.state != ShortcutState::Pressed {
                             return;
                         }
+                        // 埋点：确认插件回调真的进来了（排障用，频率低）
+                        crate::logln!("hotkey pressed: {:?}", shortcut);
                         if shortcut == &capture_sc {
                             handle_capture(app, "hotkey");
                         } else if shortcut == &pin_sc {
                             handle_pin_clipboard(app);
-                        } else if shortcut == &paste_sc {
-                            handle_paste(app);
+                        } else if shortcut == &esc_sc {
+                            // Esc 只在长截图期间注册：命中即"停止滚动"。
+                            // 用 long_active 快照判断（不取 long 锁——
+                            // 主线程不能阻塞在驱动循环持的锁上）。
+                            let state = app.state::<AppState>();
+                            if state.long_active.load(std::sync::atomic::Ordering::SeqCst) {
+                                state
+                                    .long_stop
+                                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                                eprintln!("[snappin] long capture stop requested (Esc)");
+                            }
                         }
                     }
                 })
@@ -89,12 +100,21 @@ pub fn run() {
             }
 
             // 注册全局快捷键（须在主线程；setup 即在主线程）。
-            // 注册失败（如被其他程序占用）时降级为日志，不阻断启动。
+            // 注册失败（如组合键已被其他程序 RegisterHotKey 占用）**不阻断启动**，
+            // 但必须让用户看得见：否则表现为"按 Ctrl+1 完全没反应"，
+            // 用户只会以为什么都没发生。收集失败列表 → 写进托盘 tooltip。
+            let mut sc_failed: Vec<&'static str> = Vec::new();
             if let Err(e) = handle.global_shortcut().register(capture_sc) {
-                eprintln!("[snappin] register Ctrl+1 failed: {e}");
+                crate::logln!("[snappin] register Ctrl+1 FAILED: {e}");
+                sc_failed.push("Ctrl+1");
+            } else {
+                crate::logln!("[snappin] Ctrl+1 registered");
             }
             if let Err(e) = handle.global_shortcut().register(pin_sc) {
-                eprintln!("[snappin] register Ctrl+2 failed: {e}");
+                crate::logln!("[snappin] register Ctrl+2 FAILED: {e}");
+                sc_failed.push("Ctrl+2");
+            } else {
+                crate::logln!("[snappin] Ctrl+2 registered");
             }
 
             // 悬浮球窗口
@@ -147,7 +167,13 @@ pub fn run() {
                 });
             }
 
-            setup_tray(&handle)?;
+            // 失败清单同时存进状态：自绘菜单顶部据此显示告警行
+            {
+                let state = handle.state::<AppState>();
+                *state.shortcut_failed.lock().unwrap() =
+                    sc_failed.iter().map(|s| s.to_string()).collect();
+            }
+            setup_tray(&handle, &sc_failed)?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -156,6 +182,14 @@ pub fn run() {
             commands::confirm_selection,
             commands::cancel_capture,
             commands::ui_log,
+            commands::copy_text,
+            commands::open_url,
+            commands::decode_qr,
+            commands::ocr_models_status,
+            commands::ocr_recognize,
+            commands::long_capture_start,
+            commands::long_capture_stop,
+            commands::long_capture_commit,
             commands::pin_from_clipboard,
             commands::pin_context,
             commands::pin_close,
@@ -163,18 +197,29 @@ pub fn run() {
             commands::pin_set_ignore_cursor_events,
             commands::pin_copy,
             commands::pin_save,
+            commands::pin_apply_edit,
             commands::ball_command,
             commands::ball_menu,
+            commands::pin_menu_open,
+            commands::read_image_bytes,
+            commands::pin_publish_flags,
+            commands::pin_flags,
+            commands::pin_set_opacity,
+            commands::menu_fit,
+            commands::menu_close,
+            commands::menu_state,
+            commands::menu_action,
             commands::drag_window,
             commands::get_config,
             commands::update_config,
             commands::app_info,
         ])
         .run(tauri::generate_context!())
-        .expect("failed to run snappin");
+        .expect("failed to run SnapPin");
 }
 
 fn handle_capture(app: &AppHandle, src: &str) {
+    crate::logln!("handle_capture: src={src}");
     // 防重入：已有截图浮层时忽略（含长按重复触发）
     if app
         .webview_windows()
@@ -199,113 +244,60 @@ fn handle_pin_clipboard(app: &AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        if let Err(e) = commands::do_pin_from_clipboard(&app, &state, None) {
+        if let Err(e) = commands::do_pin_from_clipboard(&app, &state) {
             eprintln!("[snappin] pin from clipboard failed: {e}");
         }
     });
 }
 
-/// 武装 Ctrl+V（复制成功后调用）：注册全局 Ctrl+V 热键并启动到期解除任务。
-/// 已注册时 register 返回错误，忽略（幂等）。
-pub fn arm_paste(app: &AppHandle, state: &AppState) {
-    let gen = state
-        .paste_gen
-        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-        + 1;
-    {
-        let mut guard = state.paste_armed.lock().unwrap();
-        *guard = Some((gen, Instant::now() + PASTE_ARM_TTL));
-    }
-    // **必须在主线程注册**：RegisterHotKey 把 WM_HOTKEY 投递到"注册该热键
-    // 的那个线程"的消息队列。confirm_selection 跑在 async 工作线程上，
-    // 在那里注册虽然返回成功，但该线程没有消息循环 → 永远收不到按键
-    // （表现为"复制成功但 Ctrl+V 贴图没反应"）。
-    let app_reg = app.clone();
-    crate::windows::post_to_main(app, move |_| {
-        if let Err(e) = app_reg.global_shortcut().register(paste_shortcut()) {
-            // 常见原因：Ctrl+V 被其他程序占用。降级为不可用（Ctrl+2 仍可贴图）。
-            eprintln!("[snappin] arm Ctrl+V failed: {e}");
-        } else {
-            eprintln!("[snappin] Ctrl+V armed (gen {gen})");
-        }
-    });
-    // 到期自动解除（幂等：仅当代号未变时执行，重复 arm 会废弃旧任务）
-    let app2 = app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        std::thread::sleep(PASTE_ARM_TTL);
-        disarm_if_current(&app2, gen);
-    });
-}
+/// 建托盘图标。
+///
+/// **不挂原生菜单**：点击托盘图标改为弹出自绘菜单窗（menuwin.rs），
+/// 这样才能做出与设计稿一致的深色圆角面板。注意托盘一旦没有 menu，
+/// Windows 就不会再自己弹任何菜单，左右键都走 `on_tray_icon_event`。
+///
+/// `sc_failed`：注册失败的内置快捷键名（如 `["Ctrl+1"]`）。非空时 tooltip
+/// 改告警文案，并在自绘菜单顶部显示一条提示——热键注册失败只靠这个让用户
+/// 看见，否则表现就是"按键毫无反应"。
+fn setup_tray(app: &AppHandle, sc_failed: &[&'static str]) -> tauri::Result<()> {
+    use tauri::tray::{MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
-/// 解除武装并注销 Ctrl+V 热键（幂等，可重复调用）。
-pub fn disarm_paste(app: &AppHandle) {
-    let state = app.state::<AppState>();
-    {
-        let mut guard = state.paste_armed.lock().unwrap();
-        *guard = None;
-    }
-    // 与注册对称：注销同样在主线程执行
-    let app_unreg = app.clone();
-    crate::windows::post_to_main(app, move |_| {
-        let _ = app_unreg.global_shortcut().unregister(paste_shortcut());
-    });
-    eprintln!("[snappin] Ctrl+V disarmed");
-}
-
-/// 仅当武装代号仍为 `gen` 时解除（用于到期任务，避免误杀新一轮武装）。
-fn disarm_if_current(app: &AppHandle, gen: u64) {
-    let state = app.state::<AppState>();
-    let current = {
-        let guard = state.paste_armed.lock().unwrap();
-        guard.map(|(g, _)| g)
+    let tooltip = if sc_failed.is_empty() {
+        "SnapPin".to_string()
+    } else {
+        format!(
+            "SnapPin — 全局快捷键 {} 注册失败（已被其他程序占用）",
+            sc_failed.join(" / ")
+        )
     };
-    if current == Some(gen) {
-        disarm_paste(app);
-    }
-}
-
-/// Ctrl+V 分发：武装中 → 立即解除并跟随鼠标贴图；未武装 → 忽略
-/// （热键只在武装期注册，正常不会收到）。
-fn handle_paste(app: &AppHandle) {
-    let state = app.state::<AppState>();
-    let armed = {
-        let guard = state.paste_armed.lock().unwrap();
-        matches!(*guard, Some((_, dl)) if Instant::now() < dl)
-    };
-    if !armed {
-        return;
-    }
-    // 先解除再贴图：防止连按弹出多个贴图窗，也避免贴图期间按键被吞
-    disarm_paste(app);
-    let app = app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<AppState>();
-        let at = snappin_core_platform::cursor_position().map(|(px, py)| (px as f64, py as f64));
-        if let Err(e) = commands::do_pin_from_clipboard(&app, &state, at) {
-            eprintln!("[snappin] Ctrl+V pin failed: {e}");
-        }
-    });
-}
-
-fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
-    use tauri::menu::{Menu, MenuItem};
-    use tauri::tray::TrayIconBuilder;
-
-    let i_capture = MenuItem::with_id(app, "capture", "截图 (Ctrl+1)", true, None::<&str>)?;
-    let i_pin =
-        MenuItem::with_id(app, "pin-clipboard", "剪贴板贴图 (Ctrl+2)", true, None::<&str>)?;
-    let i_toggle =
-        MenuItem::with_id(app, "toggle-ball", "显示/隐藏悬浮球", true, None::<&str>)?;
-    let i_about = MenuItem::with_id(app, "about", "关于v0.1", true, None::<&str>)?;
-    let i_quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&i_capture, &i_pin, &i_toggle, &i_about, &i_quit])?;
 
     let tray = TrayIconBuilder::new()
         .icon(tauri::include_image!("icons/32x32.png"))
-        .tooltip("SnapPin")
-        .menu(&menu)
-        .show_menu_on_left_click(true)
-        .on_menu_event(|app, event| handle_menu_event(app, event.id().as_ref()))
+        .tooltip(tooltip)
+        // 点击（左键或右键）抬起时弹自绘菜单。
+        // 抬起而非按下：与系统托盘交互惯例一致，也避免按住拖动误触发。
+        .on_tray_icon_event(|tray, event| match event {
+            TrayIconEvent::Click {
+                button,
+                button_state,
+                ..
+            } => {
+                crate::logln!("tray click: {button:?} / {button_state:?}");
+                if button_state == MouseButtonState::Up {
+                    let app = tray.app_handle().clone();
+                    // 建 webview 不能在事件处理器（主线程）里同步做
+                    tauri::async_runtime::spawn_blocking(move || {
+                        if let Err(e) = crate::menuwin::open_menu_at_cursor(&app) {
+                            crate::logln!("tray menu open failed: {e}");
+                        }
+                    });
+                }
+            }
+            TrayIconEvent::DoubleClick { button, .. } => {
+                crate::logln!("tray double-click: {button:?}")
+            }
+            _ => {}
+        })
         .build(app)?;
 
     // 托盘图标须与应用同生命周期：故意泄漏句柄，避免 drop 后图标消失
@@ -313,11 +305,12 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-    // 托盘菜单与悬浮球右键菜单共用的事件分发（单一事实来源）。
-    // 挂在托盘 on_menu_event 上：Tauri 2 的菜单事件全网广播，托盘这一处
-    // 即可收到全部菜单（托盘菜单 + 悬浮球 popup_menu + 未来窗口菜单）的点击。
-    // 切莫再在窗口上注册 on_menu_event，否则每次点击会触发两次。
-    fn handle_menu_event(app: &AppHandle, id: &str) {
+/// 菜单动作分发（单一事实来源）。
+///
+/// 托盘图标、悬浮球右键、自绘菜单窗的点击最终都汇到这里，
+/// 保证"同一个菜单项不管从哪进来，行为一致"。
+pub(crate) fn handle_menu_event(app: &AppHandle, id: &str) {
+    crate::logln!("menu item activated: id={id}");
     match id {
         "capture" => handle_capture(app, "menu"),
         "pin-clipboard" => handle_pin_clipboard(app),
@@ -328,6 +321,8 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
         }
         "toggle-ball" => windows::toggle_ball(app),
         "about" => open_external(ABOUT_URL),
+        // 排障入口：直接打开落盘日志（release 无控制台，这是唯一的现场）
+        "open-log" => open_external(&logfile::log_path().to_string_lossy()),
         "quit" => app.exit(0),
         _ => {}
     }

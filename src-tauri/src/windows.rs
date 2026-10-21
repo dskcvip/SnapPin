@@ -23,7 +23,7 @@ pub const PIN_PREFIX: &str = "pin-";
 /// - `contextmenu`：preventDefault 只取消默认菜单，不阻止事件传播，
 ///   各窗口仍可在 React 里正常响应右键（悬浮球 → 原生菜单 ball_menu）。
 /// - 浏览器快捷键：Ctrl+P 打印 / F5、Ctrl+R 刷新 / Ctrl+S 保存 / Ctrl+O 打开。
-const WEBVIEW_GUARD: &str = r#"
+pub(crate) const WEBVIEW_GUARD: &str = r#"
 (function () {
   window.addEventListener('contextmenu', function (e) { e.preventDefault(); });
   window.addEventListener('keydown', function (e) {
@@ -487,6 +487,52 @@ pub fn close_pin(app: &AppHandle, label: &str) {
     }
 }
 
+/// 贴图做图像处理后图片尺寸会变（旋转 90° 宽高互换），窗口要跟着变。
+///
+/// 保持**窗口中心不动**：用户刚旋转完，图片应在原位置原地转过来，
+/// 而不是跳到别处（左上角对齐会让图片看起来"往左上跑"）。
+/// 留白 PIN_MARGIN 是四周对称的，所以窗口中心 == 图片中心。
+///
+/// 尺寸按**物理像素**设置（`outer_size` 也是物理像素）；逻辑/物理换算用
+/// 窗口自己的 scale_factor，跨显示器拖动后也能算对。
+pub fn resize_pin_keep_center(
+    app: &AppHandle,
+    label: &str,
+    disp_w: f64,
+    disp_h: f64,
+) -> Result<(), String> {
+    let Some(w) = app.get_webview_window(label) else {
+        return Err("pin window not found".to_string());
+    };
+    let sf = w.scale_factor().map_err(|e| e.to_string())?;
+    let old_pos = w.outer_position().map_err(|e| e.to_string())?;
+    let old_size = w.outer_size().map_err(|e| e.to_string())?;
+
+    let new_w = ((disp_w.max(8.0) + PIN_MARGIN * 2.0) * sf).round().max(1.0) as i32;
+    let new_h = ((disp_h.max(8.0) + PIN_MARGIN * 2.0) * sf).round().max(1.0) as i32;
+    let dx = (old_size.width as i32 - new_w) / 2;
+    let dy = (old_size.height as i32 - new_h) / 2;
+
+    let app_cb = app.clone();
+    let label_cb = label.to_string();
+    let (tx, rx) = mpsc::channel::<Result<(), String>>();
+    let _ = app.run_on_main_thread(move || {
+        let r = (|| -> Result<(), String> {
+            let w = app_cb
+                .get_webview_window(&label_cb)
+                .ok_or_else(|| "pin window not found".to_string())?;
+            w.set_size(tauri::PhysicalSize::new(new_w as u32, new_h as u32))
+                .map_err(|e| e.to_string())?;
+            w.set_position(PhysicalPosition::new(old_pos.x + dx, old_pos.y + dy))
+                .map_err(|e| e.to_string())?;
+            Ok(())
+        })();
+        let _ = tx.send(r);
+    });
+    rx.recv_timeout(Duration::from_secs(5))
+        .unwrap_or_else(|_| Err("resize pin window: main thread timeout".to_string()))?;
+    Ok(())
+}
 /// 结束截图会话：关闭全部浮层 + 清空会话数据。
 ///
 /// 取消（Esc/右键/取消按钮）与确认成功（复制/贴图/保存）后调用。
@@ -494,6 +540,9 @@ pub fn close_pin(app: &AppHandle, label: &str) {
 /// ready=false，前端检测到 ready 由 true→false 即自关窗口——
 /// 即使 Rust 侧漏关某块浮层（如双显示器某块创建异常），
 /// 也不会残留"截图模式关不掉"的状态（前端轮询兜底，见 OverlayWindow）。
+///
+/// 长截图会话（若还在进行）一并丢弃：驱动循环发现会话被取走后自行退出，
+/// 浮层的穿透/采集排除状态在此还原（否则下次截图会把浮层自身截进去）。
 pub fn end_capture_session(app: &AppHandle, state: &AppState, why: &str) {
     let before = state.monitors.lock().unwrap().len();
     let overlays = app
@@ -502,6 +551,7 @@ pub fn end_capture_session(app: &AppHandle, state: &AppState, why: &str) {
         .filter(|l| l.starts_with(OVERLAY_PREFIX))
         .count();
     eprintln!("[snappin] end session (why={why}, monitors={before}, overlays={overlays})");
+    crate::commands::discard_long_session(app, state, why);
     close_overlays(app);
     state.monitors.lock().unwrap().clear();
 }

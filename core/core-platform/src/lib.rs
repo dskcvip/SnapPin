@@ -1,8 +1,12 @@
 //! SnapPin 平台胶合层（core-platform）。
 //!
 //! 职责：把 core-algo 的纯算法接到各平台原生能力上
-//! （屏幕采集 / 剪贴板 / 临时图像 IO）。
+//! （屏幕采集 / 剪贴板 / 临时图像 IO / 二维码识别）。
 //! 本 crate 不依赖 Tauri，可独立编译与测试。
+
+pub mod qr;
+pub mod ocr;
+pub mod stitch;
 
 use anyhow::{Context, Result};
 use snappin_core_algo::RgbaBuffer;
@@ -154,7 +158,20 @@ pub fn capture_all_monitors() -> Result<Vec<MonitorShot>> {
     Ok(slots.into_iter().flatten().collect())
 }
 
-/// 跨线程传递 Monitor 的包装（仅用于并行采集）。
+/// 按 `capture_all_monitors` 的下标取显示器（会话 ID `"m{idx}"` 的逆运算）。
+///
+/// 长截图会话需要一枚可反复采集的 `xcap::Monitor`，而 `MonitorShot` 只存了
+/// 像素结果，所以这里按同一套枚举顺序重新取。顺序一致性由
+/// `capture_all_monitors` 与 `xcap::Monitor::all()` 的同一次枚举保证
+/// （同一进程内显示器热插拔才会改变顺序，概率极低）。
+pub fn monitor_by_index(idx: usize) -> Result<xcap::Monitor> {
+    let all = xcap::Monitor::all().context("enumerate monitors failed")?;
+    all.into_iter()
+        .nth(idx)
+        .ok_or_else(|| anyhow::anyhow!("monitor index {idx} not found"))
+}
+
+/// 跨线程传递 Monitor 的包装（并行采集与长截图会话共用）。
 ///
 /// 安全性依据（xcap 0.9.8 Windows 实现）：
 /// - 本项目未启用 xcap 的 `wgc` feature，`capture_image` 走 GDI BitBlt 路径，
@@ -165,10 +182,15 @@ pub fn capture_all_monitors() -> Result<Vec<MonitorShot>> {
 ///
 /// ⚠️ 若未来启用 xcap `wgc` feature（WinRT 对象有 STA 线程亲和要求），
 /// 必须重新评估此包装的线程安全性，或改回串行采集。
-struct SendMonitor(xcap::Monitor);
+pub struct SendMonitor(xcap::Monitor);
 unsafe impl Send for SendMonitor {}
 
 impl SendMonitor {
+    /// 借出内部 Monitor（采集 / 几何查询用）。
+    pub fn get(&self) -> &xcap::Monitor {
+        &self.0
+    }
+
     /// 采集单台显示器并保存冻结图（在调用方线程内执行）。
     fn capture_shot(self, index: usize, dir: &Path) -> Result<MonitorShot> {
         let m = self.0;

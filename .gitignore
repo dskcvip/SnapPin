@@ -22,3 +22,6 @@ Thumbs.db
 
 # 分发给他人用的源码打包产物（体积大、可再生）
 /dist-macos
+
+# 本地校验用的临时产物（静态样张 HTML、无头浏览器截图），可再生
+/.workbuddy/tmp
