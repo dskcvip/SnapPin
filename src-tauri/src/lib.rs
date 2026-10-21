@@ -113,6 +113,34 @@ pub fn run() {
 
             let handle = app.handle();
 
+            // 关掉 Tauri 自动创建的默认主窗口（延后 300ms：setup 执行时它还没建）。
+            //
+            // 本项目是多入口 SPA（ball/pin/menu/main/ocr/trans 六个 HTML），
+            // 没有 index.html。Tauri 的默认行为是建一个 label="main" 的窗口并
+            // 加载 index.html，加载失败就表现为**黑框 +「无法访问此页面」**，
+            // 每次启动都弹，用户还以为那是悬浮球。
+            // 注意：`tauri.conf.json` 的 `app.windows = []` 挡不住它（空数组被当作
+            // "未配置"），所以在这里按 label 白名单清理。
+            {
+                let handle_bg = handle.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    for (label, win) in handle_bg.webview_windows() {
+                        let ours = label == windows::BALL_LABEL
+                            || label.starts_with(windows::OVERLAY_PREFIX)
+                            || label.starts_with(windows::PIN_PREFIX)
+                            || label == "menu"
+                            || label == windows::OCR_LABEL
+                            || label == windows::TRANS_LABEL
+                            || label == windows::MAIN_LABEL;
+                        if !ours {
+                            crate::logln!("closing unexpected default window: {label}");
+                            let _ = win.close();
+                        }
+                    }
+                });
+            }
+
             // 加载（并落一次）配置
             let config_dir = handle.path().app_config_dir().map_err(|e| e.to_string())?;
             let cfg = config::load(&config_dir);
