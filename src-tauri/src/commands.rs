@@ -83,12 +83,20 @@ pub struct AppInfoPayload {
 }
 
 /// 选区参数（前端 overlay 窗口的逻辑像素坐标）。
+///
+/// **必须是浮点**：逻辑坐标 = 物理像素 / scaleFactor，高 DPI 屏上天然带小数
+/// （Retina 2x 下一个物理像素 = 0.5 逻辑像素；Windows 125%/150% 同理）。
+/// 用 `i32`/`u32` 时 serde 会直接拒绝浮点（`invalid type: floating point
+/// '484.71484375', expected u32`），在"恰好 100% 缩放"的机器上才碰巧不发作。
+///
+/// 保留小数而不是让前端 `Math.round`：2x 屏上取整等于丢掉半个物理像素，
+/// 裁剪结果会与用户框的边界差一像素。转物理像素时统一 `round`（见各命令）。
 #[derive(Deserialize)]
 pub struct RectPayload {
-    pub x: i32,
-    pub y: i32,
-    pub w: u32,
-    pub h: u32,
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
 }
 
 /// 标注图形载荷（前端 overlay 的标注层坐标：逻辑像素，原点=裁剪图左上角）。
@@ -571,10 +579,10 @@ pub async fn confirm_selection(
         let sf = m.scale_factor as f64;
         // 前端选区为逻辑像素，换算成物理像素后再裁剪
         let algo_rect = AlgoRect {
-            x: (rect.x as f64 * sf).round() as i32,
-            y: (rect.y as f64 * sf).round() as i32,
-            w: (rect.w as f64 * sf).round().max(1.0) as u32,
-            h: (rect.h as f64 * sf).round().max(1.0) as u32,
+            x: (rect.x * sf).round() as i32,
+            y: (rect.y * sf).round() as i32,
+            w: (rect.w * sf).round().max(1.0) as u32,
+            h: (rect.h * sf).round().max(1.0) as u32,
         };
         let mut cropped = m.image.crop(&algo_rect).map_err(|e| e.to_string())?;
         // 标注光栅化到裁剪图上（复制/贴图/保存三个出口共用同一份像素，
@@ -611,8 +619,8 @@ pub async fn confirm_selection(
             let label = pin_label(&path);
             let disp_w = (cropped.width as f64 / scale_factor).max(8.0);
             let disp_h = (cropped.height as f64 / scale_factor).max(8.0);
-            let x = monitor_x + rect.x as f64;
-            let y = monitor_y + rect.y as f64;
+            let x = monitor_x + rect.x;
+            let y = monitor_y + rect.y;
             // 建窗线程约束因平台而异（见 windows::create_pin_window 文档）：
             // Windows 主线程同步建窗会死锁 → 丢到阻塞线程；macOS 必须主线程 → 内部投递。
             let app2 = app.clone();
@@ -803,10 +811,10 @@ pub async fn decode_qr(
         let sf = m.scale_factor as f64;
         // 与 confirm_selection 完全相同的裁剪口径：逻辑像素 → 物理像素
         let algo_rect = AlgoRect {
-            x: (rect.x as f64 * sf).round() as i32,
-            y: (rect.y as f64 * sf).round() as i32,
-            w: (rect.w as f64 * sf).round().max(1.0) as u32,
-            h: (rect.h as f64 * sf).round().max(1.0) as u32,
+            x: (rect.x * sf).round() as i32,
+            y: (rect.y * sf).round() as i32,
+            w: (rect.w * sf).round().max(1.0) as u32,
+            h: (rect.h * sf).round().max(1.0) as u32,
         };
         let cropped = m.image.crop(&algo_rect).map_err(|e| e.to_string())?;
         let codes = snappin_core_platform::qr::decode_codes(&cropped)
@@ -937,10 +945,10 @@ pub async fn ocr_recognize(
         let sf = m.scale_factor as f64;
         // 与 confirm_selection / decode_qr 完全相同的裁剪口径
         let algo_rect = AlgoRect {
-            x: (rect.x as f64 * sf).round() as i32,
-            y: (rect.y as f64 * sf).round() as i32,
-            w: (rect.w as f64 * sf).round().max(1.0) as u32,
-            h: (rect.h as f64 * sf).round().max(1.0) as u32,
+            x: (rect.x * sf).round() as i32,
+            y: (rect.y * sf).round() as i32,
+            w: (rect.w * sf).round().max(1.0) as u32,
+            h: (rect.h * sf).round().max(1.0) as u32,
         };
         let cropped = m.image.crop(&algo_rect).map_err(|e| e.to_string())?;
 
@@ -1727,10 +1735,10 @@ pub async fn long_capture_start(
             .ok_or_else(|| "no active capture session".to_string())?;
         let sf = m.scale_factor as f64;
         AlgoRect {
-            x: (rect.x as f64 * sf).round() as i32,
-            y: (rect.y as f64 * sf).round() as i32,
-            w: (rect.w as f64 * sf).round().max(1.0) as u32,
-            h: (rect.h as f64 * sf).round().max(1.0) as u32,
+            x: (rect.x * sf).round() as i32,
+            y: (rect.y * sf).round() as i32,
+            w: (rect.w * sf).round().max(1.0) as u32,
+            h: (rect.h * sf).round().max(1.0) as u32,
         }
     };
     let scroll_lines = scroll_lines.unwrap_or(3).clamp(1, 20);
@@ -2223,6 +2231,38 @@ fn long_pin_geometry(app: &AppHandle, w: u32, h: u32) -> (f64, f64, f64, f64) {
 mod tests {
     use super::*;
     use base64::Engine as _;
+
+    /// 选区载荷必须接受**小数**逻辑坐标。
+    ///
+    /// 回归：macOS Retina（scale=2）与 Windows 125%/150% 缩放下，逻辑坐标
+    /// 天然带小数。`RectPayload` 曾是 `i32/u32`，serde 在反序列化阶段就拒收
+    /// （`invalid type: floating point '484.71484375', expected u32`），
+    /// 用户点确认后只看到"复制失败"，且**只在高缩放的机器上**才复现。
+    #[test]
+    fn rect_payload_accepts_fractional_coords() {
+        let json = r#"{"x":484.71484375,"y":120.5,"w":1415.25,"h":969.75}"#;
+        let r: RectPayload = serde_json::from_str(json).expect("fractional rect must parse");
+        assert!((r.x - 484.71484375).abs() < 1e-9);
+        assert!((r.h - 969.75).abs() < 1e-9);
+        // 整数形态（100% 缩放）向后兼容，不能因为改成浮点就收不了
+        let r2: RectPayload = serde_json::from_str(r#"{"x":0,"y":0,"w":800,"h":600}"#).unwrap();
+        assert_eq!((r2.x, r2.y, r2.w, r2.h), (0.0, 0.0, 800.0, 600.0));
+    }
+
+    /// 逻辑坐标 → 物理像素的舍入口径：2x 屏上 0.5 逻辑像素 = 1 物理像素，
+    /// 四舍五入后不能出现 0 宽/0 高（否则裁剪直接 panic）。
+    #[test]
+    fn fractional_rect_scales_to_valid_pixels() {
+        let sf = 2.0_f64;
+        let (x, y, w, h) = (484.71484375, 120.5, 1415.25, 969.75);
+        assert_eq!((x * sf).round() as i32, 969);
+        assert_eq!((y * sf).round() as i32, 241);
+        assert_eq!((w * sf).round().max(1.0) as u32, 2831);
+        assert_eq!((h * sf).round().max(1.0) as u32, 1940);
+        // 极小选区（0.3 逻辑像素）在 1x 屏上仍必须 >= 1
+        let tiny = (0.3_f64 * 1.0).round().max(1.0) as u32;
+        assert_eq!(tiny, 1);
+    }
 
     /// 显示器 ID 解析：错一位就会拼错屏幕的内容，必须严格。
     #[test]

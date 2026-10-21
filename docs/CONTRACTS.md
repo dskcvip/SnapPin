@@ -39,7 +39,13 @@
 ## 类型
 
 ```ts
-interface Rect { x: number; y: number; w: number; h: number }   // 逻辑像素
+interface Rect { x: number; y: number; w: number; h: number }
+// 逻辑像素（**可以带小数**）。Rust 侧 `RectPayload` 是 f64：
+// 高 DPI 屏上逻辑坐标 = 物理像素 / scaleFactor 必然出现小数
+// （Retina 2x、Windows 125%/150%）。**不要**把字段改成 i32/u32 ——
+// serde 会在反序列化阶段直接拒收，报
+// `invalid type: floating point '484.71', expected u32`，
+// 而这种失败只在非 100% 缩放的机器上复现。转物理像素时统一 round。
 
 interface MonitorInfo {
   id: string; name: string
