@@ -473,7 +473,17 @@ npm run typecheck
 npx tauri build --bundles nsis
 ```
 
-产物：`target/release/SnapPin.exe`（≈16.9 MB）、`target/release/bundle/nsis/SnapPin_0.1.0_x64-setup.exe`（≈4.3 MiB）。
+产物：`target/release/SnapPin.exe`（≈17 MB）、`target/release/bundle/nsis/SnapPin_0.1.2_x64-setup.exe`（≈4.8 MiB）。
+只出可执行文件、不出安装包：`npx tauri build --no-bundle`。
+
+> **⚠️ 不要把 `target/debug/SnapPin.exe` 当交付物直接运行**：
+> debug 构建下 Tauri 会把 `WebviewUrl::App("xxx.html")` 解析到 `devUrl`
+> （`http://localhost:5173`，见 tauri `manager::get_app_url` 的 `#[cfg(dev)]`
+> 分支）。没开 vite dev server 时**所有 webview 都是死的**——悬浮球不渲染、
+> 菜单窗不应答（日志里只有 `menu open requested`、永远没有 `menu shown`）、
+> OCR/翻译/设置全打不开；同时 Tauri 还会自动建一个加载 `index.html` 失败的
+> 默认窗口，显示成**黑框 +「无法访问此页面」**。自测/分发一律用 release。
+> 排查：release 启动后日志应出现 `[ui:ball] ball mounted`，没有这行即 webview 没加载。
 
 > 本机沙箱注意：`npx tauri build` 前需把真实 toolchain 的 bin 提到 PATH 最前（rustup 代理 `rustc.exe` 在沙箱里被拦，会让 tauri-cli 解析 `rustc -vV` 失败并 panic）：
 > `export PATH="/c/Users/dskc/.rustup/toolchains/stable-x86_64-pc-windows-msvc/bin:$PATH"`
