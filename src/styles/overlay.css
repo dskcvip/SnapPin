@@ -737,122 +737,21 @@
 
 /* ===================== 文字识别结果面板（M4 OCR） ===================== */
 
-.ocr-panel {
-  position: fixed;
-  z-index: 20;
-  width: 320px;
-  max-height: 300px;
-  overflow: auto;
-  box-sizing: border-box;
-  padding: 8px 10px;
-  background: #fafafa;
-  border: 1px solid rgba(15, 23, 42, 0.12);
-  border-radius: 10px;
-  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.16);
-  font-size: 12px;
-  color: #1f2937;
-}
 
-.ocr-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 6px;
-  font-weight: 600;
-  color: #374151;
-}
 
 /* 标题占满剩余宽度，把「复制全部」和关闭按钮推到右边 */
-.ocr-head > span:first-child {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 
-.ocr-close {
-  flex: none;
-  width: 20px;
-  height: 20px;
-  border: none;
-  border-radius: 5px;
-  background: transparent;
-  color: #6b7280;
-  font-size: 15px;
-  line-height: 1;
-  cursor: pointer;
-}
 
-.ocr-close:hover {
-  background: rgba(15, 23, 42, 0.08);
-  color: #111827;
-}
 
-.ocr-empty,
-.ocr-error {
-  padding: 8px 0;
-  color: #6b7280;
-}
 
-.ocr-error {
-  color: #b91c1c;
-  /* 模型缺失的提示很长（含目录路径），允许换行读全 */
-  white-space: pre-wrap;
-  word-break: break-all;
-  line-height: 1.5;
-}
 
-.ocr-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 0;
-  border-top: 1px solid rgba(15, 23, 42, 0.07);
-}
 
-.ocr-row:first-of-type {
-  border-top: none;
-}
 
 /* 置信度：两位数定宽，避免 100 与 61 把文本顶得跳动 */
-.ocr-score {
-  flex: none;
-  width: 22px;
-  color: #9ca3af;
-  font-size: 10px;
-  font-variant-numeric: tabular-nums;
-  text-align: right;
-}
 
 /* 识别文本：中文长行最多两行、超出省略；完整文本在 title 里 */
-.ocr-text {
-  flex: 1;
-  min-width: 0;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-  word-break: break-all;
-  line-height: 1.45;
-}
 
-.ocr-btn {
-  flex: none;
-  padding: 3px 8px;
-  border: 1px solid rgba(15, 23, 42, 0.14);
-  border-radius: 5px;
-  background: #fff;
-  color: #374151;
-  font-size: 11px;
-  line-height: 1.4;
-  cursor: pointer;
-}
 
-.ocr-btn:hover {
-  border-color: rgba(15, 23, 42, 0.28);
-  background: #f3f4f6;
-}
 
 /* 工具条按钮右上角的小圆点：OCR 模型缺失时常驻提醒 */
 .sb-dot {

@@ -26,7 +26,6 @@ import {
   uiLog,
   type DecodedCode,
   type LongProgress,
-  type OcrLine,
   type OverlayContext,
   type Rect,
   type ShotAction,
@@ -153,7 +152,6 @@ export function OverlayWindow() {
   const [qrBusy, setQrBusy] = useState(false)
   const [qrError, setQrError] = useState<string | null>(null)
   /** OCR 识别结果（null = 未识别 / 未打开面板） */
-  const [ocrLines, setOcrLines] = useState<OcrLine[] | null>(null)
   const [ocrBusy, setOcrBusy] = useState(false)
   const [ocrError, setOcrError] = useState<string | null>(null)
   /** OCR 模型是否就绪（null = 还没查到）。false 时按钮提示去下载模型。 */
@@ -351,8 +349,7 @@ export function OverlayWindow() {
       setQrCodes(null)
       setQrError(null)
       setQrBusy(false)
-      setOcrLines(null)
-      setOcrError(null)
+        setOcrError(null)
       setOcrBusy(false)
       setLongMode('off')
       setLongProgress(null)
@@ -613,7 +610,6 @@ export function OverlayWindow() {
     if (ocrBusy) return
     setOcrBusy(true)
     setOcrError(null)
-    setOcrLines(null)
     try {
       const lines = await ocrRecognize(ctx.monitorId, rect, ctx.sessionId)
       // 识别结果进**独立窗口**（可拖动选择 / 全部复制 / 顶部翻译），
@@ -1016,7 +1012,7 @@ export function OverlayWindow() {
                 <TranslateIcon />
               </button>
               <button
-                className={`sbtn ${ocrLines || ocrBusy || ocrError ? 'active' : ''}`}
+                className={`sbtn ${ocrBusy || ocrError ? 'active' : ''}`}
                 title={
                   ocrModelsOk === false
                     ? '文字识别（模型缺失：点我查看下载说明）'
@@ -1216,77 +1212,6 @@ export function OverlayWindow() {
                       打开
                     </button>
                   )}
-                </div>
-              ))}
-            </div>
-          )}
-
-          {/* OCR 识别结果面板：贴在选区下方（空间不足时翻到上方）。
-              行多时内部滚动；「复制全部」按阅读顺序拼成多行文本。 */}
-          {(ocrBusy || ocrLines !== null || ocrError) && rect && (
-            <div
-              className="ocr-panel"
-              style={{
-                left: Math.max(0, Math.min(rect.x, window.innerWidth - 320)),
-                top:
-                  rect.y + rect.h + 8 + 300 > window.innerHeight
-                    ? Math.max(0, rect.y - 308)
-                    : rect.y + rect.h + 8,
-              }}
-            >
-              <div className="ocr-head">
-                <span>
-                  {ocrBusy
-                    ? '识别中…'
-                    : ocrError
-                      ? '识别失败'
-                      : `识别到 ${ocrLines?.length ?? 0} 行文字`}
-                </span>
-                {!ocrBusy && !ocrError && ocrLines && ocrLines.length > 0 && (
-                  <button
-                    className="ocr-btn"
-                    title="按阅读顺序复制全部文字"
-                    onClick={() =>
-                      void copyText(ocrLines.map((l) => l.text).join('\n')).catch((e) =>
-                        uiLog(`copy all failed: ${String(e)}`),
-                      )
-                    }
-                  >
-                    复制全部
-                  </button>
-                )}
-                <button
-                  className="ocr-close"
-                  title="关闭"
-                  onClick={() => {
-                    setOcrLines(null)
-                    setOcrError(null)
-                  }}
-                >
-                  ×
-                </button>
-              </div>
-              {ocrError && <div className="ocr-error">{ocrError}</div>}
-              {!ocrBusy && !ocrError && ocrLines?.length === 0 && (
-                <div className="ocr-empty">未识别到文字</div>
-              )}
-              {ocrLines?.map((l, i) => (
-                <div className="ocr-row" key={`${i}-${l.minY}-${l.minX}`}>
-                  <span className="ocr-score" title={`置信度 ${(l.score * 100).toFixed(0)}%`}>
-                    {(l.score * 100).toFixed(0)}
-                  </span>
-                  <span className="ocr-text" title={l.text}>
-                    {l.text}
-                  </span>
-                  <button
-                    className="ocr-btn"
-                    title="复制这一行"
-                    onClick={() =>
-                      void copyText(l.text).catch((e) => uiLog(`copy failed: ${String(e)}`))
-                    }
-                  >
-                    复制
-                  </button>
                 </div>
               ))}
             </div>

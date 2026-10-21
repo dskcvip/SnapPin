@@ -91,6 +91,19 @@ pub fn ensure_ball_window(app: &AppHandle, cfg: &AppConfig) -> tauri::Result<()>
         inner, outer
     );
 
+    // 兜底：build() 出来的窗口在某些机器/多显示器切换后处于不可见或最小化
+    // （用户报"启动后没有悬浮球"，日志里位置明明设置成功）。
+    // 显式三连：show + 取消最小化 + 前置。放在任何 set_position 之前，
+    // 避免"窗口隐藏时 set_position 被系统合并丢弃"。
+    let _ = window.show();
+    let _ = window.unminimize();
+    let _ = window.set_focus();
+    eprintln!(
+        "[snappin] ball shown: visible={:?} minimized={:?}",
+        window.is_visible(),
+        window.is_minimized()
+    );
+
     // 位置是**球心**（物理像素）：窗口留白变化时球不会在屏幕上平移。
     // 历史配置存的是窗口左上角（旧留白 10px），这里换算一次。
     //
@@ -99,14 +112,30 @@ pub fn ensure_ball_window(app: &AppHandle, cfg: &AppConfig) -> tauri::Result<()>
     //    所以半宽/半高必须按实际 inner_size 分别取，否则球心横向偏 (实宽-目标宽)/2。
     // 2) 这次"加宽 + 重新放置"发生在 build() 之后，紧接着的 set_position 会被它覆盖
     //    （现象：球固定跳回主屏中部）。所以等窗口真正 show 完成后，再按最终尺寸定位一次。
+    //
+    // 3) **显示器变少**（拔了副屏/改了分辨率）时，旧球心可能落在已经不存在的
+    //    屏幕上——窗口建得出来但用户看不见，表现为"悬浮球丢了"。
+    //    因此放置前先把球心钳制到当前虚拟桌面内（留 80px 余量防贴边）。
     if let Some(p) = cfg.ball_position {
         let sf = window.scale_factor().unwrap_or(1.0);
-        let (cx, cy) = if cfg.ball_pos_center {
+        let (mut cx, mut cy) = if cfg.ball_pos_center {
             (p.x, p.y)
         } else {
             let legacy_half = (size + BALL_MARGIN_LEGACY * 2.0) * sf / 2.0;
             (p.x + legacy_half, p.y + legacy_half)
         };
+        // 显示器变少/分辨率变化：旧球心可能已在虚拟桌面之外，钳回可见范围
+        if let Some((vx, vy, vw, vh)) = virtual_desktop_bounds(app) {
+            let margin = 80.0;
+            cx = cx.clamp(vx + margin, (vx + vw - margin).max(vx + margin));
+            cy = cy.clamp(vy + margin, (vy + vh - margin).max(vy + margin));
+            if (cx - p.x).abs() > 1.0 || (cy - p.y).abs() > 1.0 {
+                eprintln!(
+                    "[snappin] ball center ({},{}) outside desktop, clamped to ({},{})",
+                    p.x, p.y, cx, cy
+                );
+            }
+        }
         place_ball_center(&window, cx, cy, "immediate");
 
         let win_handle = window.clone();
@@ -117,9 +146,52 @@ pub fn ensure_ball_window(app: &AppHandle, cfg: &AppConfig) -> tauri::Result<()>
                 std::thread::sleep(std::time::Duration::from_millis(delay));
                 place_ball_center(&win_handle, cx, cy, tag);
             }
+            // 最后一拍：再确保一次可见（防"窗口建好了但没显示"）
+            if let Some(w) = win_handle.get_webview_window(BALL_LABEL) {
+                let _ = w.show();
+            }
         });
+    } else {
+        // 没有历史位置（首次运行）：放主屏左上角内缩 80px，并确保可见。
+        // 不放右上角——那里常被系统图标/通知占着，球会被误以为"没出来"。
+        if let Some(m) = app.primary_monitor().ok().flatten() {
+            let p = m.position();
+            let _ = window.set_position(PhysicalPosition::new(p.x + 80, p.y + 80));
+        }
+        let _ = window.show();
+        let _ = window.set_focus();
     }
     Ok(())
+}
+
+/// 当前虚拟桌面的边界（物理像素）：(x, y, width, height)。
+/// 枚举不到显示器时返回 None——调用方应跳过钳制，不要瞎猜。
+fn virtual_desktop_bounds(app: &AppHandle) -> Option<(f64, f64, f64, f64)> {
+    let monitors = app.available_monitors().ok()?;
+    if monitors.is_empty() {
+        return None;
+    }
+    let mut min_x = i32::MAX;
+    let mut min_y = i32::MAX;
+    let mut max_x = i32::MIN;
+    let mut max_y = i32::MIN;
+    for m in &monitors {
+        let pos = m.position();
+        let size = m.size();
+        min_x = min_x.min(pos.x);
+        min_y = min_y.min(pos.y);
+        max_x = max_x.max(pos.x + size.width as i32);
+        max_y = max_y.max(pos.y + size.height as i32);
+    }
+    if min_x >= max_x || min_y >= max_y {
+        return None;
+    }
+    Some((
+        min_x as f64,
+        min_y as f64,
+        (max_x - min_x) as f64,
+        (max_y - min_y) as f64,
+    ))
 }
 
 /// 按球心放置悬浮球窗口（内部按实际 inner_size 取半宽半高）。
@@ -641,13 +713,17 @@ fn ensure_doc_window(
     build_doc_window(app, label, title, w, h)
 }
 
-/// 显示（必要时创建）一个文档型窗口并前置。
+/// 显示（必要时创建）一个文档型窗口。
+///
+/// **刻意不 `set_focus`**：OCR 结果窗 / 翻译窗都是从截图浮层里打开的，
+/// 抢了焦点会让浮层收不到键盘（用户按 Esc 取消截图没反应——
+/// 事件跑到新窗口去了），也可能让浮层的工具条点不动。
+/// 窗口照样显示在最前（show + unminimize），只是不激活。
 fn show_doc_window(app: &AppHandle, label: &str, title: &str, w: f64, h: f64) -> Result<(), String> {
     ensure_doc_window(app, label, title, w, h)?;
     if let Some(win) = app.get_webview_window(label) {
         let _ = win.show();
         let _ = win.unminimize();
-        let _ = win.set_focus();
     }
     Ok(())
 }
