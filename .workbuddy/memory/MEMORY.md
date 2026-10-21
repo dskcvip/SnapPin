@@ -22,3 +22,8 @@
 - 文字/水印等带字形的标注一律走「UI 层光栅化 → 位图上传」通道，核心层不开字体口子。
 - 新增 IPC 必须同步 docs/CONTRACTS.md，前端类型在 src/lib/api.ts。
 - tauri.conf.json 已设 `mainBinaryName: "SnapPin"`；产物为 target/debug/SnapPin.exe。
+
+## 分发产物落盘位置
+- macOS dmg（GitHub Actions 产物）下载解压后统一放 **E:/PixPin/dist-macos**，
+  文件名形如 `SnapPin_<版本>_universal.dmg`。
+- Windows NSIS 安装包在 `target/release/bundle/nsis/`。

@@ -25,3 +25,7 @@ Thumbs.db
 
 # 本地校验用的临时产物（静态样张 HTML、无头浏览器截图），可再生
 /.workbuddy/tmp
+
+# 一次性调试脚本与校验截图（定位光标隐藏、图标像素这类问题时临时写的）
+/scripts/test_*.ps1
+/docs/icon-check.png
