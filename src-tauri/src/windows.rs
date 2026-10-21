@@ -16,8 +16,12 @@ pub const PIN_PREFIX: &str = "pin-";
 pub const OCR_LABEL: &str = "ocr";
 /// 翻译窗（单例：左原文右译文）
 pub const TRANS_LABEL: &str = "trans";
-/// 设置 / 主窗（单例）
-pub const MAIN_LABEL: &str = "main";
+/// 设置窗（单例）。
+///
+/// **不能叫 "main"**：那是 Tauri 默认窗口的 label（`default_window_label()`），
+/// 撞名会导致 `get_webview_window("main")` 取到那个加载 index.html 失败的黑框，
+/// 设置窗永远开不出来。用 "settings" 彻底避开。
+pub const SETTINGS_LABEL: &str = "settings";
 
 /// 注入到所有 webview 的守卫脚本（document-start，早于页面脚本执行）。
 ///
@@ -740,7 +744,7 @@ pub fn show_trans_window(app: &AppHandle) -> Result<(), String> {
 
 /// 设置 / 主窗（单例）。
 pub fn show_main_window(app: &AppHandle) -> Result<(), String> {
-    show_doc_window(app, MAIN_LABEL, "SnapPin 设置", 460.0, 620.0)
+    show_doc_window(app, SETTINGS_LABEL, "SnapPin 设置", 460.0, 620.0)
 }
 
 /// 关闭文档型窗口（内容仍留在 state 里，下次打开重取）。

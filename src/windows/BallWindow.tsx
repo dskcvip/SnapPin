@@ -63,6 +63,10 @@ export function BallWindow() {
   const dragRef = useRef<{ x: number; y: number; dragging: boolean } | null>(null)
 
   useEffect(() => {
+    uiLog('ball mounted')
+  }, [])
+
+  useEffect(() => {
     getConfig()
       .then(setCfg)
       .catch(() => setCfg(null))

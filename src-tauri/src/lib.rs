@@ -132,7 +132,7 @@ pub fn run() {
                             || label == "menu"
                             || label == windows::OCR_LABEL
                             || label == windows::TRANS_LABEL
-                            || label == windows::MAIN_LABEL;
+                            || label == windows::SETTINGS_LABEL;
                         if !ours {
                             crate::logln!("closing unexpected default window: {label}");
                             let _ = win.close();

@@ -244,6 +244,10 @@ export function MenuWindow() {
   }, [])
 
   useEffect(() => {
+    uiLog('menu mounted')
+  }, [])
+
+  useEffect(() => {
     let alive = true
 
     // 快捷键注册失败的告警行（会让面板变高，必须在 fit 之前拿到）
