@@ -48,10 +48,13 @@ impl Default for AppConfig {
 /// 从磁盘加载配置；文件不存在或损坏时回退默认值。
 pub fn load(dir: &Path) -> AppConfig {
     let path = dir.join("config.json");
-    match fs::read_to_string(&path) {
+    let mut cfg: AppConfig = match fs::read_to_string(&path) {
         Ok(text) => serde_json::from_str(&text).unwrap_or_default(),
         Err(_) => AppConfig::default(),
-    }
+    };
+    // 历史配置自愈（空 id/name 的模型记录，见 TranslateConfig::normalize）
+    cfg.translation.normalize();
+    cfg
 }
 
 /// 写回配置。

@@ -25,6 +25,9 @@ export function App() {
       return <PinWindow />
     case 'menu':
       return <MenuWindow />
+    case 'settings':
+      // 设置窗（label=settings，HTML 入口 settings.html）
+      return <MainWindow />
     case 'ocr':
       return <OcrWindow />
     case 'trans':

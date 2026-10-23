@@ -1,5 +1,13 @@
 /** 窗口类型：由各 HTML 入口的内联全局 __SNAPPIN_WINDOW__ 声明。 */
-export type WindowKind = 'ball' | 'overlay' | 'pin' | 'menu' | 'main' | 'ocr' | 'trans'
+export type WindowKind =
+  | 'ball'
+  | 'overlay'
+  | 'pin'
+  | 'menu'
+  | 'main'
+  | 'settings'
+  | 'ocr'
+  | 'trans'
 
 declare global {
   interface Window {
@@ -15,7 +23,8 @@ export function getWindowKind(): WindowKind {
     kind === 'pin' ||
     kind === 'menu' ||
     kind === 'ocr' ||
-    kind === 'trans'
+    kind === 'trans' ||
+    kind === 'settings'
   ) {
     return kind
   }

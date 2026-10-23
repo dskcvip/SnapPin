@@ -40,9 +40,11 @@ pub struct TranslateModel {
 impl Default for TranslateModel {
     fn default() -> Self {
         Self {
-            id: String::new(),
-            name: String::new(),
-            note: String::new(),
+            // 稳定 id：编辑 / 删除 / 测试连接都靠它指认目标。
+            // 空 id 会让这些操作全部错指到"第一个空 id 的模型"上。
+            id: "deepseek".to_string(),
+            name: "DeepSeek".to_string(),
+            note: "深度求索".to_string(),
             base_url: "https://api.deepseek.com".to_string(),
             api_key: String::new(),
             model: "deepseek-flash".to_string(),
@@ -83,6 +85,27 @@ impl TranslateConfig {
     /// 按 id 找模型（编辑 / 删除 / 测试连接用）。
     pub fn find(&self, id: &str) -> Option<&TranslateModel> {
         self.models.iter().find(|m| m.id == id)
+    }
+
+    /// 规整历史配置：给空 id 的模型补稳定 id、空 name 回退为模型 ID。
+    ///
+    /// 存在的理由：`TranslateModel::default()` 曾经把 id/name 留空，
+    /// 早期版本写出的 config.json 里就是这样一条记录。空 id 会让
+    /// 编辑 / 删除 / 测试连接**全部指认错目标**（都命中"第一个空 id"），
+    /// UI 上也显示成「未命名」。加载时修一次，用户无感。
+    pub fn normalize(&mut self) {
+        for (i, m) in self.models.iter_mut().enumerate() {
+            if m.id.trim().is_empty() {
+                m.id = format!("model-{i}");
+            }
+            if m.name.trim().is_empty() {
+                m.name = if m.model.trim().is_empty() {
+                    format!("模型 {}", i + 1)
+                } else {
+                    m.model.clone()
+                };
+            }
+        }
     }
 }
 
@@ -319,6 +342,35 @@ mod tests {
         assert_eq!(cfg.active().map(|m| m.id.as_str()), Some("a"));
         assert_eq!(cfg.find("b").map(|m| m.id.as_str()), Some("b"));
         assert!(cfg.find("zzz").is_none());
+    }
+
+    #[test]
+    fn normalize_heals_empty_id_and_name() {
+        // 历史配置：Default 曾是空 id/name（用户机器上真实存在过）
+        let mut cfg = TranslateConfig {
+            models: vec![TranslateModel {
+                id: String::new(),
+                name: String::new(),
+                model: "deepseek-flash".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        cfg.normalize();
+        let m = &cfg.models[0];
+        assert!(!m.id.is_empty(), "空 id 必须被补上");
+        assert_eq!(m.name, "deepseek-flash", "空 name 回退为模型 ID");
+        // 补过 id 之后必须能按 id 找到（编辑/删除/测试连接的前提）
+        assert!(cfg.find(&m.id).is_some());
+    }
+
+    #[test]
+    fn normalize_keeps_valid_entries_untouched() {
+        let mut cfg = cfg_with(vec![TranslateModel::default()]);
+        let before = cfg.models[0].clone();
+        cfg.normalize();
+        assert_eq!(cfg.models[0].id, before.id);
+        assert_eq!(cfg.models[0].name, before.name);
     }
 
     #[test]

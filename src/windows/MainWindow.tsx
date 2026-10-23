@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import {
   appInfo,
   ballCommand,
+  closeSelf,
   getConfig,
   openUrl,
   pinFromClipboard,
@@ -304,6 +305,25 @@ export function MainWindow() {
 
   const activeId = cfg.translation.models[0]?.id
 
+  // Esc 关闭本窗。设置窗是从托盘菜单打开的独立窗口，
+  // 除了原生标题栏的 X，键盘也要有出口（截图工具用户手基本在键盘上）。
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        closeSelf().catch(() => {})
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
+  // 快捷键页的搜索过滤（参考图里表格上方有搜索框）
+  const [keyQuery, setKeyQuery] = useState('')
+  const keyRows = KEY_ROWS.filter(
+    (r) => !keyQuery.trim() || r.cmd.includes(keyQuery.trim()),
+  )
+
   return (
     <main className="set-root">
       {/* ---------------- 左侧导航 ---------------- */}
@@ -416,18 +436,31 @@ export function MainWindow() {
                 <h2>快捷键</h2>
                 <p>点击可修改的按键绑定，直接按下新的组合键即可；Esc 放弃录制。</p>
               </div>
-              <button
-                className="btn"
-                onClick={() => {
-                  patch({
-                    shortcutCapture: 'Ctrl+1',
-                    shortcutPinClipboard: 'Ctrl+2',
-                  })
-                  setToast('已恢复默认快捷键，记得保存')
-                }}
-              >
-                全部恢复默认
-              </button>
+              <div className="set-head-tools">
+                <div className="set-search mini">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <circle cx="11" cy="11" r="7" />
+                    <path d="m20 20-3.5-3.5" />
+                  </svg>
+                  <input
+                    value={keyQuery}
+                    onChange={(e) => setKeyQuery(e.target.value)}
+                    placeholder="搜索命令"
+                  />
+                </div>
+                <button
+                  className="btn"
+                  onClick={() => {
+                    patch({
+                      shortcutCapture: 'Ctrl+1',
+                      shortcutPinClipboard: 'Ctrl+2',
+                    })
+                    setToast('已恢复默认快捷键，记得保存')
+                  }}
+                >
+                  全部恢复默认
+                </button>
+              </div>
             </div>
             <div className="set-card">
               <table className="set-table">
@@ -439,7 +472,7 @@ export function MainWindow() {
                   </tr>
                 </thead>
                 <tbody>
-                  {KEY_ROWS.map((row) => {
+                  {keyRows.map((row) => {
                     const value = row.field ? cfg[row.field] : undefined
                     const isRec = recording === row.field
                     return (
@@ -481,6 +514,11 @@ export function MainWindow() {
                   })}
                 </tbody>
               </table>
+              {keyRows.length === 0 && (
+                <p style={{ color: '#9aa0ab', fontSize: 12, margin: '10px 0 0' }}>
+                  没有匹配「{keyQuery}」的命令。
+                </p>
+              )}
             </div>
           </>
         )}
@@ -491,8 +529,7 @@ export function MainWindow() {
               <div>
                 <h2>自定义模型</h2>
                 <p>
-                  模型添加后会写入本地配置文件（%APPDATA%\com.snappin.dev\config.json），
-                  API Key 只存在本机。列表第一个为当前启用的模型。
+                  模型写入本地 config.json，API Key 只存在本机；列表第一个为当前启用的模型。
                 </p>
               </div>
               <button className="btn" onClick={() => openEditor('new')}>

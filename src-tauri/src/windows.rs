@@ -659,6 +659,21 @@ pub fn place_centered_on_primary(app: &AppHandle, w: f64, h: f64) -> (f64, f64) 
 // （OCR 结果 / 翻译 / 设置：要选文字、要滚动、要原生标题栏，因此是普通窗口，
 //   不是贴图那种无框透明窗）
 
+/// 文档型窗口的 label → HTML 入口映射。
+///
+/// **必须一处定义、两处使用**：`build_doc_window` 用它取 URL，测试用它校验
+/// `dist/` 下文件真实存在。曾经把设置窗 label 从 `main` 改成 `settings`
+/// 却忘了建 `settings.html`，窗口去加载一个 404 → **全白窗口**，
+/// 且没有任何测试能发现。有了这张表 + 对应测试，这类错直接拦住。
+fn doc_html(label: &str) -> Option<&'static str> {
+    match label {
+        OCR_LABEL => Some("ocr.html"),
+        TRANS_LABEL => Some("trans.html"),
+        SETTINGS_LABEL => Some("settings.html"),
+        _ => None,
+    }
+}
+
 /// 建「文档型」单例窗口（已存在则直接复用）。
 ///
 /// macOS 的 `WebviewWindowBuilder::build()` 必须在主线程执行，与贴图窗同一套
@@ -673,12 +688,14 @@ fn build_doc_window(
     if app.get_webview_window(label).is_some() {
         return Ok(());
     }
+    // label 没有对应入口文件时**直接报错**：绝不能建出一个加载 404 的白窗
+    let html = doc_html(label).ok_or_else(|| format!("unknown doc window label: {label}"))?;
     let (x, y) = place_centered_on_primary(app, w, h);
-    WebviewWindowBuilder::new(app, label, WebviewUrl::App(format!("{label}.html").into()))
+    WebviewWindowBuilder::new(app, label, WebviewUrl::App(html.into()))
         .title(title)
         .inner_size(w, h)
         .position(x, y)
-        .min_inner_size(360.0, 320.0)
+        .min_inner_size(560.0, 420.0)
         .initialization_script(WEBVIEW_GUARD)
         .build()
         .map(|_| ())
@@ -744,12 +761,46 @@ pub fn show_trans_window(app: &AppHandle) -> Result<(), String> {
 
 /// 设置 / 主窗（单例）。
 pub fn show_main_window(app: &AppHandle) -> Result<(), String> {
-    show_doc_window(app, SETTINGS_LABEL, "SnapPin 设置", 460.0, 620.0)
+    show_doc_window(app, SETTINGS_LABEL, "SnapPin 设置", 780.0, 640.0)
 }
 
 /// 关闭文档型窗口（内容仍留在 state 里，下次打开重取）。
 pub fn close_doc_window(app: &AppHandle, label: &str) {
     if let Some(w) = app.get_webview_window(label) {
         let _ = w.close();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 每个文档型窗口的 HTML 入口必须真实存在于 dist/。
+    ///
+    /// 这条测试的存在原因：设置窗 label 改名后忘了建 html，用户看到全白窗口。
+    /// 集中映射（doc_html）+ 本测试 = 改 label 不改 html 会直接编译期后红灯。
+    #[test]
+    fn doc_window_html_entries_exist_in_dist() {
+        let dist = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../dist");
+        for label in [OCR_LABEL, TRANS_LABEL, SETTINGS_LABEL] {
+            let html = doc_html(label)
+                .unwrap_or_else(|| panic!("label {label} 没有登记 HTML 入口（见 doc_html）"));
+            let path = dist.join(html);
+            assert!(
+                path.exists(),
+                "dist/{html} 缺失（窗口 label={label}）——建窗后会得到全白窗口。\
+                 先 npm run build 生成入口，或在 doc_html 里改映射"
+            );
+        }
+    }
+
+    /// 映射表不允许出现重复 html（两个窗口共用入口会互相顶内容）。
+    #[test]
+    fn doc_html_mapping_is_unique() {
+        let all = [doc_html(OCR_LABEL), doc_html(TRANS_LABEL), doc_html(SETTINGS_LABEL)];
+        let mut seen = std::collections::HashSet::new();
+        for h in all.into_iter().flatten() {
+            assert!(seen.insert(h), "html 入口重复：{h}");
+        }
     }
 }

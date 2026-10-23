@@ -190,6 +190,15 @@ pub fn run() {
                 crate::logln!("[snappin] {} registered", cfg.shortcut_pin_clipboard);
             }
 
+            // 调试/自测开关：SNAPPIN_OPEN_SETTINGS=1 启动即打开设置窗。
+            // 用途：① 不点托盘也能验收设置窗；② 菜单链路坏掉时给用户一个
+            // 可靠的入口。正常启动不设置该变量即可，无副作用。
+            if std::env::var_os("SNAPPIN_OPEN_SETTINGS").is_some() {
+                if let Err(e) = windows::show_main_window(&handle) {
+                    crate::logln!("open settings window (env) failed: {e}");
+                }
+            }
+
             // 悬浮球窗口
             windows::ensure_ball_window(&handle, &cfg)?;
 

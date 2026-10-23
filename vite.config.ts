@@ -24,6 +24,7 @@ export default defineConfig({
         pin: 'pin.html',
         menu: 'menu.html',
         main: 'main.html',
+        settings: 'settings.html',
         ocr: 'ocr.html',
         trans: 'trans.html',
       },

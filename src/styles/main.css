@@ -105,8 +105,18 @@
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 16px;
+  /* 窄窗时右侧工具整行掉到下面，而不是把标题/描述压成一字列 */
+  flex-wrap: wrap;
+  gap: 10px 16px;
   margin-bottom: 16px;
+}
+
+/* 标题+描述的容器要能伸长、也要能被压缩：
+   不给 flex:1 的话，右侧工具（搜索框/按钮）会把文本容器压成
+   一字一列的窄条（快捷键页实测复现过）。 */
+.set-page-head > div:first-child {
+  flex: 1;
+  min-width: 0;
 }
 
 .set-page-head h2 {
@@ -117,9 +127,27 @@
 
 .set-page-head p {
   margin: 6px 0 0;
+  max-width: 420px;
   font-size: 12px;
   line-height: 1.6;
   color: #8a919f;
+  /* %APPDATA%\com.snappin.dev\config.json 这类长 token 必须可断，
+     否则整行被顶出容器右边（截图里描述被裁切就是这个原因） */
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.set-head-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
+.set-search.mini {
+  height: 30px;
+  margin-bottom: 0;
+  background: #f2f3f5;
 }
 
 .set-card {
