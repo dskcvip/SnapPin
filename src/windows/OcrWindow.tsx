@@ -28,6 +28,10 @@ export function OcrWindow() {
   }, [])
 
   useEffect(() => {
+    uiLog('ocr mounted')
+  }, [])
+
+  useEffect(() => {
     reload()
     // 重复识别 → Rust 广播 ocr-open，这里重取内容
     let off: (() => void) | null = null

@@ -42,6 +42,30 @@ pub fn run() {
                 let _ = w.show();
                 let _ = w.set_focus();
             }
+            // 调试钩子：SNAPPIN_TEST_DOC_WINDOW=ocr|settings 时，借第二个实例的
+            // 回调走一遍真实命令路径，验证 OCR 卡死修复。
+            // **用 spawn 不用 block_on**：真实 IPC 的线程模型是"主线程的 IPC 回调
+            // 立即返回、命令在 async runtime 上跑"，主线程始终空闲。用 block_on
+            // 会堵住主线程，反而造出建窗死锁（实测踩过）。
+            match std::env::var("SNAPPIN_TEST_DOC_WINDOW").as_deref() {
+                Ok("ocr") => {
+                    crate::logln!("test hook: spawn ocr_show on async runtime");
+                    let app_cb = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let r = crate::commands::ocr_show(app_cb, Vec::new()).await;
+                        crate::logln!("test hook: ocr_show returned ok={:?}", r.is_ok());
+                    });
+                }
+                Ok("settings") => {
+                    crate::logln!("test hook: spawn open_settings_window on async runtime");
+                    let app_cb = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let r = crate::commands::open_settings_window(app_cb).await;
+                        crate::logln!("test hook: open_settings_window returned ok={:?}", r.is_ok());
+                    });
+                }
+                _ => {}
+            }
         }))
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()

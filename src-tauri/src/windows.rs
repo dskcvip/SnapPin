@@ -644,15 +644,22 @@ fn build_doc_window(
     // label 没有对应入口文件时**直接报错**：绝不能建出一个加载 404 的白窗
     let html = doc_html(label).ok_or_else(|| format!("unknown doc window label: {label}"))?;
     let (x, y) = place_centered_on_primary(app, w, h);
-    WebviewWindowBuilder::new(app, label, WebviewUrl::App(html.into()))
+    eprintln!(
+        "[snappin] doc window build start: label={label} html={html} thread={:?}",
+        std::thread::current().id()
+    );
+    let built = WebviewWindowBuilder::new(app, label, WebviewUrl::App(html.into()))
         .title(title)
         .inner_size(w, h)
         .position(x, y)
         .min_inner_size(560.0, 420.0)
         .initialization_script(WEBVIEW_GUARD)
-        .build()
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+        .build();
+    eprintln!(
+        "[snappin] doc window build returned: label={label} ok={:?}",
+        built.is_ok()
+    );
+    built.map(|_| ()).map_err(|e| e.to_string())
 }
 
 /// macOS：建窗投递主线程并同步等待（与 create_pin_window 同模式）。
@@ -675,7 +682,12 @@ fn ensure_doc_window(
         .unwrap_or_else(|_| Err("doc window: main thread timeout".to_string()))
 }
 
-/// Windows：工作线程直接建窗（主线程同步建窗会死锁，见 create_pin_window）。
+/// Windows：直接建窗。**调用方必须保证自己在主线程**。
+///
+/// 曾经试过"一律起工作线程建窗 + 主线程通道等待"，实测死锁：建窗要枚举
+/// 显示器（走事件循环线程），而主线程正堵在通道等待上 → 互相等 15 秒超时。
+/// 正确做法是调用方用 `run_on_main_thread` 把整段窗口操作投递到主线程
+/// （见 `ocr_show` / `trans_start` / `open_settings_window`）。
 #[cfg(not(target_os = "macos"))]
 fn ensure_doc_window(
     app: &AppHandle,

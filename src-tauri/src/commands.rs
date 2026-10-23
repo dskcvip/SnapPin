@@ -741,7 +741,7 @@ pub async fn confirm_selection(
 }
 
 #[tauri::command]
-pub async fn cancel_capture(
+pub fn cancel_capture(
     app: AppHandle,
     state: State<'_, AppState>,
     session_id: Option<u64>,
@@ -2453,18 +2453,33 @@ fn long_pin_geometry(app: &AppHandle, w: u32, h: u32) -> (f64, f64, f64, f64) {
 ///
 /// 行数据先存进 state，再建/前置窗口；窗口（含已存在的旧窗）通过
 /// `ocr-open` 事件重新拉取，避免"第二次识别后窗口内容不刷新"。
+///
+/// 线程模型（Windows 实测教训，别再改坏）：
+/// - 命令本身 **async**：跑在 async runtime，不在主线程的 webview IPC 回调里
+///   （曾经的 bug：同步命令在主线程 IPC 回调里建窗 → 整个应用卡死）
+/// - **所有窗口操作投递主线程**并同步等结果：建窗要枚举显示器、关窗要走
+///   消息循环，非主线程做会挂；而主线程此时是空闲的（IPC 回调已返回），
+///   所以不会堵死它
+/// - 顺序：先关浮层再开结果窗。反序会让结果窗盖住浮层工具条并抢焦点，
+///   用户看到的是"点了识别没反应、X/ESC 也没反应"
 #[tauri::command]
-pub fn ocr_show(app: AppHandle, lines: Vec<OcrLinePayload>) -> Result<(), String> {
+pub async fn ocr_show(app: AppHandle, lines: Vec<OcrLinePayload>) -> Result<(), String> {
     crate::logln!("ocr_show: {} lines", lines.len());
     *app.state::<AppState>().ocr_result.lock().unwrap() = lines;
-    windows::show_ocr_window(&app)?;
+    let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
+    let app_cb = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let state = app_cb.state::<AppState>();
+        // 失败路径不走这里（recognize 直接 reject），浮层保持原样供重试
+        windows::end_capture_session(&app_cb, &state, "ocr-done");
+        let r = windows::show_ocr_window(&app_cb);
+        let _ = tx.send(r);
+    });
+    let r = rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .map_err(|_| "ocr window: main thread timeout (10s)".to_string())?;
+    r?;
     let _ = app.emit("ocr-open", ());
-    // 识别完成 → 结束截图会话（关掉浮层）。
-    // 曾经的 bug：浮层不退场，结果窗和浮层叠在一起、焦点还互相抢，
-    // 用户看到的是"点了识别什么都没发生"。
-    // 失败路径不走这里（recognize 直接 reject），浮层保持原样供重试。
-    let state = app.state::<AppState>();
-    windows::end_capture_session(&app, &state, "ocr-done");
     Ok(())
 }
 
@@ -2504,7 +2519,15 @@ pub async fn trans_start(app: AppHandle, text: String) -> Result<(), String> {
             .map(|m| if m.name.is_empty() { m.model.clone() } else { m.name.clone() })
             .unwrap_or_default();
     }
-    windows::show_trans_window(&app)?;
+    // 窗口操作投递主线程（Windows 上非主线程建窗会挂，见 ocr_show 的线程模型说明）
+    let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
+    let app_cb = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let _ = tx.send(windows::show_trans_window(&app_cb));
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(10))
+        .map_err(|_| "trans window: main thread timeout (10s)".to_string())?
+        ?;
     let _ = app.emit("trans-update", snapshot_trans(&app));
 
     let app2 = app.clone();
@@ -2564,9 +2587,17 @@ fn snapshot_trans(app: &AppHandle) -> crate::state::TransState {
 }
 
 /// 打开设置窗（托盘菜单 / 翻译失败时的"去设置"都用它）。
+///
+/// 同 `ocr_show`：必须 async，避免在主线程的 webview IPC 回调里建窗死锁。
 #[tauri::command]
-pub fn open_settings_window(app: AppHandle) -> Result<(), String> {
-    windows::show_main_window(&app)
+pub async fn open_settings_window(app: AppHandle) -> Result<(), String> {
+    let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
+    let app_cb = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let _ = tx.send(windows::show_main_window(&app_cb));
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(10))
+        .map_err(|_| "settings window: main thread timeout (10s)".to_string())?
 }
 
 #[cfg(test)]
