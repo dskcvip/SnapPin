@@ -51,6 +51,30 @@ extern "system" {
     fn IsWindowVisible(hwnd: isize) -> i32;
     fn GetWindowRect(hwnd: isize, rect: *mut RECT) -> i32;
     fn GetWindowTextW(hwnd: isize, text: *mut u16, count: i32) -> i32;
+    fn DwmGetWindowAttribute(hwnd: isize, attr: u32, pv: *mut core::ffi::c_void, cb: u32) -> i32;
+}
+
+/// `DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS)`：
+/// 返回**视觉可见**的窗口边界。`GetWindowRect` 会把 Win10+ 的窗口阴影
+/// （左右各约 8px 透明边）算进去，直接用来框选会多带一圈空白。
+const DWMWA_EXTENDED_FRAME_BOUNDS: u32 = 9;
+
+fn visual_rect(hwnd: isize) -> RECT {
+    let mut r = RECT::default();
+    let hr = unsafe {
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_EXTENDED_FRAME_BOUNDS,
+            &mut r as *mut RECT as *mut core::ffi::c_void,
+            std::mem::size_of::<RECT>() as u32,
+        )
+    };
+    if hr == 0 && r.right > r.left && r.bottom > r.top {
+        r
+    } else {
+        // DWM 不可用（如远程桌面/兼容模式）退回普通窗口矩形
+        rect_of(hwnd)
+    }
 }
 
 /// 我们的进程 id：任何属于本进程的窗口（浮层 / 悬浮球 / 菜单…）都要跳过，
@@ -120,7 +144,8 @@ pub fn snap_at(x: f64, y: f64, mon_x: f64, mon_y: f64, sf: f64) -> Option<Window
     let px = (mon_x + x * sf).round() as i32;
     let py = (mon_y + y * sf).round() as i32;
     let h = window_at_point(POINT { x: px, y: py })?;
-    let r = rect_of(h);
+    // 用 DWM 可见边界：GetWindowRect 含窗口阴影的透明边，框选会多一圈
+    let r = visual_rect(h);
     let title = title_of(h);
     // 物理 → 逻辑
     let lx = (r.left as f64 - mon_x) / sf;
@@ -174,5 +199,17 @@ mod tests {
         let mut s = WindowSnap { x: -5000.0, y: -5000.0, w: 99999.0, h: 99999.0, title: String::new() };
         clamp_to_monitor(&mut s, 0.0, 0.0, 1920.0, 1200.0);
         assert_eq!((s.x, s.y, s.w, s.h), (0.0, 0.0, 1920.0, 1200.0));
+    }
+
+    /// 人工探针（`cargo test -- --ignored manual_probe_desktop --nocapture`）：
+    /// 在真实桌面上验证 WindowFromPoint + z 序回溯逻辑能找到窗口并算出矩形。
+    /// CI 不跑（依赖桌面状态），但排查"吸附失效"时是最快的证据来源。
+    #[test]
+    #[ignore]
+    fn manual_probe_desktop() {
+        for (x, y) in [(900.0, 400.0), (100.0, 300.0), (1800.0, 1100.0)] {
+            let s = snap_at(x, y, 0.0, 0.0, 1.0);
+            println!("probe ({x},{y}) -> {s:?}");
+        }
     }
 }

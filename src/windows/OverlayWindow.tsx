@@ -1,5 +1,6 @@
 import { listen } from '@tauri-apps/api/event'
 import {
+  useCallback,
   useEffect,
   useLayoutEffect,
   useRef,
@@ -24,11 +25,13 @@ import {
   overlayContext,
   readImageBytes,
   uiLog,
+  windowSnap,
   type DecodedCode,
   type LongProgress,
   type OverlayContext,
   type Rect,
   type ShotAction,
+  type WindowSnap,
 } from '../lib/api'
 import { AnnotationLayer } from '../annotate/AnnotationLayer'
 import { DragMagnifier } from '../annotate/DragMagnifier'
@@ -76,6 +79,58 @@ import '../styles/overlay.css'
 
 const MIN_SIZE = 3
 
+/** 选区锚点：四角 + 四边中点（边的热区是透明的，只给抓手和光标）。 */
+const CORNER_HANDLES = ['tl', 't', 'tr', 'r', 'br', 'b', 'bl', 'l'] as const
+type HandleEdge = (typeof CORNER_HANDLES)[number]
+
+/**
+ * 按拖动的边/角推算出新选区。
+ *
+ * 支持拖过对边（宽/高变负时自动翻转，和系统级截图工具一致），
+ * 并把结果钳进视口——否则往外拖会把选区推到屏幕外，工具栏也跟着跑丢。
+ */
+function resizeRect(start: Rect, edge: HandleEdge, dx: number, dy: number): Rect {
+  let { x, y, w, h } = start
+  if (edge.includes('l')) {
+    x += dx
+    w -= dx
+  }
+  if (edge.includes('r')) w += dx
+  if (edge.includes('t')) {
+    y += dy
+    h -= dy
+  }
+  if (edge.includes('b')) h += dy
+  // 拖过头：翻转而不是变成负数
+  if (w < 0) {
+    x += w
+    w = -w
+  }
+  if (h < 0) {
+    y += h
+    h = -h
+  }
+  // 钳进视口
+  const vw = window.innerWidth
+  const vh = window.innerHeight
+  if (x < 0) {
+    w += x
+    x = 0
+  }
+  if (y < 0) {
+    h += y
+    y = 0
+  }
+  if (x + w > vw) w = vw - x
+  if (y + h > vh) h = vh - y
+  return {
+    x: Math.round(x),
+    y: Math.round(y),
+    w: Math.max(Math.round(w), MIN_SIZE),
+    h: Math.max(Math.round(h), MIN_SIZE),
+  }
+}
+
 /** RGB → `#RRGGBB`（大写十六进制，与主流取色器的输出一致）。 */
 function toHex([r, g, b]: [number, number, number]): string {
   const h = (v: number) => v.toString(16).padStart(2, '0')
@@ -108,6 +163,8 @@ export function OverlayWindow() {
   const [rect, setRect] = useState<Rect | null>(null)
   const [draft, setDraft] = useState<Rect | null>(null)
   const [cursor, setCursor] = useState<{ x: number; y: number } | null>(null)
+  /** 悬停吸附到的窗口（还没出选区时高亮它；单击即选中整窗） */
+  const [hoverWin, setHoverWin] = useState<WindowSnap | null>(null)
   const [busy, setBusy] = useState(false)
   const [actError, setActError] = useState<string | null>(null)
   // 标注状态
@@ -209,7 +266,18 @@ export function OverlayWindow() {
   const [propsW, setPropsW] = useState(0)
   const [hintW, setHintW] = useState(0)
   const imgRef = useRef<HTMLImageElement | null>(null)
-  const dragRef = useRef<{ x: number; y: number } | null>(null)
+  const dragRef = useRef<{ x: number; y: number; snap: WindowSnap | null } | null>(null)
+  /** 悬停识窗的节流与乱序保护：前端每次 mousemove 都发 IPC 太贵，
+   *  限到 ~15fps；慢响应回来时若已有更新的请求则丢弃。 */
+  const snapAtRef = useRef(0)
+  const snapSeqRef = useRef(0)
+  /** 锚点缩放进行中：记下拖的是哪条边、起始矩形、按下时的指针位置。 */
+  const resizeRef = useRef<{
+    edge: HandleEdge
+    start: Rect
+    px: number
+    py: number
+  } | null>(null)
   /** 本浮层是否已进入就绪态（用于识别"会话被结束"的 true→false 跳变） */
   const readyRef = useRef(false)
   /** 本轮等待的起始时间。浮层窗口会被跨会话复用（页面不重载），
@@ -722,6 +790,26 @@ export function OverlayWindow() {
   }, [hint, hintW])
 
   /** 二级面板居中于按钮，但左右两侧不得超出一级工具条的左右边界 */
+  /** 悬停识窗查询（节流 ~15fps + 乱序丢弃）。只查顶层窗口，
+   *  查不到（光标下只有我们自己的窗口）就清空高亮。 */
+  const querySnap = useCallback(
+    (x: number, y: number) => {
+      if (!ctx) return
+      const now = performance.now()
+      if (now - snapAtRef.current < 65) return
+      snapAtRef.current = now
+      const seq = ++snapSeqRef.current
+      windowSnap(ctx.monitorId, x, y)
+        .then((w) => {
+          if (seq === snapSeqRef.current) setHoverWin(w)
+        })
+        .catch(() => {
+          if (seq === snapSeqRef.current) setHoverWin(null)
+        })
+    },
+    [ctx],
+  )
+
   const anchorX = (x: number, w: number) => {
     const bar = barRef.current?.getBoundingClientRect()
     const half = w / 2
@@ -731,16 +819,43 @@ export function OverlayWindow() {
     return Math.min(Math.max(x, bar.left + half), bar.right - half)
   }
 
+  /** 开始锚点缩放。stopPropagation 是关键——否则根节点的 onPointerDown
+   *  会当成"重新框选"，一点锚点选区就没了。 */
+  const beginResize = (e: ReactPointerEvent<HTMLElement>, edge: HandleEdge) => {
+    if (e.button !== 0 || !rect) return
+    e.stopPropagation()
+    e.preventDefault()
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId)
+    } catch {
+      /* 某些环境不支持捕获，退回普通冒泡也能用 */
+    }
+    resizeRef.current = { edge, start: rect, px: e.clientX, py: e.clientY }
+    setHoverWin(null)
+  }
+
   const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
     if (e.button !== 0 || !ctx) return
-    dragRef.current = { x: e.clientX, y: e.clientY }
+    // 按住时先把当前吸附窗口记进 dragRef：松手没移动 = 单击选整窗，
+    // 移动了 = 普通拖选（见 onPointerMove / onPointerUp）。
+    dragRef.current = { x: e.clientX, y: e.clientY, snap: hoverWin }
     setRect(null)
     setDraft({ x: e.clientX, y: e.clientY, w: 0, h: 0 })
   }
 
   const onPointerMove = (e: ReactPointerEvent<HTMLDivElement>) => {
+    // 锚点缩放优先：拖的是边/角，交给 resizeRect，不进入框选/悬停逻辑
+    const rs = resizeRef.current
+    if (rs) {
+      setRect(resizeRect(rs.start, rs.edge, e.clientX - rs.px, e.clientY - rs.py))
+      return
+    }
     const d = dragRef.current
     if (d) {
+      // 移动超过阈值 → 这是拖选，取消吸附候选
+      if (d.snap && (Math.abs(e.clientX - d.x) > 4 || Math.abs(e.clientY - d.y) > 4)) {
+        d.snap = null
+      }
       setDraft({
         x: Math.min(d.x, e.clientX),
         y: Math.min(d.y, e.clientY),
@@ -756,6 +871,8 @@ export function OverlayWindow() {
     // 两次 setState 在同一事件里，React 自动批合成一次重渲染。
     setCursor({ x: e.clientX, y: e.clientY })
     setDragColor(sampleMonitorPixel(e.clientX, e.clientY))
+    // 悬停识窗：只在"还没选区、没在拖、没在标注"时查，节流在 querySnap 里
+    if (!d && !rect && !tool) querySnap(e.clientX, e.clientY)
   }
 
   // 光标移出浮层：收起放大镜（拖选中不移出——指针被窗口捕获）
@@ -764,10 +881,24 @@ export function OverlayWindow() {
   }
 
   const onPointerUp = () => {
+    // 缩放收尾：位置已经实时更新过，这里只清状态
+    if (resizeRef.current) {
+      resizeRef.current = null
+      return
+    }
+    const d = dragRef.current
     dragRef.current = null
     setCursor(null)
-    setDraft((d) => {
-      if (d && d.w >= MIN_SIZE && d.h >= MIN_SIZE) setRect(d)
+    // 单击（没拖动）且有吸附窗口 → 直接选中整个窗口。
+    // 这是 QQ 截图 / 微信截图的核心手感：悬停高亮、一点即整窗。
+    if (d?.snap) {
+      setRect({ x: d.snap.x, y: d.snap.y, w: d.snap.w, h: d.snap.h })
+      setDraft(null)
+      setHoverWin(null)
+      return
+    }
+    setDraft((dr) => {
+      if (dr && dr.w >= MIN_SIZE && dr.h >= MIN_SIZE) setRect(dr)
       return null
     })
   }
@@ -865,6 +996,25 @@ export function OverlayWindow() {
         </>
       )}
 
+      {/* 悬停识窗高亮：不出选区时，鼠标下方的窗口描边 + 标题。
+          单击即选中整窗（QQ/微信截图同款手感）。pointer-events:none
+          保证不挡住下面的鼠标事件。 */}
+      {hoverWin && !rect && !draft && (
+        <div
+          className="win-snap"
+          style={{
+            left: hoverWin.x,
+            top: hoverWin.y,
+            width: hoverWin.w,
+            height: hoverWin.h,
+          }}
+        >
+          <span className="win-snap-label">
+            {hoverWin.title || '窗口'}　{hoverWin.w}×{hoverWin.h}
+          </span>
+        </div>
+      )}
+
       {/* 选区阶段放大镜：悬停 / 拖选时跟随光标，底部带颜色读数。
           仅"未出选区"时显示——出选区后取色由工具条里的取色器负责，
           两个阶段各有一个入口，不重叠也不冲突。 */}
@@ -892,10 +1042,13 @@ export function OverlayWindow() {
           </span>
           {rect && (
             <>
-              <i className="handle tl" />
-              <i className="handle tr" />
-              <i className="handle bl" />
-              <i className="handle br" />
+              {CORNER_HANDLES.map((edge) => (
+                <i
+                  key={edge}
+                  className={`handle ${edge}`}
+                  onPointerDown={(e) => beginResize(e, edge)}
+                />
+              ))}
             </>
           )}
         </div>

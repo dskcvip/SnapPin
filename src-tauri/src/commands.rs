@@ -2512,6 +2512,49 @@ pub fn ocr_result(app: AppHandle) -> OcrResultPayload {
     OcrResultPayload { lines, image }
 }
 
+/// 悬停吸附：返回光标处应高亮的顶层窗口（逻辑坐标 + 标题）。
+///
+/// 前端在"还没出选区"时按 ~15fps 调它，用于高亮鼠标下的窗口；
+/// 单击即选中整个窗口（对标 QQ 截图 / 微信截图的识窗行为）。
+/// 返回 None 表示光标下只有我们自己的窗口（浮层/悬浮球/菜单），不高亮。
+///
+/// 实现细节与坑见 `winsnap` 模块：浮层自己是全屏窗口，`WindowFromPoint`
+/// 只会命中浮层，必须沿 z 序往下找第一个"别人家的、可见的、包含该点"的窗。
+#[tauri::command]
+pub fn window_snap(
+    state: State<'_, AppState>,
+    monitor_id: String,
+    x: f64,
+    y: f64,
+) -> Option<crate::winsnap::WindowSnap> {
+    let monitors = state.monitors.lock().unwrap();
+    let m = monitors.iter().find(|m| m.id == monitor_id)?;
+    let sf = m.scale_factor as f64;
+    // monitor 原点在 Windows 上是物理像素（见 MonitorShot::logical_origin）
+    let mut snap = crate::winsnap::snap_at(x, y, m.x as f64, m.y as f64, sf)?;
+    // 窗口可能跨屏：钳进当前显示器（浮层逻辑坐标以本显示器左上为原点）
+    let lw = m.width as f64 / sf;
+    let lh = m.height as f64 / sf;
+    crate::winsnap::clamp_to_monitor(&mut snap, 0.0, 0.0, lw, lh);
+    // 只在"吸附目标变了"时打日志：前端 ~15fps 调用，每次都打会淹没日志
+    {
+        static LAST: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+        let mut last = LAST.lock().unwrap();
+        if last.as_deref() != Some(snap.title.as_str()) {
+            crate::logln!(
+                "snap target: {:?} {}x{} at ({}, {})",
+                snap.title,
+                snap.w.round(),
+                snap.h.round(),
+                snap.x.round(),
+                snap.y.round()
+            );
+            *last = Some(snap.title.clone());
+        }
+    }
+    Some(snap)
+}
+
 /// 关闭 OCR 结果窗（内容保留，下次打开还在）。
 #[tauri::command]
 pub fn ocr_close(app: AppHandle) {

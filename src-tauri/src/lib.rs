@@ -4,6 +4,7 @@ mod logfile;
 mod menuwin;
 mod state;
 mod windows;
+mod winsnap;
 
 use tauri::{AppHandle, Manager};
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
@@ -338,6 +339,7 @@ pub fn run() {
             commands::app_info,
             commands::ocr_show,
             commands::ocr_result,
+            commands::window_snap,
             commands::ocr_close,
             commands::trans_start,
             commands::trans_test,
@@ -521,10 +523,17 @@ pub(crate) fn handle_menu_event(app: &AppHandle, id: &str) {
         // 排障入口：直接打开落盘日志（release 无控制台，这是唯一的现场）
         "open-log" => open_external(&logfile::log_path().to_string_lossy()),
         // 设置窗（翻译 Key、快捷键、外观都在这）
+        //
+        // **不能在这里同步建窗**：本函数跑在主线程的 webview IPC 回调 / 托盘事件里，
+        // 在这个上下文建 WebView2 窗口会死锁（现象：窗口白着、build 永不返回）。
+        // 与 handle_capture 同一条规则——交给 async 命令，它内部再投递主线程。
         "settings" => {
-            if let Err(e) = windows::show_main_window(app) {
-                crate::logln!("open settings window failed: {e}");
-            }
+            let app_cb = app.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = crate::commands::open_settings_window(app_cb).await {
+                    crate::logln!("open settings window failed: {e}");
+                }
+            });
         }
         // 换包后授权失效时，用户唯一的自助恢复入口（macOS）
         "open-perm" => open_external(SCREEN_RECORDING_SETTINGS_URL),

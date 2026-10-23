@@ -302,6 +302,11 @@ pub fn show_overlays(app: &AppHandle, monitors: &[snappin_core_platform::Monitor
                 let r1 = win.set_size(tauri::LogicalSize::new(w, h));
                 let r2 = win.set_position(tauri::LogicalPosition::new(x, y));
                 let r3 = win.show();
+                // 重新置顶：Windows 的前台窗口锁会让 set_focus 静默失败，
+                // 若桌面上有别家置顶窗（如悬浮助手类应用），浮层会被压在下面
+                // 既看不见也收不到鼠标。set_always_on_top(true) 内部是
+                // SetWindowPos(HWND_TOPMOST)，会把窗口抬到置顶带最前。
+                let _ = win.set_always_on_top(true);
                 let r4 = win.set_focus();
                 eprintln!(
                     "[snappin] show {label}: size={:?} pos={:?} show={:?} focus={:?} visible={:?}",

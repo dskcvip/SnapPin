@@ -41,6 +41,35 @@
   pointer-events: none;
 }
 
+/* 悬停识窗高亮：QQ/微信截图同款的"窗口描边 + 标题标签"。
+   pointer-events:none 是关键——不能挡住浮层的鼠标事件，
+   否则鼠标一进去就"卡"在高亮框上，选区拖不动。 */
+.win-snap {
+  position: absolute;
+  border: 1px solid var(--accent, #12a5d8);
+  border-radius: 2px;
+  background: rgba(18, 165, 216, 0.08);
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.5) inset,
+    0 2px 10px rgba(15, 23, 42, 0.12);
+  pointer-events: none;
+  z-index: 4;
+}
+
+.win-snap-label {
+  position: absolute;
+  left: -1px;
+  bottom: calc(100% + 3px);
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: var(--accent, #12a5d8);
+  color: #fff;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: nowrap;
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.25);
+}
+
 .crosshair-v {
   top: 0;
   bottom: 0;
@@ -376,12 +405,73 @@
   background: #fff;
   border: 1px solid var(--brand);
   border-radius: 1px;
+  /* 关键：.sel 是 pointer-events:none，子元素必须显式打开才能接事件。
+     曾经这里漏了 → 四个角只是装饰，选区画出后完全没法缩放。 */
+  pointer-events: auto;
 }
 
-.handle.tl { left: -5px; top: -5px; }
-.handle.tr { right: -5px; top: -5px; }
-.handle.bl { left: -5px; bottom: -5px; }
-.handle.br { right: -5px; bottom: -5px; }
+.handle.tl {
+  left: -5px;
+  top: -5px;
+  cursor: nwse-resize;
+}
+.handle.tr {
+  right: -5px;
+  top: -5px;
+  cursor: nesw-resize;
+}
+.handle.bl {
+  left: -5px;
+  bottom: -5px;
+  cursor: nesw-resize;
+}
+.handle.br {
+  right: -5px;
+  bottom: -5px;
+  cursor: nwse-resize;
+}
+
+/* 四条边的中点热区：透明细条，只有抓手和光标（不遮挡画面） */
+.handle.t,
+.handle.b,
+.handle.l,
+.handle.r {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+}
+.handle.t {
+  left: 8px;
+  right: 8px;
+  top: -4px;
+  width: auto;
+  height: 10px;
+  cursor: ns-resize;
+}
+.handle.b {
+  left: 8px;
+  right: 8px;
+  bottom: -4px;
+  width: auto;
+  height: 10px;
+  cursor: ns-resize;
+}
+.handle.l {
+  top: 8px;
+  bottom: 8px;
+  left: -4px;
+  width: 10px;
+  height: auto;
+  cursor: ew-resize;
+}
+.handle.r {
+  top: 8px;
+  bottom: 8px;
+  right: -4px;
+  width: 10px;
+  height: auto;
+  cursor: ew-resize;
+}
 
 .toolbar {
   position: absolute;

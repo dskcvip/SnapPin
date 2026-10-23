@@ -218,6 +218,27 @@ export interface OcrLine {
   maxY: number
 }
 
+/** 悬停吸附到的窗口（逻辑坐标，与浮层选区同一坐标系）。 */
+export interface WindowSnap {
+  x: number
+  y: number
+  w: number
+  h: number
+  /** 窗口标题；空串表示该窗口无标题 */
+  title: string
+}
+
+/**
+ * 查询光标处应吸附的顶层窗口（QQ/微信截图那种"悬停识窗、单击选中"）。
+ * 返回 null = 光标下只有本应用自己的窗口，不该高亮。
+ */
+export const windowSnap = (
+  monitorId: string,
+  x: number,
+  y: number,
+): Promise<WindowSnap | null> =>
+  invoke<WindowSnap | null>('window_snap', { monitorId, x, y })
+
 /** OCR 模型状态（前端据此提示下载，而不是等点下去才报错）。 */
 export interface OcrModelsStatus {
   available: boolean
