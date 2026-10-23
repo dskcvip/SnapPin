@@ -741,7 +741,7 @@ pub async fn confirm_selection(
 }
 
 #[tauri::command]
-pub fn cancel_capture(
+pub async fn cancel_capture(
     app: AppHandle,
     state: State<'_, AppState>,
     session_id: Option<u64>,
@@ -998,22 +998,32 @@ pub async fn ocr_recognize(
     }
     let app2 = app.clone();
     let monitor_id2 = monitor_id.clone();
+    let t0 = std::time::Instant::now();
+    crate::logln!("ocr: start monitor={monitor_id2} rect={:?}", (rect.x, rect.y, rect.w, rect.h));
     tauri::async_runtime::spawn_blocking(move || {
         let state = app2.state::<AppState>();
-        let monitors = state.monitors.lock().unwrap();
-        let m = monitors
-            .iter()
-            .find(|m| m.id == monitor_id2)
-            .ok_or_else(|| "no active capture session".to_string())?;
-        let sf = m.scale_factor as f64;
-        // 与 confirm_selection / decode_qr 完全相同的裁剪口径
-        let algo_rect = AlgoRect {
-            x: (rect.x * sf).round() as i32,
-            y: (rect.y * sf).round() as i32,
-            w: (rect.w * sf).round().max(1.0) as u32,
-            h: (rect.h * sf).round().max(1.0) as u32,
+        // **锁只包住裁剪**（毫秒级）就地释放。
+        // 曾经的 bug：推理（秒级）期间一直攥着 monitors 锁，而 cancel_capture
+        // 是同步命令、跑在主线程上，也要拿这把锁 → 主线程被锁死 → 用户按 Esc /
+        // 点关闭全都没反应（表现为"截图模式卡死"）。
+        let (cropped, sf, ox, oy) = {
+            let monitors = state.monitors.lock().unwrap();
+            let m = monitors
+                .iter()
+                .find(|m| m.id == monitor_id2)
+                .ok_or_else(|| "no active capture session".to_string())?;
+            let sf = m.scale_factor as f64;
+            // 与 confirm_selection / decode_qr 完全相同的裁剪口径
+            let algo_rect = AlgoRect {
+                x: (rect.x * sf).round() as i32,
+                y: (rect.y * sf).round() as i32,
+                w: (rect.w * sf).round().max(1.0) as u32,
+                h: (rect.h * sf).round().max(1.0) as u32,
+            };
+            let cropped = m.image.crop(&algo_rect).map_err(|e| e.to_string())?;
+            (cropped, sf, algo_rect.x, algo_rect.y)
         };
-        let cropped = m.image.crop(&algo_rect).map_err(|e| e.to_string())?;
+        crate::logln!("ocr: cropped {}x{} in {}ms", cropped.width, cropped.height, t0.elapsed().as_millis());
 
         // 引擎懒加载：持锁加载，加载期间其它 OCR 请求排队等待
         let mut guard = state.ocr.lock().unwrap();
@@ -1033,9 +1043,18 @@ pub async fn ocr_recognize(
         }
         let engine = guard.as_ref().expect("engine just loaded");
         let lines = engine.recognize(&cropped).map_err(|e| e.to_string())?;
-        // 在锁内一起换算：检测框从裁剪图物理像素换成选区内逻辑像素，
-        // 与前端标注层坐标系对齐（和二维码定位点同一口径）
-        Ok(to_ocr_payloads(lines, sf, algo_rect.x, algo_rect.y))
+        // 推理期间用户可能已取消截图：会话号变了就别再返回结果，
+        // 免得"取消了还弹一个结果窗出来"。
+        if let Some(id) = session_id {
+            let current = state.session.load(Ordering::SeqCst);
+            if id != current {
+                return Err(format!("stale session {id} != {current}"));
+            }
+        }
+        // 检测框从裁剪图物理像素换成选区内逻辑像素，与前端标注层坐标系对齐
+        let payloads = to_ocr_payloads(lines, sf, ox, oy);
+        crate::logln!("ocr: done {} lines in {}ms", payloads.len(), t0.elapsed().as_millis());
+        Ok(payloads)
     })
     .await
     .map_err(|e| format!("ocr task failed: {e}"))?
@@ -2436,9 +2455,16 @@ fn long_pin_geometry(app: &AppHandle, w: u32, h: u32) -> (f64, f64, f64, f64) {
 /// `ocr-open` 事件重新拉取，避免"第二次识别后窗口内容不刷新"。
 #[tauri::command]
 pub fn ocr_show(app: AppHandle, lines: Vec<OcrLinePayload>) -> Result<(), String> {
+    crate::logln!("ocr_show: {} lines", lines.len());
     *app.state::<AppState>().ocr_result.lock().unwrap() = lines;
     windows::show_ocr_window(&app)?;
     let _ = app.emit("ocr-open", ());
+    // 识别完成 → 结束截图会话（关掉浮层）。
+    // 曾经的 bug：浮层不退场，结果窗和浮层叠在一起、焦点还互相抢，
+    // 用户看到的是"点了识别什么都没发生"。
+    // 失败路径不走这里（recognize 直接 reject），浮层保持原样供重试。
+    let state = app.state::<AppState>();
+    windows::end_capture_session(&app, &state, "ocr-done");
     Ok(())
 }
 

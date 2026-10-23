@@ -151,15 +151,18 @@ fn place_ball_top_right<R: tauri::Runtime>(
     if actual.width == 0 || actual.height == 0 {
         return;
     }
-    const MARGIN: i32 = 16;
+    // 横向贴右 16px；纵向下移 66px（16 + 50，用户要求"离原位置再向下 50px"）——
+    // 太贴顶容易被别的置顶窗/系统标题栏盖住，往下挪一点更稳。
+    const MARGIN_X: i32 = 16;
+    const MARGIN_Y: i32 = 66;
     let pos = monitor.position();
     let msize = monitor.size();
-    // 目标位：右上角内缩 MARGIN。**再整体钳进屏幕**——屏幕比窗口还窄的
-    // pathological 情况（超小屏 / 极端 DPI）下，理想位会算成负数，球就飞出
-    // 屏幕了。钳完之后任何分辨率下球都完整可见（那种情况下退化为贴左/贴上）。
-    let nx = (pos.x + msize.width as i32 - actual.width as i32 - MARGIN)
+    // 目标位算完**再整体钳进屏幕**——屏幕比窗口还窄的 pathological 情况
+    // （超小屏 / 极端 DPI）下，理想位会算成负数，球就飞出屏幕了。
+    // 钳完之后任何分辨率下球都完整可见（那种情况下退化为贴左/贴上）。
+    let nx = (pos.x + msize.width as i32 - actual.width as i32 - MARGIN_X)
         .clamp(pos.x, (pos.x + msize.width as i32 - actual.width as i32).max(pos.x));
-    let ny = (pos.y + MARGIN)
+    let ny = (pos.y + MARGIN_Y)
         .clamp(pos.y, (pos.y + msize.height as i32 - actual.height as i32).max(pos.y));
     if let Err(e) = window.set_position(PhysicalPosition::new(nx, ny)) {
         eprintln!("[snappin] ball position ({tag}) failed: {e}");

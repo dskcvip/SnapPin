@@ -480,14 +480,20 @@ export function OverlayWindow() {
 
   // 未实现工具：给出短提示，不做静默失败（用户点了要有反馈）
   // `suffix` 传空串 = 原文展示（如"请先框选…"这类引导语，不是"开发中"）
-  const showHint = (text: string, el?: HTMLElement | null, suffix = ' 正在开发中') => {
+  const showHint = (
+    text: string,
+    el?: HTMLElement | null,
+    suffix = ' 正在开发中',
+    /** 展示时长（ms）。错误文案要长一些，默认 1.8s 不够读 */
+    durationMs = 1800,
+  ) => {
     if (el) {
       const r = el.getBoundingClientRect()
       setHintAnchor({ x: r.left + r.width / 2, bottom: r.bottom })
     }
     setHint(suffix ? `${text}${suffix}` : text)
     if (hintTimer.current !== undefined) window.clearTimeout(hintTimer.current)
-    hintTimer.current = window.setTimeout(() => setHint(null), 1800)
+    hintTimer.current = window.setTimeout(() => setHint(null), durationMs)
   }
 
   /** 选工具：再次点击已选中的工具则回到"选择"态（工具条无高亮）。
@@ -610,17 +616,22 @@ export function OverlayWindow() {
     if (ocrBusy) return
     setOcrBusy(true)
     setOcrError(null)
+    // 反馈：识别是秒级操作，浮层必须给个"正在干活"的提示，
+    // 否则用户看起来就是"点了什么都没发生"（曾经的线上反馈）。
+    if (anchor) showHint('文字识别中…', anchor, '', 900)
     try {
       const lines = await ocrRecognize(ctx.monitorId, rect, ctx.sessionId)
-      // 识别结果进**独立窗口**（可拖动选择 / 全部复制 / 顶部翻译），
-      // 不再挤在浮层的窄面板里。空结果也开窗——让用户看到"确实没字"，
-      // 而不是点了按钮什么都没发生。
+      // 识别结果进**独立窗口**（可拖动选择 / 全部复制 / 顶部翻译）。
+      // 空结果也开窗——让用户看到"确实没字"，而不是点了没反应。
+      // 窗口打开后 Rust 侧会结束截图会话（关浮层），不会留在这里卡住。
       await ocrShow(lines)
       if (lines.length === 0) uiLog('ocr: no text found in selection')
     } catch (e) {
       uiLog(`ocr recognize failed: ${String(e)}`)
-      // 失败就地提示（模型缺失 / 推理错误都带可操作文案），不开空窗口
+      // 失败就地提示（模型缺失 / 推理错误都带可操作文案），不开空窗口。
+      // 提示必须可见——内嵌结果面板删掉后，这是用户唯一能看到的错误出口。
       setOcrError(String(e))
+      showHint(String(e), null, '', 4000)
     } finally {
       setOcrBusy(false)
     }
