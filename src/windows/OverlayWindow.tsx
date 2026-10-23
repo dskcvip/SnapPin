@@ -1,4 +1,6 @@
 import { listen } from '@tauri-apps/api/event'
+import { emit } from '@tauri-apps/api/event'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import {
   useCallback,
   useEffect,
@@ -78,6 +80,16 @@ import {
 import '../styles/overlay.css'
 
 const MIN_SIZE = 3
+
+/**
+ * 跨屏"只保留一个选区"的事件名。
+ *
+ * 双屏时每块屏各有一个全屏浮层（各自独立的 React 实例），用户在两块屏上
+ * 先后框选，两边就各留一个选区 + 各挂一条工具条（用户实测截图：两块屏
+ * 各一个框、各一条工具栏）。一次截图只能有一个选区，所以谁开始画，
+ * 就广播让别的屏把自己的选区清掉。
+ */
+const EVT_CLEAR_OTHER_SEL = 'overlay-clear-selection'
 
 /** 选区锚点：四角 + 四边中点（边的热区是透明的，只给抓手和光标）。 */
 const CORNER_HANDLES = ['tl', 't', 'tr', 'r', 'br', 'b', 'bl', 'l'] as const
@@ -408,6 +420,7 @@ export function OverlayWindow() {
       setActError(null)
       setRect(null)
       setDraft(null)
+      setHoverWin(null)
       setShapes([])
       setTool(null)
       setHint(null)
@@ -826,6 +839,32 @@ export function OverlayWindow() {
     return Math.min(Math.max(x, bar.left + half), bar.right - half)
   }
 
+  /** 本浮层的窗口 label：用于识别"这条广播是不是我发的" */
+  const myLabel = getCurrentWindow().label
+
+  /** 广播：让其它显示器的浮层清掉自己的选区。 */
+  const clearOtherSelections = useCallback(() => {
+    emit(EVT_CLEAR_OTHER_SEL, { owner: myLabel }).catch(() => {})
+  }, [myLabel])
+
+  /** 收到别人的广播 → 清掉我这块屏的选区和工具条。 */
+  useEffect(() => {
+    let off: (() => void) | null = null
+    listen<{ owner?: string }>(EVT_CLEAR_OTHER_SEL, (e) => {
+      if (e.payload?.owner && e.payload.owner !== myLabel) {
+        uiLog(`clear selection (owned by ${e.payload.owner})`)
+        setRect(null)
+        setDraft(null)
+        setHoverWin(null)
+      }
+    })
+      .then((f) => {
+        off = f
+      })
+      .catch(() => {})
+    return () => off?.()
+  }, [myLabel])
+
   /** 开始锚点缩放。stopPropagation 是关键——否则根节点的 onPointerDown
    *  会当成"重新框选"，一点锚点选区就没了。 */
   const beginResize = (e: ReactPointerEvent<HTMLElement>, edge: HandleEdge) => {
@@ -843,6 +882,8 @@ export function OverlayWindow() {
 
   const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
     if (e.button !== 0 || !ctx) return
+    // 本屏开始画 → 让其它屏清掉它们的选区（双屏只能有一个选区/一条工具条）
+    clearOtherSelections()
     // 按住时先把当前吸附窗口记进 dragRef：松手没移动 = 单击选整窗，
     // 移动了 = 普通拖选（见 onPointerMove / onPointerUp）。
     dragRef.current = { x: e.clientX, y: e.clientY, snap: hoverWin }
