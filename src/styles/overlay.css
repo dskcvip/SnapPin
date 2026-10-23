@@ -640,13 +640,15 @@
 }
 
 /* 放大镜上边的操作提示条：告诉用户 Esc 能退出截图。
-   截图阶段菜单/按钮都还没出现，不给提示用户只能瞎试。 */
+   截图阶段菜单/按钮都还没出现，不给提示用户只能瞎试。
+   左对齐（用户要求）：和底部色值条的左内边距对齐，视觉上成一条竖线。 */
 .drag-mag-esc {
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   gap: 4px;
   height: 22px;
+  padding: 0 8px;
   font-size: 11px;
   color: #4e5566;
   background: #f7f8fa;
