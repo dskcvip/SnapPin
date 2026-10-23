@@ -2527,32 +2527,43 @@ pub fn window_snap(
     x: f64,
     y: f64,
 ) -> Option<crate::winsnap::WindowSnap> {
-    let monitors = state.monitors.lock().unwrap();
-    let m = monitors.iter().find(|m| m.id == monitor_id)?;
-    let sf = m.scale_factor as f64;
-    // monitor 原点在 Windows 上是物理像素（见 MonitorShot::logical_origin）
-    let mut snap = crate::winsnap::snap_at(x, y, m.x as f64, m.y as f64, sf)?;
-    // 窗口可能跨屏：钳进当前显示器（浮层逻辑坐标以本显示器左上为原点）
-    let lw = m.width as f64 / sf;
-    let lh = m.height as f64 / sf;
-    crate::winsnap::clamp_to_monitor(&mut snap, 0.0, 0.0, lw, lh);
-    // 只在"吸附目标变了"时打日志：前端 ~15fps 调用，每次都打会淹没日志
+    // 只在"吸附结果变了"时打日志（含变成 none）：前端 ~15fps 调用，
+    // 每次都打会淹没日志；但只记"找到了"又分不清"没调用"和"没命中"。
+    static LAST: std::sync::Mutex<Option<Option<String>>> = std::sync::Mutex::new(None);
+    let snap = (|| {
+        let monitors = state.monitors.lock().unwrap();
+        let m = monitors.iter().find(|m| m.id == monitor_id)?;
+        let sf = m.scale_factor as f64;
+        // monitor 原点在 Windows 上是物理像素（见 MonitorShot::logical_origin）
+        let mut s = crate::winsnap::snap_at(x, y, m.x as f64, m.y as f64, sf)?;
+        // 窗口可能跨屏：钳进当前显示器（浮层逻辑坐标以本显示器左上为原点）
+        let lw = m.width as f64 / sf;
+        let lh = m.height as f64 / sf;
+        crate::winsnap::clamp_to_monitor(&mut s, 0.0, 0.0, lw, lh);
+        Some(s)
+    })();
     {
-        static LAST: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+        let cur = snap.as_ref().map(|s| s.title.clone());
         let mut last = LAST.lock().unwrap();
-        if last.as_deref() != Some(snap.title.as_str()) {
-            crate::logln!(
-                "snap target: {:?} {}x{} at ({}, {})",
-                snap.title,
-                snap.w.round(),
-                snap.h.round(),
-                snap.x.round(),
-                snap.y.round()
-            );
-            *last = Some(snap.title.clone());
+        let changed = match last.as_ref() {
+            None => true,
+            Some(prev) => prev != &cur,
+        };
+        if changed {
+            match (&cur, &snap) {
+                (Some(t), Some(s)) => crate::logln!(
+                    "snap target: {t:?} {}x{} at ({}, {})",
+                    s.w.round(),
+                    s.h.round(),
+                    s.x.round(),
+                    s.y.round()
+                ),
+                _ => crate::logln!("snap target: none (cursor={x:.0},{y:.0})"),
+            }
+            *last = Some(cur);
         }
     }
-    Some(snap)
+    snap
 }
 
 /// 关闭 OCR 结果窗（内容保留，下次打开还在）。

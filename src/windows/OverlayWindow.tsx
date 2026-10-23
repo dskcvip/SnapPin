@@ -271,6 +271,8 @@ export function OverlayWindow() {
    *  限到 ~15fps；慢响应回来时若已有更新的请求则丢弃。 */
   const snapAtRef = useRef(0)
   const snapSeqRef = useRef(0)
+  /** 吸附查询失败只记一次日志（避免 15fps 刷屏） */
+  const snapErrLogged = useRef(false)
   /** 锚点缩放进行中：记下拖的是哪条边、起始矩形、按下时的指针位置。 */
   const resizeRef = useRef<{
     edge: HandleEdge
@@ -803,7 +805,12 @@ export function OverlayWindow() {
         .then((w) => {
           if (seq === snapSeqRef.current) setHoverWin(w)
         })
-        .catch(() => {
+        .catch((e) => {
+          // 首次失败才记日志：15fps 调用，失败刷屏会淹没别的线索
+          if (!snapErrLogged.current) {
+            snapErrLogged.current = true
+            uiLog(`window_snap failed: ${String(e)}`)
+          }
           if (seq === snapSeqRef.current) setHoverWin(null)
         })
     },

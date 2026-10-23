@@ -1,11 +1,14 @@
 //! 窗口吸附（Windows）：光标悬停时找出下方的**别人家**顶层窗口，
 //! 供浮层高亮 + 单击选中整窗。
 //!
-//! 为什么需要它：截图浮层是全屏置顶窗口，`WindowFromPoint` 只会返回浮层自己
-//! （甚至它的 WebView2 子窗），拿不到背后的窗口。所以要：
-//! 1. 先归到顶层（`GetAncestor(GA_ROOT)`）
-//! 2. 是自己的/不可见的 → 沿 z 序往下走（`GetWindow(GW_HWNDPREV)`）
-//! 3. 找到第一个可见、矩形包含该点的窗口即命中
+//! 为什么不能用 `WindowFromPoint`：截图浮层是全屏置顶窗口，它自己盖在最上面，
+//! `WindowFromPoint` 只会返回浮层（或它的 WebView2 子窗），永远拿不到背后的窗口。
+//!
+//! 也不用 `GetWindow(GW_HWNDNEXT)` 逐层下探：topmost 窗口用它会困在置顶带里
+//! （文档：起始窗口是 topmost 时返回的也是 topmost），走到带尾就断了。
+//!
+//! 正确做法：`EnumWindows` 本身就按 **z 序（最上层在前）** 枚举所有顶层窗口，
+//! 从上往下挑第一个"不是我们的、可见的、未 cloaked、矩形包含该点"的窗口。
 //!
 //! 参考行为：QQ 截图 / 微信截图 / Shottr 的"悬停识窗、单击选中"。
 
@@ -38,19 +41,15 @@ struct RECT {
     bottom: i32,
 }
 
-const GA_ROOT: u32 = 2;
-const GW_HWNDPREV: u32 = 3;
-
 // 全部走 extern "system" 直接 FFI，不为几个函数引 windows-sys 依赖。
 // HWND 在 64 位下是指针宽度的不透明句柄，用 isize 承载。
 extern "system" {
-    fn WindowFromPoint(pt: POINT) -> isize;
-    fn GetAncestor(hwnd: isize, flags: u32) -> isize;
-    fn GetWindow(hwnd: isize, cmd: u32) -> isize;
+    fn EnumWindows(cb: Option<unsafe extern "system" fn(isize, isize) -> i32>, lparam: isize) -> i32;
     fn GetWindowThreadProcessId(hwnd: isize, pid: *mut u32) -> u32;
     fn IsWindowVisible(hwnd: isize) -> i32;
     fn GetWindowRect(hwnd: isize, rect: *mut RECT) -> i32;
     fn GetWindowTextW(hwnd: isize, text: *mut u16, count: i32) -> i32;
+    fn GetWindowLongW(hwnd: isize, index: i32) -> i32;
     fn DwmGetWindowAttribute(hwnd: isize, attr: u32, pv: *mut core::ffi::c_void, cb: u32) -> i32;
 }
 
@@ -58,6 +57,12 @@ extern "system" {
 /// 返回**视觉可见**的窗口边界。`GetWindowRect` 会把 Win10+ 的窗口阴影
 /// （左右各约 8px 透明边）算进去，直接用来框选会多带一圈空白。
 const DWMWA_EXTENDED_FRAME_BOUNDS: u32 = 9;
+/// `DWMWA_CLOAKED`：UWP/虚拟桌面切换后窗口仍然 IsWindowVisible=true 但不可见，
+/// 必须排掉，否则会吸附到一个"看不见的"窗口上。
+const DWMWA_CLOAKED: u32 = 14;
+const GWL_EXSTYLE: i32 = -20;
+const WS_EX_TRANSPARENT: i32 = 0x0000_0020;
+const WS_EX_NOACTIVATE: i32 = 0x0800_0000;
 
 fn visual_rect(hwnd: isize) -> RECT {
     let mut r = RECT::default();
@@ -108,34 +113,61 @@ fn contains(r: &RECT, pt: POINT) -> bool {
     pt.x >= r.left && pt.x < r.right && pt.y >= r.top && pt.y < r.bottom
 }
 
+/// 点穿透 / 不激活的窗口（悬浮工具条之类）不该被吸附
+fn is_click_through(hwnd: isize) -> bool {
+    let ex = unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) };
+    ex & WS_EX_TRANSPARENT != 0 || ex & WS_EX_NOACTIVATE != 0
+}
+
+fn is_cloaked(hwnd: isize) -> bool {
+    let mut cloaked: u32 = 0;
+    let hr = unsafe {
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAKED,
+            &mut cloaked as *mut u32 as *mut core::ffi::c_void,
+            std::mem::size_of::<u32>() as u32,
+        )
+    };
+    hr == 0 && cloaked != 0
+}
+
+struct Scan {
+    pt: POINT,
+    found: isize,
+}
+
+unsafe extern "system" fn scan_cb(hwnd: isize, lparam: isize) -> i32 {
+    let scan = &mut *(lparam as *mut Scan);
+    if scan.found != 0 {
+        return 0; // 已找到，停止枚举
+    }
+    if is_own(hwnd) || IsWindowVisible(hwnd) == 0 || is_click_through(hwnd) || is_cloaked(hwnd) {
+        return 1;
+    }
+    let r = visual_rect(hwnd);
+    // 太小的是拖动把手/tooltip 之类，吸附它没有意义
+    if r.right - r.left < 12 || r.bottom - r.top < 12 {
+        return 1;
+    }
+    if contains(&r, scan.pt) {
+        scan.found = hwnd;
+        return 0;
+    }
+    1
+}
+
 /// 找光标处应吸附的顶层窗口；没有（光标下只有我们自己的窗口）返回 None。
 fn window_at_point(pt: POINT) -> Option<isize> {
-    let mut h = unsafe { WindowFromPoint(pt) };
-    if h == 0 {
-        return None;
+    let mut scan = Scan { pt, found: 0 };
+    unsafe {
+        EnumWindows(Some(scan_cb), &mut scan as *mut Scan as isize);
     }
-    // WebView2 子窗 / 控件 → 归到顶层窗口
-    h = unsafe { GetAncestor(h, GA_ROOT) };
-    let mut guard = 0;
-    while h != 0 && guard < 128 {
-        guard += 1;
-        // 自己的窗口一律跳过（沿 z 序继续往下找）
-        if is_own(h) || unsafe { IsWindowVisible(h) } == 0 {
-            h = unsafe { GetWindow(h, GW_HWNDPREV) };
-            continue;
-        }
-        let r = rect_of(h);
-        // z 序里上方的窗口可能不含该点（比如在另一块屏上），继续往下
-        if r.right - r.left < 8 || r.bottom - r.top < 8 {
-            h = unsafe { GetWindow(h, GW_HWNDPREV) };
-            continue;
-        }
-        if contains(&r, pt) {
-            return Some(h);
-        }
-        h = unsafe { GetWindow(h, GW_HWNDPREV) };
+    if scan.found != 0 {
+        Some(scan.found)
+    } else {
+        None
     }
-    None
 }
 
 /// 查询吸附窗口。`x/y` 是浮层内的逻辑坐标，`mon_x/mon_y/sf` 是当前显示器

@@ -29,6 +29,8 @@ const MAG_SIZE = 156
 const MAG_ZOOM = 4
 /** 底部色条高度（CSS px）。 */
 const MAG_FOOT = 26
+/** 顶部操作提示条高度（CSS px）：显示「Esc 退出截图」 */
+const MAG_ESC = 22
 /** 气泡与光标的间距（CSS px）。 */
 const MAG_GAP = 16
 
@@ -90,14 +92,22 @@ export function DragMagnifier({
   }, [cursor, source, scaleFactor])
 
   // 位置：默认在光标右下；贴近右/下边缘时翻到另一侧
+  // 气泡总高 = 提示条 + 取景框 + 色条，翻转判定必须算上提示条，
+  // 否则贴下边缘时多出的 22px 会被裁掉
+  const magH = MAG_SIZE + MAG_FOOT + MAG_ESC
   const flipX = cursor.x + MAG_GAP + MAG_SIZE + 2 > window.innerWidth
-  const flipY = cursor.y + MAG_GAP + MAG_SIZE + MAG_FOOT + 2 > window.innerHeight
+  const flipY = cursor.y + MAG_GAP + magH + 2 > window.innerHeight
   const left = flipX ? cursor.x - MAG_GAP - MAG_SIZE - 2 : cursor.x + MAG_GAP
-  const top = flipY ? cursor.y - MAG_GAP - MAG_SIZE - MAG_FOOT - 2 : cursor.y + MAG_GAP
+  const top = flipY ? cursor.y - MAG_GAP - magH - 2 : cursor.y + MAG_GAP
 
   return (
     <>
       <div className="drag-mag" style={{ left, top }}>
+        {/* 上边的操作提示：截图阶段用户手就在键盘上，Esc 是最快的退出方式，
+            但菜单/按钮都还没出现，不给提示很难被发现（用户明确要求） */}
+        <div className="drag-mag-esc">
+          <kbd>Esc</kbd> 退出截图
+        </div>
         <div className="drag-mag-view">
           <canvas ref={canvasRef} style={{ width: MAG_SIZE, height: MAG_SIZE }} />
         </div>
