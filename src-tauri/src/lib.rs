@@ -50,11 +50,61 @@ pub fn run() {
             match std::env::var("SNAPPIN_TEST_DOC_WINDOW").as_deref() {
                 Ok("ocr") => {
                     crate::logln!("test hook: spawn ocr_show on async runtime");
-                    let app_cb = app.clone();
-                    tauri::async_runtime::spawn(async move {
-                        let r = crate::commands::ocr_show(app_cb, Vec::new()).await;
-                        crate::logln!("test hook: ocr_show returned ok={:?}", r.is_ok());
-                    });
+                    // 视觉验收钩子：造一张测试原图 + 几行假识别结果，直接开窗，
+                    // 不用跑完整截图流程就能看双栏布局（左图右文）。
+                    {
+                        let state = app.state::<crate::state::AppState>();
+                        let mut img = match snappin_core_algo::RgbaBuffer::new(
+                            760,
+                            380,
+                            vec![255u8; 760 * 380 * 4],
+                        ) {
+                            Ok(b) => b,
+                            Err(e) => {
+                                crate::logln!("test hook: make test image failed: {e}");
+                                return;
+                            }
+                        };
+                        // 画几条深色"文字行"，让左栏看起来像张截图
+                        for row in 0..12 {
+                            let y = 30 + row * 28;
+                            for x in 40..(40 + 180 + row * 38) {
+                                for dy in 0..10 {
+                                    let idx = ((y + dy) as usize * 760 + x) * 4;
+                                    if idx + 3 < img.data.len() {
+                                        img.data[idx] = 30;
+                                        img.data[idx + 1] = 35;
+                                        img.data[idx + 2] = 42;
+                                    }
+                                }
+                            }
+                        }
+                        let path = snappin_core_platform::new_temp_png_path();
+                        if snappin_core_platform::save_png(&img, &path).is_ok() {
+                            *state.ocr_image.lock().unwrap() = Some(path.display().to_string());
+                        }
+                        *state.ocr_result.lock().unwrap() = (0..12)
+                            .map(|i| crate::commands::OcrLinePayload {
+                                text: format!(
+                                    "这是第 {} 行识别出来的文字，用来验证左图右文双栏布局。",
+                                    i + 1
+                                ),
+                                min_x: 0.0,
+                                min_y: i as f32 * 28.0,
+                                max_x: 700.0,
+                                max_y: i as f32 * 28.0 + 10.0,
+                                score: 0.98,
+                            })
+                            .collect();
+                        let fake_lines = state.ocr_result.lock().unwrap().clone();
+                        let app_cb = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            // 直接把假数据传给 ocr_show（它会写进 state），
+                            // 不要再先写 state——否则被空 vec 覆盖成"没有识别结果"。
+                            let r = crate::commands::ocr_show(app_cb, fake_lines).await;
+                            crate::logln!("test hook: ocr_show returned ok={:?}", r.is_ok());
+                        });
+                    }
                 }
                 Ok("settings") => {
                     crate::logln!("test hook: spawn open_settings_window on async runtime");

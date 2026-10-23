@@ -417,8 +417,14 @@ export const appInfo = (): Promise<AppInfo> => invoke('app_info')
 export const ocrShow = (lines: OcrLine[]): Promise<void> =>
   invoke('ocr_show', { lines })
 
+/** `ocr_result` 的返回体：识别行 + 原图路径（结果窗左栏显示用）。 */
+export interface OcrPayload {
+  lines: OcrLine[]
+  image: string | null
+}
+
 /** OCR 结果窗内容（挂载时 / 收到 ocr-open 时调用）。 */
-export const ocrResult = (): Promise<OcrLine[]> => invoke('ocr_result')
+export const ocrResult = (): Promise<OcrPayload> => invoke('ocr_result')
 
 /** 关闭 OCR 结果窗。 */
 export const ocrClose = (): Promise<void> => invoke('ocr_close')

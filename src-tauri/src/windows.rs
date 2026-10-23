@@ -716,7 +716,8 @@ fn show_doc_window(app: &AppHandle, label: &str, title: &str, w: f64, h: f64) ->
 
 /// OCR 结果窗（单例）。
 pub fn show_ocr_window(app: &AppHandle) -> Result<(), String> {
-    show_doc_window(app, OCR_LABEL, "SnapPin 文字识别", 560.0, 680.0)
+    // 左图右文双栏：比单栏时宽不少（原 560）。高也放到 700，左栏看图更舒服。
+    show_doc_window(app, OCR_LABEL, "SnapPin 文字识别", 880.0, 700.0)
 }
 
 /// 翻译窗（单例）。

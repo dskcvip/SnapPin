@@ -106,65 +106,125 @@
   color: #c0392b;
 }
 
-.ocr-lines {
-  display: flex;
-  flex-direction: column;
-}
-
-.ocr-line {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 7px 8px;
-  border-radius: 8px;
-  transition: background 0.12s ease;
-}
-
-.ocr-line:hover {
-  background: #f7f8fa;
-}
-
-.ocr-idx {
-  flex: none;
-  width: 20px;
-  padding-top: 1px;
-  text-align: right;
-  font-size: 11px;
-  color: #b6bcc7;
-  font-variant-numeric: tabular-nums;
-  /* 序号不参与选择：用户框选整段时不会把行号一起选走 */
-  user-select: none;
-}
-
-.ocr-text {
+/* ---------------- OCR 双栏：左原图 / 右文本（对标参考图） ----------------
+   左栏给图（object-fit contain，永远完整可见），右栏给人选字。
+   中间一条 1px 分隔线；左栏底色比右栏暗一档，层次分明。 */
+.ocr-panes {
   flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 42% 1fr;
+}
+
+.ocr-img-pane {
   min-width: 0;
-  line-height: 1.65;
-  white-space: pre-wrap;
-  word-break: break-word;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
+  padding: 12px;
+  background: #f4f5f7;
+  border-right: 1px solid #eceef1;
+}
+
+.ocr-img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  /* 原图有小 Transparency/噪点边缘时更清晰 */
+  image-rendering: auto;
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.12);
+  border-radius: 4px;
+  background: #fff;
+  /* 左栏是图不是文字：别让拖拽时选中图片 */
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.ocr-text-pane {
+  min-width: 0;
+  overflow-y: auto;
+  padding: 14px 18px;
+}
+
+/* ---------------- OCR 正文：整篇可选纯文本 ----------------
+   对标参考截图：正文没有任何行号/按钮杂质，一行一个块级元素，
+   元素里只有文字，浏览器原生框选跨行连续。 */
+.ocr-text-area {
+  user-select: text;
+  -webkit-user-select: text;
   cursor: text;
 }
 
-.ocr-copy {
+.ocr-para {
+  /* 空行也占位：维持原文版面（识别结果里常见空行分段） */
+  min-height: 1.75em;
+  line-height: 1.75;
+  /* 行内连续空格按原文保留；长串（URL 等）仍要能断行 */
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ---------------- 纯提示底栏（翻译窗用） ----------------
+   OCR 窗用上面的 .tw-footbar（带图标按钮）；翻译窗只要一行提示。 */
+
+.tw-foot {
   flex: none;
-  align-self: center;
-  padding: 2px 8px;
-  border-radius: 6px;
+  padding: 9px 16px;
+  border-top: 1px solid #eceef1;
   font-size: 11px;
   color: #9aa0ab;
-  opacity: 0;
-  transition:
-    opacity 0.12s ease,
-    background 0.12s ease;
 }
 
-.ocr-line:hover .ocr-copy {
-  opacity: 1;
+/* ---------------- 底栏：图标按钮组（参考图同款） ---------------- */
+
+.tw-footbar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border-top: 1px solid #eceef1;
+  background: #fafbfc;
 }
 
-.ocr-copy:hover {
-  background: #eceef1;
-  color: #1f2329;
+.tw-hint {
+  font-size: 11px;
+  color: #9aa0ab;
+}
+
+.tw-foot-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* 图标在上、文字在下——和参考图底部那排按钮一致 */
+.tw-act {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  min-width: 58px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  font-size: 11px;
+  color: #4e5566;
+  transition: background 0.12s ease;
+}
+
+.tw-act:hover {
+  background: #eef0f3;
+}
+
+.tw-act:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.tw-act:disabled:hover {
+  background: transparent;
 }
 
 /* ---------------- 翻译窗：左右分栏 ---------------- */
@@ -243,14 +303,4 @@
   to {
     transform: rotate(360deg);
   }
-}
-
-/* ---------------- 底栏 ---------------- */
-
-.tw-foot {
-  flex: none;
-  padding: 9px 16px;
-  border-top: 1px solid #eceef1;
-  font-size: 11px;
-  color: #9aa0ab;
 }

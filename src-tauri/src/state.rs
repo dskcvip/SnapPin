@@ -166,6 +166,9 @@ pub struct AppState {    /// 当前配置（磁盘 config.json 的内存镜像�
     /// OCR 结果窗内容（最近一次识别）。窗口是单例，前端挂载/再次打开时
     /// 用 `ocr_result` 取；重复识别走 `ocr-open` 事件通知已存在的窗口重取。
     pub ocr_result: Mutex<Vec<crate::commands::OcrLinePayload>>,
+    /// 最近一次识别的**原图**（裁剪后 PNG 的本地路径，供结果窗左栏显示）。
+    /// 与 `ocr_result` 同批次写入；None = 还没有识别过。
+    pub ocr_image: Mutex<Option<String>>,
     /// 翻译窗状态（原文 / 译文 / 错误 / 进行中）。
     /// 翻译是秒级网络操作，放阻塞线程里跑，结果写这里 + 发 `trans-update`
     /// 事件，前端据此渲染，不轮询。
@@ -211,6 +214,7 @@ impl AppState {
             )),
             shortcut_failed: Mutex::new(Vec::new()),
             ocr_result: Mutex::new(Vec::new()),
+            ocr_image: Mutex::new(None),
             trans: Mutex::new(TransState::default()),
         }
     }

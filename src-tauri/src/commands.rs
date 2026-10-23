@@ -1024,6 +1024,17 @@ pub async fn ocr_recognize(
             (cropped, sf, algo_rect.x, algo_rect.y)
         };
         crate::logln!("ocr: cropped {}x{} in {}ms", cropped.width, cropped.height, t0.elapsed().as_millis());
+        // 裁剪图落盘：结果窗左栏要显示"原图"（对标参考图的左图右文布局）。
+        // 存路径不存字节——前端走 asset 协议读，避免大 base64 过 IPC。
+        {
+            let path = snappin_core_platform::new_temp_png_path();
+            match snappin_core_platform::save_png(&cropped, &path) {
+                Ok(()) => {
+                    *state.ocr_image.lock().unwrap() = Some(path.display().to_string());
+                }
+                Err(e) => crate::logln!("ocr: save cropped image failed: {e}"),
+            }
+        }
 
         // 引擎懒加载：持锁加载，加载期间其它 OCR 请求排队等待
         let mut guard = state.ocr.lock().unwrap();
@@ -2483,10 +2494,22 @@ pub async fn ocr_show(app: AppHandle, lines: Vec<OcrLinePayload>) -> Result<(), 
     Ok(())
 }
 
-/// OCR 结果窗内容（前端挂载时 / 收到 ocr-open 时调用）。
+/// OCR 结果窗的一次完整内容：识别行 + 原图路径（左栏显示用）。
+#[derive(Clone, serde::Serialize)]
+pub struct OcrResultPayload {
+    pub lines: Vec<OcrLinePayload>,
+    /// 裁剪后 PNG 的绝对路径；None = 还没识别过
+    pub image: Option<String>,
+}
+
+/// 读取最近一次 OCR 结果（窗口挂载 / 收到 ocr-open 时调用）。
 #[tauri::command]
-pub fn ocr_result(app: AppHandle) -> Vec<OcrLinePayload> {
-    app.state::<AppState>().ocr_result.lock().unwrap().clone()
+pub fn ocr_result(app: AppHandle) -> OcrResultPayload {
+    // 先取句柄再分别 lock：`app.state()` 的临时 State 不能跨字段借用
+    let state = app.state::<AppState>();
+    let lines = state.ocr_result.lock().unwrap().clone();
+    let image = state.ocr_image.lock().unwrap().clone();
+    OcrResultPayload { lines, image }
 }
 
 /// 关闭 OCR 结果窗（内容保留，下次打开还在）。
