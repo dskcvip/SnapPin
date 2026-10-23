@@ -148,7 +148,6 @@ const MODEL_PRESETS: {
 const DEFAULT_CONFIG: AppConfig = {
   themeColor: '#12A5D8',
   ballSize: 56,
-  ballPosition: null,
   shortcutCapture: 'Ctrl+1',
   shortcutPinClipboard: 'Ctrl+2',
   saveDir: null,

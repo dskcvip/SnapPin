@@ -54,10 +54,6 @@ pub(crate) const WEBVIEW_GUARD: &str = r#"
 /// 取 24 时窗口半边长 = 28 + 24 = 52 ≥ 50.3，静止与 hover 都不裁。
 const BALL_MARGIN: f64 = 24.0;
 
-/// 旧版留白（10px）。仅用于把历史配置里"窗口左上角"换算成球心，
-/// 避免窗口变大后悬浮球在屏幕上平移 14px。
-const BALL_MARGIN_LEGACY: f64 = 10.0;
-
 /// 贴图窗口相对图片的留白（逻辑像素）。
 /// 图片有外投影 box-shadow，窗口必须比图片大一圈，否则阴影被窗口边缘裁掉。
 const PIN_MARGIN: f64 = 10.0;
@@ -108,109 +104,63 @@ pub fn ensure_ball_window(app: &AppHandle, cfg: &AppConfig) -> tauri::Result<()>
         window.is_minimized()
     );
 
-    // 位置是**球心**（物理像素）：窗口留白变化时球不会在屏幕上平移。
-    // 历史配置存的是窗口左上角（旧留白 10px），这里换算一次。
+    // 位置：**固定主屏右上角**（用户明确要求：每次启动都在主屏右上部）。
     //
-    // 两个坑：
+    // 为什么不记忆位置了：球允许在会话内拖动，但持久化位置踩过一堆坑——
+    // 拔副屏/改分辨率后旧位置落到屏幕外（用户看到"球丢了"）、位置存到副屏
+    // 用户在主屏找不到。固定位 + 允许会话内拖动，是截图工具最稳的形态
+    // （PixPin/Shottr 默认也都是可预期的固定位）。
+    //
+    // 两个坑仍在：
     // 1) Windows 有最小跟踪宽度（实测 136px），小于它的窗口会被**加宽**成非正方形，
-    //    所以半宽/半高必须按实际 inner_size 分别取，否则球心横向偏 (实宽-目标宽)/2。
-    // 2) 这次"加宽 + 重新放置"发生在 build() 之后，紧接着的 set_position 会被它覆盖
-    //    （现象：球固定跳回主屏中部）。所以等窗口真正 show 完成后，再按最终尺寸定位一次。
-    //
-    // 3) **显示器变少**（拔了副屏/改了分辨率）时，旧球心可能落在已经不存在的
-    //    屏幕上——窗口建得出来但用户看不见，表现为"悬浮球丢了"。
-    //    因此放置前先把球心钳制到当前虚拟桌面内（留 80px 余量防贴边）。
-    if let Some(p) = cfg.ball_position {
-        let sf = window.scale_factor().unwrap_or(1.0);
-        let (mut cx, mut cy) = if cfg.ball_pos_center {
-            (p.x, p.y)
-        } else {
-            let legacy_half = (size + BALL_MARGIN_LEGACY * 2.0) * sf / 2.0;
-            (p.x + legacy_half, p.y + legacy_half)
-        };
-        // 显示器变少/分辨率变化：旧球心可能已在虚拟桌面之外，钳回可见范围
-        if let Some((vx, vy, vw, vh)) = virtual_desktop_bounds(app) {
-            let margin = 80.0;
-            cx = cx.clamp(vx + margin, (vx + vw - margin).max(vx + margin));
-            cy = cy.clamp(vy + margin, (vy + vh - margin).max(vy + margin));
-            if (cx - p.x).abs() > 1.0 || (cy - p.y).abs() > 1.0 {
-                eprintln!(
-                    "[snappin] ball center ({},{}) outside desktop, clamped to ({},{})",
-                    p.x, p.y, cx, cy
-                );
-            }
+    //    所以半宽/半高必须按实际 inner_size 分别取，不能假设正方形。
+    // 2) "加宽 + 重新放置"发生在 build() 之后，紧接着的 set_position 可能被它覆盖
+    //    （现象：球跳回主屏中部）。所以分几拍再落一次，最后一拍为准。
+    place_ball_top_right(app, &window, "immediate");
+    // 线程要 'static：clone 一份 AppHandle 进去（不能借 app）
+    let app_handle = app.clone();
+    let win_handle = window.clone();
+    std::thread::spawn(move || {
+        for (delay, tag) in [(250u64, "t+250"), (900, "t+900")] {
+            std::thread::sleep(std::time::Duration::from_millis(delay));
+            place_ball_top_right(&app_handle, &win_handle, tag);
         }
-        place_ball_center(&window, cx, cy, "immediate");
-
-        let win_handle = window.clone();
-        std::thread::spawn(move || {
-            // 窗口从 build() 到真正 show 之间会被系统重放置（最小尺寸修正），
-            // 期间任何 set_position 都可能被覆盖，所以分几拍再落一次，最后一拍为准。
-            for (delay, tag) in [(250u64, "t+250"), (900, "t+900")] {
-                std::thread::sleep(std::time::Duration::from_millis(delay));
-                place_ball_center(&win_handle, cx, cy, tag);
-            }
-            // 最后一拍：再确保一次可见（防"窗口建好了但没显示"）
-            if let Some(w) = win_handle.get_webview_window(BALL_LABEL) {
-                let _ = w.show();
-            }
-        });
-    } else {
-        // 没有历史位置（首次运行）：放主屏左上角内缩 80px，并确保可见。
-        // 不放右上角——那里常被系统图标/通知占着，球会被误以为"没出来"。
-        if let Some(m) = app.primary_monitor().ok().flatten() {
-            let p = m.position();
-            let _ = window.set_position(PhysicalPosition::new(p.x + 80, p.y + 80));
+        // 最后一拍：再确保一次可见（防"窗口建好了但没显示"）
+        if let Some(w) = win_handle.get_webview_window(BALL_LABEL) {
+            let _ = w.show();
         }
-        let _ = window.show();
-        let _ = window.set_focus();
-    }
+    });
     Ok(())
 }
 
-/// 当前虚拟桌面的边界（物理像素）：(x, y, width, height)。
-/// 枚举不到显示器时返回 None——调用方应跳过钳制，不要瞎猜。
-fn virtual_desktop_bounds(app: &AppHandle) -> Option<(f64, f64, f64, f64)> {
-    let monitors = app.available_monitors().ok()?;
-    if monitors.is_empty() {
-        return None;
-    }
-    let mut min_x = i32::MAX;
-    let mut min_y = i32::MAX;
-    let mut max_x = i32::MIN;
-    let mut max_y = i32::MIN;
-    for m in &monitors {
-        let pos = m.position();
-        let size = m.size();
-        min_x = min_x.min(pos.x);
-        min_y = min_y.min(pos.y);
-        max_x = max_x.max(pos.x + size.width as i32);
-        max_y = max_y.max(pos.y + size.height as i32);
-    }
-    if min_x >= max_x || min_y >= max_y {
-        return None;
-    }
-    Some((
-        min_x as f64,
-        min_y as f64,
-        (max_x - min_x) as f64,
-        (max_y - min_y) as f64,
-    ))
-}
 
-/// 按球心放置悬浮球窗口（内部按实际 inner_size 取半宽半高）。
-fn place_ball_center<R: tauri::Runtime>(
+/// 把悬浮球窗口放到**主屏右上角**（内缩 16px）。
+///
+/// 用实际 inner_size 算右下角：Windows 会把窄窗加宽到最小跟踪尺寸，
+/// 用请求尺寸算会让球右侧超出屏幕或被裁。
+fn place_ball_top_right<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     window: &tauri::WebviewWindow<R>,
-    cx: f64,
-    cy: f64,
     tag: &str,
 ) {
+    let Some(monitor) = app.primary_monitor().ok().flatten() else {
+        eprintln!("[snappin] ball place ({tag}): no primary monitor");
+        return;
+    };
     let actual = window.inner_size().unwrap_or_default();
     if actual.width == 0 || actual.height == 0 {
         return;
     }
-    let nx = (cx - actual.width as f64 / 2.0).round() as i32;
-    let ny = (cy - actual.height as f64 / 2.0).round() as i32;
+    const MARGIN: i32 = 16;
+    let pos = monitor.position();
+    let msize = monitor.size();
+    // 目标位：右上角内缩 MARGIN。**再整体钳进屏幕**——屏幕比窗口还窄的
+    // pathological 情况（超小屏 / 极端 DPI）下，理想位会算成负数，球就飞出
+    // 屏幕了。钳完之后任何分辨率下球都完整可见（那种情况下退化为贴左/贴上）。
+    let nx = (pos.x + msize.width as i32 - actual.width as i32 - MARGIN)
+        .clamp(pos.x, (pos.x + msize.width as i32 - actual.width as i32).max(pos.x));
+    let ny = (pos.y + MARGIN)
+        .clamp(pos.y, (pos.y + msize.height as i32 - actual.height as i32).max(pos.y));
     if let Err(e) = window.set_position(PhysicalPosition::new(nx, ny)) {
         eprintln!("[snappin] ball position ({tag}) failed: {e}");
         return;
@@ -220,7 +170,7 @@ fn place_ball_center<R: tauri::Runtime>(
         .map(|p| format!("({},{})", p.x, p.y))
         .unwrap_or_else(|_| "?".into());
     eprintln!(
-        "[snappin] ball positioned ({tag}): want=({nx},{ny}) got={got} center=({cx:.0},{cy:.0}) size={}x{}",
+        "[snappin] ball placed top-right ({tag}): want=({nx},{ny}) got={got} size={}x{}",
         actual.width, actual.height
     );
 }

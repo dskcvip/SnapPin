@@ -212,42 +212,9 @@ pub fn run() {
             // 悬浮球移动后持久化位置（节流：位移超过 1px 才写盘）
             // 保存**球心**（窗口左上角 + 半边长）：窗口留白随阴影需求变化，
             // 若存左上角，改留白后球会在屏幕上整体平移。
-            if let Some(ball) = handle.get_webview_window(windows::BALL_LABEL) {
-                // Windows 会给窗口加最小宽度（实测 136x39），宽高可能不等，
-                // 所以半宽半高要分别取，不能假设正方形。
-                let (half_w, half_h) = ball
-                    .inner_size()
-                    .map(|s| (s.width as f64 / 2.0, s.height as f64 / 2.0))
-                    .unwrap_or((0.0, 0.0));
-                let persist_handle = handle.clone();
-                ball.on_window_event(move |event| {
-                    if let tauri::WindowEvent::Moved(pos) = event {
-                        let state = persist_handle.state::<AppState>();
-                        let mut guard = state.config.lock().unwrap();
-                        let center = config::BallPosition {
-                            x: pos.x as f64 + half_w,
-                            y: pos.y as f64 + half_h,
-                        };
-                        // ball_pos_center=false 说明是旧配置（存的是左上角），必须改写一次
-                        let changed = !guard.ball_pos_center
-                            || match guard.ball_position {
-                                Some(p) => {
-                                    (p.x - center.x).abs() > 1.0 || (p.y - center.y).abs() > 1.0
-                                }
-                                None => true,
-                            };
-                        if changed {
-                            guard.ball_position = Some(center);
-                            guard.ball_pos_center = true;
-                            let snapshot = guard.clone();
-                            drop(guard);
-                            if let Ok(dir) = persist_handle.path().app_config_dir() {
-                                let _ = config::save(&dir, &snapshot);
-                            }
-                        }
-                    }
-                });
-            }
+            // 悬浮球位置不再持久化：固定主屏右上角启动（见 ensure_ball_window）。
+            // 会话内仍可拖动，但下次启动回到默认位——避免"球被拖到副屏/
+            // 拔线后位置落到屏幕外"导致的"球丢了"。
 
             // 失败清单同时存进状态：自绘菜单顶部据此显示告警行
             {

@@ -86,7 +86,6 @@ export interface PinContext {
 export interface AppConfig {
   themeColor: string
   ballSize: number
-  ballPosition: { x: number; y: number } | null
   shortcutCapture: string
   shortcutPinClipboard: string
   saveDir: string | null

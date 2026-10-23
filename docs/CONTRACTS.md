@@ -91,8 +91,7 @@ type Rgba = [number, number, number, number]   // 0-255
 interface AppConfig {
   themeColor: string
   ballSize: number
-  ballPosition: { x: number; y: number } | null   // 物理像素
-  shortcutCapture: string        // 展示用；实际快捷键为内置常量（M7 开放自定义）
+  shortcutCapture: string        // 全局快捷键，可改（设置窗 → 快捷键），改后热重注册
   shortcutPinClipboard: string
   saveDir: string | null
 }
