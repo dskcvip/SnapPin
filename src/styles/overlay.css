@@ -46,7 +46,8 @@
    否则鼠标一进去就"卡"在高亮框上，选区拖不动。 */
 .win-snap {
   position: absolute;
-  border: 1px solid var(--accent, #12a5d8);
+  /* 2px：1px 在高分屏/浅色背景上几乎看不见（用户反馈"太细了"） */
+  border: 2px solid var(--accent, #12a5d8);
   border-radius: 2px;
   background: rgba(18, 165, 216, 0.08);
   box-shadow:
@@ -370,7 +371,8 @@
 
 .sel {
   position: absolute;
-  border: 1px solid var(--brand);
+  /* 2px：与吸附高亮一致，1px 在浅色截图上不够醒目（用户反馈） */
+  border: 2px solid var(--brand);
   box-shadow:
     0 0 0 9999px rgba(15, 23, 42, 0.45),
     inset 0 0 0 1px rgba(255, 255, 255, 0.35);
@@ -386,9 +388,11 @@
 
 .sel-size {
   position: absolute;
+  /* 偏到中线右侧：正上方是上边中点锚点，居中会把它压住（用户反馈
+     "竖边中心没有锚点"，其实就是被标签盖了看不出来）。 */
   left: 50%;
+  margin-left: 14px;
   top: -26px;
-  transform: translateX(-50%);
   background: rgba(15, 23, 42, 0.82);
   color: #fff;
   font-size: 12px;
@@ -431,45 +435,46 @@
   cursor: nwse-resize;
 }
 
-/* 四条边的中点热区：透明细条，只有抓手和光标（不遮挡画面） */
+/* 四条边的中点锚点：**可见的小短条**（此前做成透明热区，用户反馈
+   "左右两个竖边中心位置没有锚点"——看不见就等于没有）。 */
 .handle.t,
 .handle.b,
 .handle.l,
 .handle.r {
-  background: transparent;
-  border: 0;
-  border-radius: 0;
+  background: #fff;
+  border: 1px solid var(--brand);
+  border-radius: 1px;
 }
 .handle.t {
-  left: 8px;
-  right: 8px;
-  top: -4px;
-  width: auto;
-  height: 10px;
+  left: 50%;
+  margin-left: -6px;
+  top: -5px;
+  width: 12px;
+  height: 8px;
   cursor: ns-resize;
 }
 .handle.b {
-  left: 8px;
-  right: 8px;
-  bottom: -4px;
-  width: auto;
-  height: 10px;
+  left: 50%;
+  margin-left: -6px;
+  bottom: -5px;
+  width: 12px;
+  height: 8px;
   cursor: ns-resize;
 }
 .handle.l {
-  top: 8px;
-  bottom: 8px;
-  left: -4px;
-  width: 10px;
-  height: auto;
+  top: 50%;
+  margin-top: -6px;
+  left: -5px;
+  width: 8px;
+  height: 12px;
   cursor: ew-resize;
 }
 .handle.r {
-  top: 8px;
-  bottom: 8px;
-  right: -4px;
-  width: 10px;
-  height: auto;
+  top: 50%;
+  margin-top: -6px;
+  right: -5px;
+  width: 8px;
+  height: 12px;
   cursor: ew-resize;
 }
 
@@ -624,9 +629,11 @@
   /* 必须与 DragMagnifier.tsx 的 MAG_SIZE 一致 */
   width: 156px;
   border-radius: 10px;
-  background: rgba(15, 23, 42, 0.92);
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  box-shadow: 0 4px 16px rgba(15, 23, 42, 0.35);
+  /* 浅色气泡：对标参考图。原来是 rgba(15,23,42,.92) 的深色底，
+     上下两条黑边压在截图上非常突兀（用户反馈"太丑了"）。 */
+  background: #ffffff;
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  box-shadow: 0 4px 16px rgba(15, 23, 42, 0.18);
   overflow: hidden;
   pointer-events: none;
   user-select: none;
@@ -641,20 +648,22 @@
   gap: 4px;
   height: 22px;
   font-size: 11px;
-  color: rgba(255, 255, 255, 0.92);
-  background: rgba(255, 255, 255, 0.08);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  color: #4e5566;
+  background: #f7f8fa;
+  border-bottom: 1px solid rgba(15, 23, 42, 0.08);
   white-space: nowrap;
 }
 
 .drag-mag-esc kbd {
   padding: 0 4px;
   border-radius: 3px;
-  background: rgba(255, 255, 255, 0.18);
-  border: 1px solid rgba(255, 255, 255, 0.22);
+  background: #fff;
+  border: 1px solid rgba(15, 23, 42, 0.16);
+  box-shadow: 0 1px 0 rgba(15, 23, 42, 0.06);
   font-family: inherit;
   font-size: 10px;
   line-height: 14px;
+  color: #1f2329;
 }
 
 .drag-mag-view {
@@ -673,7 +682,9 @@
 .drag-mag-view::after {
   content: '';
   position: absolute;
-  background: rgba(255, 255, 255, 0.65);
+  /* 绿色十字：浅色气泡里白线看不见（放大内容本身多半是浅色底），
+     参考图也是绿线。 */
+  background: rgba(34, 197, 94, 0.9);
   pointer-events: none;
 }
 
@@ -699,17 +710,20 @@
   height: 26px;
   padding: 0 8px;
   font-size: 12px;
-  color: #fff;
+  color: #1f2329;
+  background: #f7f8fa;
+  border-top: 1px solid rgba(15, 23, 42, 0.08);
   white-space: nowrap;
 }
 
 .drag-mag-foot .pick-swatch {
   width: 16px;
   height: 16px;
+  border-color: rgba(15, 23, 42, 0.15);
 }
 
 .drag-mag-tip {
-  color: rgba(255, 255, 255, 0.62);
+  color: #8a919f;
 }
 
 /* "已复制 #XXXXXX"：贴在气泡下方（气泡翻到上方时贴其上） */
