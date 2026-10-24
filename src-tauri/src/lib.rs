@@ -286,6 +286,14 @@ pub fn run() {
                 }
             }
 
+            // 清理临时目录里的历史残留（截图裁剪图 / OCR 原图 / 贴图缩略图
+            // 都是 uuid 文件名，正常退出没人删，会一路攒）。只删 1 小时前的，
+            // 不碰另一实例正在用的文件。
+            let cleaned = snappin_core_platform::cleanup_old_temp_files();
+            if cleaned > 0 {
+                crate::logln!("[snappin] temp cleanup: removed {cleaned} stale file(s)");
+            }
+
             // 悬浮球窗口
             windows::ensure_ball_window(&handle, &cfg)?;
 

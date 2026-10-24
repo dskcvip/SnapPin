@@ -1026,7 +1026,12 @@ pub async fn ocr_recognize(
         crate::logln!("ocr: cropped {}x{} in {}ms", cropped.width, cropped.height, t0.elapsed().as_millis());
         // 裁剪图落盘：结果窗左栏要显示"原图"（对标参考图的左图右文布局）。
         // 存路径不存字节——前端走 asset 协议读，避免大 base64 过 IPC。
+        //
+        // 先把旧的清空再写：万一这次落盘失败，宁可左栏显示"没有原图"，
+        // 也不能留着**上一次**的图配**这一次**的识别文字（那样的错配
+        // 比空着更难发现）。
         {
+            *state.ocr_image.lock().unwrap() = None;
             let path = snappin_core_platform::new_temp_png_path();
             match snappin_core_platform::save_png(&cropped, &path) {
                 Ok(()) => {
@@ -1695,11 +1700,21 @@ pub fn hotkeys_resume(app: AppHandle) -> Result<(), String> {
     }
     let gs = app.global_shortcut();
     let mut errs: Vec<String> = Vec::new();
+    let mut failed_names: Vec<String> = Vec::new();
     if let Err(e) = gs.register(capture_sc) {
         errs.push(format!("{}: {e}", cfg.shortcut_capture));
+        failed_names.push("截图快捷键".to_string());
     }
     if let Err(e) = gs.register(pin_sc) {
         errs.push(format!("{}: {e}", cfg.shortcut_pin_clipboard));
+        failed_names.push("贴图快捷键".to_string());
+    }
+    // 挂起再恢复之间，键可能被别的程序抢走了（RegisterHotKey 先到先得）。
+    // 恢复失败必须让用户看得见：写进 shortcut_failed，自绘菜单顶部会显示告警
+    // ——否则表现为"改了个快捷键之后热键全没了"，用户完全找不到线索。
+    {
+        let state = app.state::<AppState>();
+        *state.shortcut_failed.lock().unwrap() = failed_names;
     }
     crate::logln!(
         "[snappin] hotkeys resumed: {} / {} {:?}",

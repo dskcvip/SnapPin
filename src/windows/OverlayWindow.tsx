@@ -1,5 +1,4 @@
-import { listen } from '@tauri-apps/api/event'
-import { emit } from '@tauri-apps/api/event'
+import { emit, listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import {
   useCallback,
@@ -959,8 +958,12 @@ export function OverlayWindow() {
     }
 
     if (d) return
-    // 光标压在工具条上：不识别窗口（否则高亮会跟着工具条乱跳）
-    if ((e.target as HTMLElement).closest('.shot-bar')) return
+    // 光标压在工具条上：不识别窗口，并把已有高亮收掉
+    // （否则高亮会"冻"在上一个窗口上，人却在点工具条，很出戏）
+    if ((e.target as HTMLElement).closest('.shot-bar')) {
+      setHoverWin(null)
+      return
+    }
 
     // 已有选区时**仍然识别窗口**：光标离开选区到别的窗口上要能高亮，
     // 单击即可换选目标。此前一句 `if (!rect)` 把查询整个挡掉了，导致

@@ -375,7 +375,38 @@ pub fn clipboard_get_image() -> Result<Option<RgbaBuffer>> {
     }
 }
 
+/// 清理临时目录里的历史残留文件，返回删除数量。
+///
+/// 截图裁剪图 / OCR 原图 / 贴图缩略图每次都会 `new_temp_png_path()` 生成一个
+/// uuid 文件名，正常退出时没人删 → `%TEMP%/snappin` 会一路攒下去
+/// （实测几天就有十几个）。启动时清一次，但**只删 1 小时前的**：
+/// 多实例抢单实例锁之前、或另一进程正在用的文件不能被误删。
+pub fn cleanup_old_temp_files() -> usize {
+    let dir = temp_shot_dir();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return 0;
+    };
+    let now = std::time::SystemTime::now();
+    let mut removed = 0usize;
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else { continue };
+        if !meta.is_file() {
+            continue;
+        }
+        let Ok(modified) = meta.modified() else {
+            continue;
+        };
+        let stale = now
+            .duration_since(modified)
+            .map(|age| age.as_secs() > 3600)
+            .unwrap_or(false);
+        if stale && std::fs::remove_file(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
 /// 生成一个新的临时 PNG 路径（不落盘）。
-pub fn new_temp_png_path() -> PathBuf {
-    temp_shot_dir().join(format!("snap-{}.png", uuid::Uuid::new_v4()))
+pub fn new_temp_png_path() -> PathBuf {    temp_shot_dir().join(format!("snap-{}.png", uuid::Uuid::new_v4()))
 }
