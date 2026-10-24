@@ -57,7 +57,7 @@ import {
   // ShareIcon,  // 分享按钮已按要求注释掉（见工具条处注释）
   SmartEraseIcon,
   SpotlightIcon,
-  // StickerIcon,  // 贴纸工具未开发，按钮已临时撤下（见工具条处注释）
+  StickerIcon,
   TextIcon,
   TranslateIcon,
   RedoIcon,
@@ -70,6 +70,7 @@ import {
   MOSAIC_BLOCKS,
   PRESET_COLORS,
   SPOTLIGHT_DIM,
+  STICKER_DEFAULT,
   TEXT_FONT_SIZE,
   ZOOM_LEVELS,
   isActionTool,
@@ -191,6 +192,8 @@ export function OverlayWindow() {
   const [actError, setActError] = useState<string | null>(null)
   // 标注状态
   const [shapes, setShapes] = useState<ShapeDraft[]>([])
+  /** 当前贴纸字形（调色板选中的那个，默认 ✅） */
+  const [stickerGlyph, setStickerGlyph] = useState<string>(STICKER_DEFAULT)
   /**
    * 重做栈：撤销时把被摘掉的形状压进来，重做时弹回 shapes。
    *
@@ -1140,6 +1143,7 @@ export function OverlayWindow() {
             naturalHeight={rect.h * sf}
             scaleFactor={sf}
             imageEl={imgRef.current}
+            bitmap={bitmap}
             tool={tool}
             color={color}
             width={width}
@@ -1148,6 +1152,7 @@ export function OverlayWindow() {
             spotlightDim={spotDim}
             eraserRadius={eraserRadius}
             zoomLevel={zoomLevel}
+            stickerGlyph={stickerGlyph}
             shapes={shapes}
             onShapesChange={setShapesFromLayer}
             onPickSample={onPickSample}
@@ -1246,16 +1251,14 @@ export function OverlayWindow() {
               >
                 <EllipseIcon />
               </button>
-              {/* 贴纸工具尚未开发：按用户要求先撤下，等做到这里再放开。
-                  对应 import 也一并注释（tsconfig 开了 noUnusedLocals）。
               <button
-                className="sbtn"
-                title="贴纸"
-                onClick={(e) => showHint('贴纸工具', e.currentTarget)}
+                data-tool="sticker"
+                className={`sbtn ${tool === 'sticker' ? 'active' : ''}`}
+                title="贴纸（先在属性条选一个 emoji，再点画面落点）"
+                onClick={() => pickTool('sticker')}
               >
                 <StickerIcon />
               </button>
-              */}
               <button
                 data-tool="arrow"
                 className={`sbtn ${tool === 'arrow' ? 'active' : ''}`}
@@ -1469,6 +1472,8 @@ export function OverlayWindow() {
                 onMosaicBlock={setMosaicBlock}
                 onEraserRadius={setEraserRadius}
                 onZoomLevel={setZoomLevel}
+                stickerGlyph={stickerGlyph}
+                onStickerGlyph={setStickerGlyph}
                 onTool={setTool}
               />
             </div>

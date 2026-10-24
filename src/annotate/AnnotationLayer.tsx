@@ -33,8 +33,17 @@ interface Props {
   naturalHeight: number
   /** DPI 缩放因子（物理/逻辑） */
   scaleFactor: number
-  /** 冻结图 <img> 元素（马赛克预览的像素来源） */
+  /** 冻结图 <img> 元素（**可能污染画布**，仅在位图未就绪时兜底） */
   imageEl: HTMLImageElement | null
+  /**
+   * 冻结图的 ImageBitmap（fetch → Blob → 解码）。
+   *
+   * 为什么必须单独传：`asset.localhost` 的 <img> 画进 canvas 会让画布
+   * **跨域污染**，`getImageData` 直接抛 SecurityError。而马赛克预览正是在
+   * 渲染路径里读像素 —— 抛在这个位置会把整棵 React 树卸掉（实测：一用
+   * 马赛克浮层就消失）。位图来自 Blob，读取合法。
+   */
+  bitmap: ImageBitmap | null
   /** null = 未选工具（选择态）：画布不拦截鼠标，可在选区内重新框选 */
   tool: AnnotateTool | null
   color: Rgba
@@ -48,6 +57,8 @@ interface Props {
   eraserRadius: number
   /** 放大镜倍数 */
   zoomLevel: number
+  /** 当前选中的贴纸字形（emoji）；tool=sticker 时单击画布贴它 */
+  stickerGlyph: string
   shapes: ShapeDraft[]
   onShapesChange: (shapes: ShapeDraft[]) => void
   /** 取色器：指针在选区内移动时持续回调（局部逻辑像素坐标）。
@@ -87,6 +98,7 @@ export function AnnotationLayer(props: Props) {
     naturalHeight,
     scaleFactor,
     imageEl,
+    bitmap,
     tool,
     color,
     width,
@@ -211,8 +223,8 @@ export function AnnotationLayer(props: Props) {
     ctx.setTransform(scaleFactor, 0, 0, scaleFactor, 0, 0)
     ctx.lineCap = 'round'
     ctx.lineJoin = 'round'
-    for (const s of shapes) drawShape(ctx, s, imageEl, scaleFactor)
-    if (draftRef.current) drawShape(ctx, draftRef.current, imageEl, scaleFactor)
+    for (const s of shapes) drawShape(ctx, s, imageEl, scaleFactor, bitmap)
+    if (draftRef.current) drawShape(ctx, draftRef.current, imageEl, scaleFactor, bitmap)
     if (actionRect) drawDashRect(ctx, actionRect)
     if (qrHighlights) drawQrHighlights(ctx, qrHighlights)
   })
@@ -254,6 +266,24 @@ export function AnnotationLayer(props: Props) {
       } else {
         startText(round2(p.x), round2(p.y))
       }
+      return
+    }
+    // 贴纸：单击落点贴一个 emoji。与序号同一套位图通道，同样按圆心落点。
+    if (tool === 'sticker') {
+      const r = rasterizeSticker(props.stickerGlyph, fontSize, props.scaleFactor)
+      if (!r) return
+      onShapesChange([
+        ...shapes,
+        {
+          type: 'bitmap',
+          x: round2(p.x - r.w / 2),
+          y: round2(p.y - r.h / 2),
+          w: round2(r.w),
+          h: round2(r.h),
+          png: r.png,
+          canvas: r.canvas,
+        },
+      ])
       return
     }
     // 序号：单击即在落点盖一个编号（编号 = 现有最大号 + 1，撤销后自动回填）。
@@ -402,7 +432,7 @@ export function AnnotationLayer(props: Props) {
       // 去抖：位移过小不记录（减小数据量与 IPC 体积）
       if (Math.abs(p.x - last[0]) < 0.75 && Math.abs(p.y - last[1]) < 0.75) return
       d.points.push([round2(p.x), round2(p.y)])
-      redraw(props, draftRef.current, canvasRef.current, imageEl)
+      redraw(props, draftRef.current, canvasRef.current, imageEl, bitmap)
       return
     }
     // 拖拽成形的（rect/ellipse/arrow/mosaic/spotlight/zoom/smartErase/watermark）
@@ -419,7 +449,7 @@ export function AnnotationLayer(props: Props) {
       d.w = Math.abs(cx - s0.x)
       d.h = Math.abs(cy - s0.y)
     }
-    redraw(props, d, canvasRef.current, imageEl)
+    redraw(props, d, canvasRef.current, imageEl, bitmap)
   }
 
   const onPointerUp = (e: ReactPointerEvent<HTMLCanvasElement>) => {
@@ -467,7 +497,7 @@ export function AnnotationLayer(props: Props) {
     } else if (d.w >= MIN_DRAG && d.h >= MIN_DRAG) {
       onShapesChange([...shapes, d])
     }
-    redraw(props, null, canvasRef.current, imageEl)
+    redraw(props, null, canvasRef.current, imageEl, bitmap)
   }
 
   return (
@@ -599,6 +629,7 @@ function redraw(
   draft: ShapeDraft | null,
   canvas: HTMLCanvasElement | null,
   imageEl: HTMLImageElement | null,
+  bitmap: ImageBitmap | null,
 ) {
   if (!canvas) return
   const ctx = canvas.getContext('2d')
@@ -608,8 +639,8 @@ function redraw(
   ctx.setTransform(props.scaleFactor, 0, 0, props.scaleFactor, 0, 0)
   ctx.lineCap = 'round'
   ctx.lineJoin = 'round'
-  for (const s of props.shapes) drawShape(ctx, s, imageEl, props.scaleFactor)
-  if (draft) drawShape(ctx, draft, imageEl, props.scaleFactor)
+  for (const s of props.shapes) drawShape(ctx, s, imageEl, props.scaleFactor, bitmap)
+  if (draft) drawShape(ctx, draft, imageEl, props.scaleFactor, bitmap)
 }
 
 function rgba(color: Rgba): string {
@@ -757,11 +788,49 @@ export function rasterizeBadge(
   return { canvas, png, w: cw / scale, h: cw / scale, padX: 0, padY: 0 }
 }
 
+/**
+ * 把贴纸字形（emoji）光栅化成位图（**物理像素**）。
+ *
+ * 与 `rasterizeText` 的区别：emoji 是彩色字形，**不能加粗**（彩色字体忽略
+ * font-weight，反而可能 fallback 到单色字形），所以字体串里不带 700；
+ * 也不用 measureText 的墨迹框（彩色 emoji 的 metrics 在部分平台是空的），
+ * 直接按字号给一块正方形画布、`center/middle` 居中。
+ *
+ * `anchor` 语义同 `rasterizeBadge`：调用方按**中心**落点。
+ */
+export function rasterizeSticker(glyph: string, fontSize: number, sf: number): TextRaster | null {
+  const scale = sf > 0 ? sf : 1
+  // 贴纸比同字号文字大一圈才像"贴纸"（文字 16px 时贴纸约 32px）
+  const px = Math.max(8, fontSize * scale * 2)
+  const side = Math.ceil(px * 1.3)
+
+  const canvas = document.createElement('canvas')
+  canvas.width = side
+  canvas.height = side
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return null
+
+  ctx.font = `${px}px ${TEXT_FONT_STACK}`
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  // 轻微的白色描边：深色截图（终端/代码）上没有它，彩色 emoji 边缘会糊住
+  ctx.lineWidth = Math.max(1, px * 0.04)
+  ctx.strokeStyle = 'rgba(255,255,255,0.9)'
+  ctx.strokeText(glyph, side / 2, side / 2)
+  ctx.fillText(glyph, side / 2, side / 2)
+
+  const url = canvas.toDataURL('image/png')
+  const png = url.indexOf(',') >= 0 ? url.slice(url.indexOf(',') + 1) : ''
+  if (!png) return null
+  return { canvas, png, w: side / scale, h: side / scale, padX: 0, padY: 0 }
+}
+
 export function drawShape(
   ctx: CanvasRenderingContext2D,
   s: ShapeDraft,
   imageEl: HTMLImageElement | null,
   sf: number,
+  bitmap?: ImageBitmap | null,
 ) {
   // 马赛克 / 位图 / 聚光灯 / 橡皮擦 / 水印 / 智能擦除没有描边色与线宽
   const hasStroke =
@@ -893,7 +962,7 @@ export function drawShape(
       }
       break
     case 'mosaic':
-      drawMosaicPreview(ctx, s, imageEl, sf)
+      drawMosaicPreview(ctx, s, bitmap ?? imageEl, sf)
       break
     case 'spotlight':
       drawSpotlightPreview(ctx, s, sf)
@@ -1010,10 +1079,11 @@ function drawArrow(
 function drawMosaicPreview(
   ctx: CanvasRenderingContext2D,
   s: Extract<ShapeDraft, { type: 'mosaic' }>,
-  imageEl: HTMLImageElement | null,
+  /** ImageBitmap（合法可读）或 <img>（可能污染画布） */
+  source: CanvasImageSource | null,
   sf: number,
 ) {
-  if (!imageEl || s.w <= 0 || s.h <= 0) return
+  if (!source || s.w <= 0 || s.h <= 0) return
   // 源坐标为物理像素（img 自然尺寸）
   const sx = Math.round(s.x * sf)
   const sy = Math.round(s.y * sf)
@@ -1028,8 +1098,16 @@ function drawMosaicPreview(
   // 1:1 抠出原图区域，不能缩放（缩放会插值，就不是原像素了）
   g.imageSmoothingEnabled = false
   g.clearRect(0, 0, sw, sh)
-  g.drawImage(imageEl, sx, sy, sw, sh, 0, 0, sw, sh)
-  const src = g.getImageData(0, 0, sw, sh).data
+  g.drawImage(source, sx, sy, sw, sh, 0, 0, sw, sh)
+  let src: Uint8ClampedArray
+  try {
+    src = g.getImageData(0, 0, sw, sh).data
+  } catch {
+    // 画布被污染（拿到了 <img> 而不是 ImageBitmap）：不画预览，但**绝不抛** ——
+    // 这个异常发生在渲染路径里，抛出去会把 React 根节点整个卸载掉
+    // （实测：一拖马赛克，浮层直接消失）。
+    return
+  }
 
   // 块边长为物理像素（与截图 DPI 无关，和 Rust 侧换算保持一致）
   const block = Math.max(2, Math.round(s.block * sf))

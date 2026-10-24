@@ -24,6 +24,7 @@ export type AnnotateTool =
   | 'spotlight'
   | 'text'
   | 'badge'
+  | 'sticker'
   | 'eraser'
   | 'watermark'
   | 'zoom'
@@ -149,6 +150,15 @@ export const TOOLS: ToolMeta[] = [
   { id: 'text', label: '文字', glyph: 'T', trajectory: false, defaultWidth: 16, kind: 'shape' },
   // 序号：单击落点盖一个编号圆点，与文字共用字号（决定圆直径）
   { id: 'badge', label: '序号', glyph: '①', trajectory: false, defaultWidth: 16, kind: 'shape' },
+  // 贴纸：单击落点贴一个 emoji（与序号共用位图通道，defaultWidth 也是字号）
+  {
+    id: 'sticker',
+    label: '贴纸',
+    glyph: '☺',
+    trajectory: false,
+    defaultWidth: 16,
+    kind: 'shape',
+  },
   // 橡皮擦是轨迹类；defaultWidth 记的是**擦除半径**（见 ERASER_RADIUS）
   {
     id: 'eraser',
@@ -275,3 +285,18 @@ export function toolMeta(id: AnnotateTool): ToolMeta {
 export function quantize(v: number): number {
   return Math.round(v * 100) / 100
 }
+
+/**
+ * 贴纸可选字形。
+ *
+ * 用 emoji 而不是图片素材：系统彩色字体（Segoe UI Emoji / Apple Color Emoji）
+ * 直接渲染，零素材文件、零网络请求，且天然支持任意尺寸不模糊。
+ * 渲染走 `Shape::Bitmap` 通道（与文字/序号同一条），核心层不用知道"贴纸"存在。
+ */
+export const STICKER_GLYPHS = [
+  '✅', '❌', '⚠️', '❓', '❗', '⭐', '❤️', '🔥',
+  '👍', '👎', '💡', '📌', '🎯', '🚀', '😀', '😡',
+] as const
+
+/** 默认贴纸（未选过时点画布贴这个） */
+export const STICKER_DEFAULT = STICKER_GLYPHS[0]

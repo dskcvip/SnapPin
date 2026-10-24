@@ -14,6 +14,7 @@ import {
   PRESET_COLORS,
   SPOTLIGHT_DIM,
   TEXT_FONT_SIZE,
+  STICKER_GLYPHS,
   ZOOM_LEVELS,
   type AnnotateTool,
   type Rgba,
@@ -38,6 +39,9 @@ interface Props {
   onMosaicBlock: (v: number) => void
   onEraserRadius: (v: number) => void
   onZoomLevel: (v: number) => void
+  /** 当前贴纸字形 */
+  stickerGlyph: string
+  onStickerGlyph: (g: string) => void
   /** 画笔 ↔ 荧光笔子模式切换 */
   onTool: (t: AnnotateTool) => void
 }
@@ -155,6 +159,34 @@ export function ToolProps(p: Props) {
   }
 
   // 水印与文字/序号共用"颜色 + 字号"（水印块由文字光栅化而来）
+  if (tool === 'sticker') {
+    return (
+      <div className="sb-sticker">
+        {/* 贴纸调色板：点一个就换当前字形，随后到画布上单击落点。
+            emoji 用系统彩色字体渲染，不需要任何素材文件。 */}
+        <div className="sb-stickers">
+          {STICKER_GLYPHS.map((g) => (
+            <button
+              key={g}
+              className={`sb-sticker-btn ${p.stickerGlyph === g ? 'on' : ''}`}
+              title={`贴纸 ${g}`}
+              onClick={() => p.onStickerGlyph(g)}
+            >
+              {g}
+            </button>
+          ))}
+        </div>
+        <Slider
+          title={`贴纸大小 ${p.fontSize * 2}px`}
+          min={10}
+          max={72}
+          value={p.fontSize}
+          suffix=""
+          onChange={p.onFontSize}
+        />
+      </div>
+    )
+  }
   const isTextLike = tool === 'text' || tool === 'badge' || tool === 'watermark'
 
   return (

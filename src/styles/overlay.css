@@ -1083,3 +1083,41 @@
   opacity: 0.55;
   cursor: default;
 }
+
+/* 贴纸调色板：16 个 emoji 排 8 列两行。
+   用系统彩色字体渲染，不需要图片素材；选中态给品牌色描边。 */
+.sb-sticker {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sb-stickers {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  gap: 2px;
+}
+
+.sb-sticker-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  font-size: 15px;
+  line-height: 1;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.sb-sticker-btn:hover {
+  background: rgba(15, 23, 42, 0.06);
+}
+
+.sb-sticker-btn.on {
+  border-color: var(--brand);
+  background: rgba(18, 165, 216, 0.12);
+}
