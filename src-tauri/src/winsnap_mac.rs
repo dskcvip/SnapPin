@@ -59,6 +59,13 @@ const NUM_SINT64: i32 = 4;
 /// `kCFStringEncodingUTF8`
 const ENC_UTF8: u32 = 0x0800_0100;
 
+// CoreGraphics / CoreFoundation。
+//
+// **必须显式声明 framework**：Rust 只把 `extern "C"` 当"符号在外面"，
+// 不会自动加 `-framework`。虽然 Tauri/wry 自己会链 CoreGraphics，
+// 靠传递链接参数能"碰巧"解析到，但那是隐式依赖 —— 换构建配置就炸。
+#[link(name = "CoreGraphics", kind = "framework")]
+#[link(name = "CoreFoundation", kind = "framework")]
 extern "C" {
     fn CGWindowListCopyWindowInfo(option: u32, relative: u32) -> CFArrayRef;
     fn CGRectMakeWithDictionaryRepresentation(dict: CFDictionaryRef, rect: *mut CGRect) -> bool;
@@ -76,8 +83,11 @@ extern "C" {
     static kCGWindowNumber: CFStringRef;
     static kCGWindowOwnerName: CFStringRef;
     static kCGWindowOwnerPID: CFStringRef;
+}
 
-    // NSWindow.windowNumber 用（拿到浮层自己的 CGWindowNumber 以便跳过）
+// Objective-C 运行时（`objc_msgSend` / `sel_registerName` 在 libobjc.A.dylib）
+#[link(name = "objc")]
+extern "C" {
     fn objc_msgSend(obj: *mut c_void, sel: *mut c_void) -> isize;
     fn sel_registerName(name: *const i8) -> *mut c_void;
 }
