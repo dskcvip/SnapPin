@@ -1,3 +1,6 @@
+import { useEffect, useRef, useState } from 'react'
+import { uiLog } from '../lib/api'
+
 /**
  * 工具属性面板的内容（工具条下方的补充条）。
  *
@@ -10,6 +13,8 @@
  */
 import {
   ERASER_RADIUS,
+  STICKER_COLORS,
+  STICKER_COLOR_NAMES,
   MOSAIC_BLOCKS,
   PRESET_COLORS,
   SPOTLIGHT_DIM,
@@ -19,6 +24,236 @@ import {
   type AnnotateTool,
   type Rgba,
 } from './tools'
+import {
+  filterStickerNames,
+  loadStickerManifest,
+  loadStickerSvg,
+  recolorSvg,
+  type StickerPick,
+} from '../stickers/library'
+import { zhLabel } from '../stickers/zh'
+import { ColorPickerGlyph } from './icons'
+
+/**
+ * 贴纸面板（单行）：emoji 全平铺 + 颜色下拉 + 大小下拉 + 搜索框。
+ *
+ * 颜色/大小都做成**竖排下拉**（用户 2026-10-24 要求）：
+ * - 颜色：按钮用用户给的喷罐图标，展开后一列"色块 + 中文色名"
+ * - 大小：按钮显示当前值，展开后一列尺寸档位（替代原来的连续滑条）
+ * 两个下拉都在组件外点击时收起（document 级监听），
+ * 不然点别处会穿透到浮层根部、把选区给清了。
+ */
+function StickerPanel(p: Props) {
+  const [openColor, setOpenColor] = useState(false)
+  const [openSize, setOpenSize] = useState(false)
+  const colorRef = useRef<HTMLDivElement>(null)
+  const sizeRef = useRef<HTMLDivElement>(null)
+
+  // 组件外点击 → 收起下拉（不能用 overlay 的 pointerdown：那会连带清选区）
+  useEffect(() => {
+    if (!openColor && !openSize) return
+    const onDown = (e: PointerEvent) => {
+      const t = e.target as Node
+      if (openColor && colorRef.current && !colorRef.current.contains(t)) setOpenColor(false)
+      if (openSize && sizeRef.current && !sizeRef.current.contains(t)) setOpenSize(false)
+    }
+    document.addEventListener('pointerdown', onDown, true)
+    return () => document.removeEventListener('pointerdown', onDown, true)
+  }, [openColor, openSize])
+
+  return (
+    <div className="sb-sticker-row">
+      {/* 16 个 emoji 全平铺（不滚动，一屏看全） */}
+      <div className="sb-emoji-row">
+        {STICKER_GLYPHS.map((g) => (
+          <button
+            key={g}
+            className={`sb-emoji ${
+              p.sticker.kind === 'emoji' && p.sticker.value === g ? 'on' : ''
+            }`}
+            title={`表情 ${g}`}
+            onClick={() => p.onSticker({ kind: 'emoji', value: g })}
+          >
+            {g}
+          </button>
+        ))}
+      </div>
+
+      {/* 颜色下拉（竖排） */}
+      <div className="sb-dd" ref={colorRef}>
+        <button
+          className={`sb-dd-btn ${openColor ? 'on' : ''}`}
+          title={`贴纸颜色：${STICKER_COLOR_NAMES[p.stickerColor] ?? p.stickerColor}`}
+          onClick={() => {
+            setOpenColor((v) => !v)
+            setOpenSize(false)
+          }}
+        >
+          <ColorPickerGlyph />
+        </button>
+        {openColor && (
+          <div className="sb-dd-panel" onPointerDown={(e) => e.stopPropagation()}>
+            {STICKER_COLORS.map((c) => (
+              <button
+                key={c}
+                className={`sb-dd-item ${p.stickerColor === c ? 'on' : ''}`}
+                onClick={() => {
+                  p.onStickerColor(c)
+                  setOpenColor(false)
+                }}
+              >
+                <span className="sb-dd-dot" style={{ background: c }} />
+                {STICKER_COLOR_NAMES[c] ?? c}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* 大小下拉（竖排） */}
+      <div className="sb-dd" ref={sizeRef}>
+        <button
+          className={`sb-dd-btn sb-dd-size ${openSize ? 'on' : ''}`}
+          title={`贴纸尺寸 ${p.stickerSize}px`}
+          onClick={() => {
+            setOpenSize((v) => !v)
+            setOpenColor(false)
+          }}
+        >
+          {p.stickerSize}px
+        </button>
+        {openSize && (
+          <div className="sb-dd-panel sb-dd-size" onPointerDown={(e) => e.stopPropagation()}>
+            <div className="sb-dd-size-val">{p.stickerSize}px</div>
+            {/* 竖排滑块：writing-mode + direction 让"值越大越靠上"
+                （Chromium 121+ 原生支持，WebView2 现行版本都带）。 */}
+            <input
+              className="sb-dd-vslider"
+              type="range"
+              min={16}
+              max={160}
+              step={1}
+              value={p.stickerSize}
+              title={`贴纸尺寸 ${p.stickerSize}px`}
+              onChange={(e) => p.onStickerSize(Number(e.target.value))}
+            />
+          </div>
+        )}
+      </div>
+
+      <StickerSearch color={p.stickerColor} pick={p.sticker} onPick={p.onSticker} />
+    </div>
+  )
+}
+
+/**
+ * SVG 图标搜索 + 结果网格（贴纸面板的第 ④ 块）。
+ *
+ * 为什么用 `<img>` 而不是把 2079 个全列出来：库 5.1MB，全渲染会直接把
+ * 属性条撑爆。这里按搜索词过滤后**最多渲染 60 个**，滚动加载更多。
+ */
+function StickerSearch(props: {
+  color: string
+  pick: StickerPick
+  onPick: (s: StickerPick) => void
+}) {
+  const [names, setNames] = useState<string[]>([])
+  const [query, setQuery] = useState('')
+  const [limit, setLimit] = useState(60)
+  const [loading, setLoading] = useState(true)
+  const [open, setOpen] = useState(false)
+
+  useEffect(() => {
+    let alive = true
+    loadStickerManifest()
+      .then((n) => {
+        if (alive) setNames(n)
+      })
+      .catch((e) => uiLog(`sticker manifest failed: ${String(e)}`))
+      .finally(() => {
+        if (alive) setLoading(false)
+      })
+    return () => {
+      alive = false
+    }
+  }, [])
+
+  const hits = filterStickerNames(names, query).slice(0, limit)
+
+  return (
+    <div className="sb-sticker-search">
+      <input
+        className="sb-sticker-input"
+        type="text"
+        value={query}
+        placeholder={`搜索 ${names.length} 个图标`}
+        onFocus={() => setOpen(true)}
+        onChange={(e) => {
+          setQuery(e.target.value)
+          setLimit(60)
+          setOpen(true)
+        }}
+      />
+      {/* 下拉浮层：不占那一行的高度，点外面收起 */}
+      {open && (
+        <div className="sb-sticker-drop" onPointerDown={(e) => e.stopPropagation()}>
+      <div className="sb-sticker-grid">
+        {loading && <div className="sb-sticker-hint">加载中…</div>}
+        {!loading && hits.length === 0 && (
+          <div className="sb-sticker-hint">没找到「{query}」</div>
+        )}
+        {hits.map((n) => (
+          <StickerCell
+            key={n}
+            name={n}
+            color={props.color}
+            active={props.pick.kind === 'svg' && props.pick.value === n}
+            onPick={() => props.onPick({ kind: 'svg', value: n })}
+          />
+        ))}
+      </div>
+      {hits.length >= limit && (
+        <button className="sb-sticker-more" onClick={() => setLimit((l: number) => l + 120)}>
+          显示更多…
+        </button>
+      )}
+      </div>
+      )}
+    </div>
+  )
+}
+
+/** 单个图标格：把 SVG 原文内联进来，这样能跟着选中色实时换色。 */
+function StickerCell(props: {
+  name: string
+  color: string
+  active: boolean
+  onPick: () => void
+}) {
+  const [svg, setSvg] = useState('')
+  useEffect(() => {
+    let alive = true
+    loadStickerSvg(props.name)
+      .then((t) => {
+        if (alive) setSvg(recolorSvg(t, props.color))
+      })
+      .catch(() => {})
+    return () => {
+      alive = false
+    }
+  }, [props.name, props.color])
+
+  return (
+    <button
+      className={`sb-ic ${props.active ? 'on' : ''}`}
+      title={`${zhLabel(props.name)}  ${props.name}`}
+      onClick={props.onPick}
+      // SVG 原文来自我们自己的包（public/stickers），不是用户输入，
+      // 不存在注入风险；innerHTML 是让"换色"生效的唯一方式（<img> 不吃 CSS 颜色）。
+      dangerouslySetInnerHTML={{ __html: svg }}
+    />
+  )
+}
 
 interface Props {
   tool: AnnotateTool
@@ -39,9 +274,15 @@ interface Props {
   onMosaicBlock: (v: number) => void
   onEraserRadius: (v: number) => void
   onZoomLevel: (v: number) => void
-  /** 当前贴纸字形 */
-  stickerGlyph: string
-  onStickerGlyph: (g: string) => void
+  /** 当前贴纸素材（emoji 字形 or svg 图标名） */
+  sticker: StickerPick
+  onSticker: (s: StickerPick) => void
+  /** 贴纸颜色（对 SVG 生效） */
+  stickerColor: string
+  onStickerColor: (c: string) => void
+  /** 贴纸显示尺寸（逻辑像素） */
+  stickerSize: number
+  onStickerSize: (v: number) => void
   /** 画笔 ↔ 荧光笔子模式切换 */
   onTool: (t: AnnotateTool) => void
 }
@@ -61,11 +302,13 @@ function Slider(props: {
   /** 自定义显示文本（如把 0-255 的暗度显示成百分比） */
   format?: (v: number) => string
   onChange: (v: number) => void
+  /** 紧凑模式：不显示左侧量名（单行面板里放不下） */
+  compact?: boolean
 }) {
   const { label, title, min, max, value, suffix = '', format, onChange } = props
   return (
-    <label className="sb-width" title={title}>
-      {label && <span className="sb-cap">{label}</span>}
+    <label className={`sb-width${props.compact ? ' compact' : ''}`} title={title}>
+      {label && !props.compact && <span className="sb-cap">{label}</span>}
       <input
         type="range"
         min={min}
@@ -158,34 +401,10 @@ export function ToolProps(p: Props) {
     return <div className="sb-tip">拖选要识别的区域，支持一图多码</div>
   }
 
-  // 水印与文字/序号共用"颜色 + 字号"（水印块由文字光栅化而来）
+  // 贴纸面板（单行二级条）：
+  //   16 个 emoji 全平铺 → 颜色下拉 → 大小下拉 → 搜索框
   if (tool === 'sticker') {
-    return (
-      <div className="sb-sticker">
-        {/* 贴纸调色板：点一个就换当前字形，随后到画布上单击落点。
-            emoji 用系统彩色字体渲染，不需要任何素材文件。 */}
-        <div className="sb-stickers">
-          {STICKER_GLYPHS.map((g) => (
-            <button
-              key={g}
-              className={`sb-sticker-btn ${p.stickerGlyph === g ? 'on' : ''}`}
-              title={`贴纸 ${g}`}
-              onClick={() => p.onStickerGlyph(g)}
-            >
-              {g}
-            </button>
-          ))}
-        </div>
-        <Slider
-          title={`贴纸大小 ${p.fontSize * 2}px`}
-          min={10}
-          max={72}
-          value={p.fontSize}
-          suffix=""
-          onChange={p.onFontSize}
-        />
-      </div>
-    )
+    return <StickerPanel {...p} />
   }
   const isTextLike = tool === 'text' || tool === 'badge' || tool === 'watermark'
 

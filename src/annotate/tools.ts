@@ -300,3 +300,25 @@ export const STICKER_GLYPHS = [
 
 /** 默认贴纸（未选过时点画布贴这个） */
 export const STICKER_DEFAULT = STICKER_GLYPHS[0]
+
+/**
+ * 贴纸可选颜色（对 SVG 图标生效；emoji 是彩色字形，颜色对它无意义）。
+ * 前 8 个是常用强调色，最后一个是白——深色截图（终端/代码）上要用。
+ */
+export const STICKER_COLORS = [
+  '#111827', '#ef4444', '#f97316', '#eab308',
+  '#22c55e', '#3b82f6', '#8b5cf6', '#ec4899', '#ffffff',
+] as const
+
+/** 贴纸颜色的中文名（下拉里显示，比一串 hex 直观） */
+export const STICKER_COLOR_NAMES: Record<string, string> = {
+  '#111827': '黑',
+  '#ef4444': '红',
+  '#f97316': '橙',
+  '#eab308': '黄',
+  '#22c55e': '绿',
+  '#3b82f6': '蓝',
+  '#8b5cf6': '紫',
+  '#ec4899': '粉',
+  '#ffffff': '白',
+}

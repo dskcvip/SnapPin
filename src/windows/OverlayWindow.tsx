@@ -36,6 +36,7 @@ import {
   type ShotAction,
   type WindowSnap,
 } from '../lib/api'
+import type { StickerPick } from '../stickers/library'
 import { AnnotationLayer } from '../annotate/AnnotationLayer'
 import { DragMagnifier } from '../annotate/DragMagnifier'
 import { ToolProps } from '../annotate/ToolProps'
@@ -71,6 +72,7 @@ import {
   PRESET_COLORS,
   SPOTLIGHT_DIM,
   STICKER_DEFAULT,
+  STICKER_COLORS,
   TEXT_FONT_SIZE,
   ZOOM_LEVELS,
   isActionTool,
@@ -192,8 +194,12 @@ export function OverlayWindow() {
   const [actError, setActError] = useState<string | null>(null)
   // 标注状态
   const [shapes, setShapes] = useState<ShapeDraft[]>([])
-  /** 当前贴纸字形（调色板选中的那个，默认 ✅） */
-  const [stickerGlyph, setStickerGlyph] = useState<string>(STICKER_DEFAULT)
+  /** 当前贴纸素材：emoji 字形或 SVG 图标名（默认 ✅） */
+  const [sticker, setSticker] = useState<StickerPick>({ kind: 'emoji', value: STICKER_DEFAULT })
+  /** 贴纸颜色（对 SVG 图标生效；emoji 是彩色字形，选了也没影响） */
+  const [stickerColor, setStickerColor] = useState<string>(STICKER_COLORS[0])
+  /** 贴纸显示尺寸（逻辑像素）—— 独立于文字字号，贴纸要大得多 */
+  const [stickerSize, setStickerSize] = useState<number>(48)
   /**
    * 重做栈：撤销时把被摘掉的形状压进来，重做时弹回 shapes。
    *
@@ -296,7 +302,17 @@ export function OverlayWindow() {
   const hintRef = useRef<HTMLDivElement | null>(null)
   const [anchor, setAnchor] = useState<{ x: number; bottom: number } | null>(null)
   const [hintAnchor, setHintAnchor] = useState<{ x: number; bottom: number } | null>(null)
-  const [propsW, setPropsW] = useState(0)
+  /**
+   * 一级工具条的矩形（左/宽/底）。
+   *
+   * 二级属性条的对齐规则（docs/BUILD-macos.md 验收项）：
+   * **在按钮下方、且不超出工具条**。所以二级条直接跟一级条同宽、左边缘对齐 ——
+   * 之前那套"跟随选区中心 + 边界收拢"在属性条还是窄面板时看不出来，
+   * 改成单行条之后就明显左偏了（二级条比一级条窄，中心还被选区拽偏）。
+   */
+  const [barBox, setBarBox] = useState<{ left: number; width: number; bottom: number } | null>(
+    null,
+  )
   const [hintW, setHintW] = useState(0)
   const imgRef = useRef<HTMLImageElement | null>(null)
   const dragRef = useRef<{ x: number; y: number; snap: WindowSnap | null } | null>(null)
@@ -811,6 +827,15 @@ export function OverlayWindow() {
   }, [])
 
   /** 二级菜单贴着当前工具按钮：取按钮矩形的水平中心与底边 */
+  /**
+   * 提示气泡的水平收拢：以工具条为界，别溢出屏幕。
+   * （二级属性条不用它——那条走 barBox 同宽左对齐，见下。）
+   */
+  const anchorX = (x: number, w: number) => {
+    const half = w / 2
+    return Math.min(Math.max(x, half + 8), window.innerWidth - half - 8)
+  }
+
   useLayoutEffect(() => {
     if (!tool) {
       setAnchor(null)
@@ -821,10 +846,18 @@ export function OverlayWindow() {
     if (!el) return
     const r = el.getBoundingClientRect()
     setAnchor({ x: r.left + r.width / 2, bottom: r.bottom })
-    // 同帧量出新面板的实际宽度（切换工具时内容宽度不同），供边界收拢使用
-    const w = propsRef.current?.offsetWidth ?? 0
-    if (w && w !== propsW) setPropsW(w)
-  }, [tool, propsW])
+    // 同帧量一级条的矩形：二级条靠它对齐（不用量二级条自己的宽度了）
+    const bar = barRef.current?.getBoundingClientRect()
+    if (
+      bar &&
+      (!barBox ||
+        Math.abs(bar.left - barBox.left) > 0.5 ||
+        Math.abs(bar.width - barBox.width) > 0.5 ||
+        Math.abs(bar.bottom - barBox.bottom) > 0.5)
+    ) {
+      setBarBox({ left: bar.left, width: bar.width, bottom: bar.bottom })
+    }
+  }, [tool, barBox])
 
   // 提示气泡宽度同样实测，避免收拢时用到偏大的估计值
   useLayoutEffect(() => {
@@ -882,14 +915,6 @@ export function OverlayWindow() {
     [ctx, myLabel],
   )
 
-  const anchorX = (x: number, w: number) => {
-    const bar = barRef.current?.getBoundingClientRect()
-    const half = w / 2
-    if (!bar) return Math.min(Math.max(x, half + 8), window.innerWidth - half - 8)
-    // 面板比工具条还宽：没有收拢余地，直接与工具条左对齐
-    if (bar.width <= w) return bar.left + half
-    return Math.min(Math.max(x, bar.left + half), bar.right - half)
-  }
 
   /** 广播：让其它显示器的浮层清掉自己的选区。 */
   const clearOtherSelections = useCallback(() => {
@@ -1152,7 +1177,9 @@ export function OverlayWindow() {
             spotlightDim={spotDim}
             eraserRadius={eraserRadius}
             zoomLevel={zoomLevel}
-            stickerGlyph={stickerGlyph}
+            sticker={sticker}
+            stickerColor={stickerColor}
+            stickerSize={stickerSize}
             shapes={shapes}
             onShapesChange={setShapesFromLayer}
             onPickSample={onPickSample}
@@ -1450,8 +1477,8 @@ export function OverlayWindow() {
               className="sb-props"
               ref={propsRef}
               style={
-                anchor
-                  ? { left: anchorX(anchor.x, propsW || 260), top: anchor.bottom + 6 }
+                anchor && barBox
+                  ? { left: barBox.left, width: barBox.width, top: barBox.bottom + 6 }
                   : undefined
               }
               onPointerDown={(e) => e.stopPropagation()}
@@ -1472,8 +1499,12 @@ export function OverlayWindow() {
                 onMosaicBlock={setMosaicBlock}
                 onEraserRadius={setEraserRadius}
                 onZoomLevel={setZoomLevel}
-                stickerGlyph={stickerGlyph}
-                onStickerGlyph={setStickerGlyph}
+                sticker={sticker}
+                onSticker={setSticker}
+                stickerColor={stickerColor}
+                onStickerColor={setStickerColor}
+                stickerSize={stickerSize}
+                onStickerSize={setStickerSize}
                 onTool={setTool}
               />
             </div>

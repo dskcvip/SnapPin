@@ -9,6 +9,7 @@
  * - 颜色由外层按钮控制（常规 #4c4c4c / 禁用 #aeaeae / 关闭 #fa5151 / 完成 #00c375）。
  */
 import type { ReactNode, SVGProps } from 'react'
+import colorPickerSvg from './color-picker.svg?raw'
 
 export interface IconProps extends Omit<SVGProps<SVGSVGElement>, 'children' | 'scale'> {
   size?: number
@@ -313,4 +314,14 @@ export const QrIcon = (p: IconProps) => (
     <rect x="18.2" y="14.2" width="2.4" height="2.4" rx="0.6" fill="currentColor" stroke="none" />
     <rect x="14.2" y="18.2" width="2.4" height="2.4" rx="0.6" fill="currentColor" stroke="none" />
   </Icon>
+)
+
+/**
+ * 颜色下拉按钮的图标（用户提供的喷罐/取色器造型）。
+ *
+ * 用 `?raw` 内联而不是拆成 path：原图是 1024 viewBox 的多 path 图形，
+ * 且自带品牌蓝 —— 拆出来反而丢层次。内联后由 CSS 控制尺寸。
+ */
+export const ColorPickerGlyph = () => (
+  <span className="ic-raw" dangerouslySetInnerHTML={{ __html: colorPickerSvg }} />
 )

@@ -1,4 +1,11 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
+import { uiLog } from '../lib/api'
+import {
+  loadStickerSvg,
+  rasterizeSvgSticker,
+  recolorSvg,
+  type StickerPick,
+} from '../stickers/library'
 import {
   BADGE_DIAMETER_RATIO,
   HIGHLIGHTER_COLOR,
@@ -57,8 +64,12 @@ interface Props {
   eraserRadius: number
   /** 放大镜倍数 */
   zoomLevel: number
-  /** 当前选中的贴纸字形（emoji）；tool=sticker 时单击画布贴它 */
-  stickerGlyph: string
+  /** 当前贴纸素材（emoji 字形 or svg 图标名）；tool=sticker 时单击画布贴它 */
+  sticker: StickerPick
+  /** 贴纸颜色（SVG 用；emoji 是彩色字形用不到） */
+  stickerColor: string
+  /** 贴纸显示尺寸（逻辑像素） */
+  stickerSize: number
   shapes: ShapeDraft[]
   onShapesChange: (shapes: ShapeDraft[]) => void
   /** 取色器：指针在选区内移动时持续回调（局部逻辑像素坐标）。
@@ -234,6 +245,50 @@ export function AnnotationLayer(props: Props) {
     return { x: e.clientX - rect.left, y: e.clientY - rect.top }
   }
 
+  /**
+   * 落一个贴纸（emoji 同步 / SVG 异步）。
+   *
+   * emoji 走 rasterizeSticker（canvas 直接画彩色字形）；SVG 走
+   * fetch 原文 → 换色 → Blob → Image → canvas 光栅化，最后同样 push 成
+   * `Shape::Bitmap`。两条路产物结构一致，Rust 侧完全无感。
+   */
+  const placeSticker = async (px: number, py: number) => {
+    let r: { png: string; w: number; h: number; canvas?: HTMLCanvasElement } | null = null
+    if (props.sticker.kind === 'svg') {
+      try {
+        const raw = await loadStickerSvg(props.sticker.value)
+        r = await rasterizeSvgSticker(
+          recolorSvg(raw, props.stickerColor),
+          props.stickerSize,
+          props.scaleFactor,
+        )
+      } catch (e) {
+        uiLog(`sticker svg failed: ${String(e)}`)
+        return
+      }
+      if (!r) {
+        uiLog(`sticker svg rasterize failed: ${props.sticker.value}`)
+        return
+      }
+    } else {
+      // emoji 的视觉大小约为字号 2 倍（见 rasterizeSticker 注释）
+      r = rasterizeSticker(props.sticker.value, props.stickerSize / 2, props.scaleFactor)
+      if (!r) return
+    }
+    onShapesChange([
+      ...shapes,
+      {
+        type: 'bitmap',
+        x: round2(px - r!.w / 2),
+        y: round2(py - r!.h / 2),
+        w: round2(r!.w),
+        h: round2(r!.h),
+        png: r!.png,
+        canvas: r!.canvas,
+      },
+    ])
+  }
+
   const onPointerDown = (e: ReactPointerEvent<HTMLCanvasElement>) => {
     if (e.button !== 0 || !tool) return
     e.stopPropagation()
@@ -268,22 +323,11 @@ export function AnnotationLayer(props: Props) {
       }
       return
     }
-    // 贴纸：单击落点贴一个 emoji。与序号同一套位图通道，同样按圆心落点。
+    // 贴纸：单击落点贴一个素材（emoji 或 SVG 图标）。与序号同一套位图通道，
+    // 同样按圆心落点。SVG 要异步取原文 + 换色 + 光栅化，所以这里不等结果——
+    // 落点已定，位图到了直接 push（连续点击会按顺序落，不会串位）。
     if (tool === 'sticker') {
-      const r = rasterizeSticker(props.stickerGlyph, fontSize, props.scaleFactor)
-      if (!r) return
-      onShapesChange([
-        ...shapes,
-        {
-          type: 'bitmap',
-          x: round2(p.x - r.w / 2),
-          y: round2(p.y - r.h / 2),
-          w: round2(r.w),
-          h: round2(r.h),
-          png: r.png,
-          canvas: r.canvas,
-        },
-      ])
+      void placeSticker(p.x, p.y)
       return
     }
     // 序号：单击即在落点盖一个编号（编号 = 现有最大号 + 1，撤销后自动回填）。

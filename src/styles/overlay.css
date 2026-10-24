@@ -184,8 +184,9 @@
 .sb-props {
   position: fixed;
   top: 68px;
-  left: 50%;
-  transform: translateX(-50%);
+  /* left / width / top 由 JS 按**一级工具条**设置（同宽、左边缘对齐，
+     见 OverlayWindow 的 barBox）。这里不能再写 left:50% + translateX(-50%)——
+     那个居中变换不会呗 inline left 覆盖，会把整条往左推半个身位。 */
   display: flex;
   align-items: center;
   gap: 10px;
@@ -1084,40 +1085,264 @@
   cursor: default;
 }
 
-/* 贴纸调色板：16 个 emoji 排 8 列两行。
-   用系统彩色字体渲染，不需要图片素材；选中态给品牌色描边。 */
-.sb-sticker {
+/* 贴纸面板：**单行二级条** —— 贴纸 + 颜色 + 尺寸滑块 + 搜索框横排。
+   搜索结果是下拉浮层（.sb-sticker-drop），不占这一行的高度。 */
+.sb-sticker-row {
   display: flex;
-  flex-direction: column;
-  gap: 6px;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: nowrap;
 }
 
-.sb-stickers {
-  display: grid;
-  grid-template-columns: repeat(8, 1fr);
+/* 贴纸：16 个全平铺一行（不滚动，一屏看全——用户要求） */
+.sb-emoji-row {
+  display: flex;
   gap: 2px;
+  flex: 0 0 auto;
 }
 
-.sb-sticker-btn {
+.sb-emoji {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
+  width: 26px;
+  height: 26px;
   padding: 0;
-  font-size: 15px;
+  font-size: 16px;
   line-height: 1;
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 5px;
+  border-radius: 6px;
   cursor: pointer;
 }
 
-.sb-sticker-btn:hover {
+.sb-emoji:hover {
   background: rgba(15, 23, 42, 0.06);
 }
 
-.sb-sticker-btn.on {
+.sb-emoji.on {
   border-color: var(--brand);
   background: rgba(18, 165, 216, 0.12);
+}
+
+/* 下拉（颜色 / 大小）：按钮 + 竖排面板 */
+.sb-dd {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+/* 按钮保持紧凑（二级条本来就是窄条，不该长成一级条那样的 40×46），
+   但**图标放大到 22px**，与一级条图标同尺寸（用户 2026-10-25 要求）。 */
+.sb-dd-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  box-sizing: border-box;
+  width: auto;
+  min-width: 30px;
+  height: 28px;
+  padding: 0 5px;
+  font-size: 12px;
+  color: var(--text);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.sb-dd-btn:hover {
+  background: rgba(15, 23, 42, 0.055);
+}
+
+.sb-dd-btn.on {
+  border-color: var(--brand);
+  background: rgba(18, 165, 216, 0.12);
+}
+
+/* 用户给的喷罐图标：原图 1024 viewBox，内联后由这里定尺寸 */
+.ic-raw {
+  display: flex;
+  width: 22px;
+  height: 22px;
+}
+
+.ic-raw svg {
+  width: 22px;
+  height: 22px;
+  display: block;
+}
+
+/* 竖排下拉面板 */
+/* 大小下拉：竖排滑块 + 当前值 */
+.sb-dd-size {
+  align-items: center;
+  min-width: 44px;
+  padding: 8px 5px;
+}
+
+.sb-dd-size-val {
+  font-size: 12px;
+  color: var(--text);
+  padding-bottom: 4px;
+}
+
+.sb-dd-vslider {
+  writing-mode: vertical-rl;
+  direction: rtl;
+  width: 22px;
+  height: 140px;
+  margin: 0;
+  accent-color: var(--brand);
+  cursor: pointer;
+}
+
+.sb-dd-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 92px;
+  padding: 5px;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  box-shadow: var(--shadow-lg);
+}
+
+.sb-dd-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 7px;
+  font-size: 12px;
+  color: var(--text);
+  background: transparent;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.sb-dd-item:hover {
+  background: rgba(15, 23, 42, 0.06);
+}
+
+.sb-dd-item.on {
+  color: var(--brand);
+  background: rgba(18, 165, 216, 0.1);
+}
+
+.sb-dd-dot {
+  width: 13px;
+  height: 13px;
+  border: 1px solid rgba(15, 23, 42, 0.18);
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+
+/* 紧凑滑条（单行里不放量名） */
+.sb-width.compact {
+  gap: 6px;
+}
+
+.sb-width.compact input[type='range'] {
+  width: 84px;
+}
+
+/* 搜索框（右侧，撑满剩余宽度） */
+.sb-sticker-search {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 110px;
+}
+
+.sb-sticker-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 5px 8px;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+}
+
+.sb-sticker-input:focus {
+  outline: none;
+  border-color: var(--brand);
+}
+
+/* 下拉浮层：绝对定位，不把那一行撑高 */
+.sb-sticker-drop {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 20;
+  width: 264px;
+  padding: 6px;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  box-shadow: var(--shadow-lg);
+}
+
+.sb-sticker-grid {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 2px;
+  max-height: 192px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.sb-sticker-hint {
+  grid-column: 1 / -1;
+  padding: 8px 2px;
+  font-size: 12px;
+  color: rgba(15, 23, 42, 0.5);
+}
+
+/* 单个图标格：SVG 内联（跟着选中色换色） */
+.sb-ic {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  aspect-ratio: 1;
+  padding: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.sb-ic:hover {
+  background: rgba(15, 23, 42, 0.06);
+}
+
+.sb-ic.on {
+  border-color: var(--brand);
+  background: rgba(18, 165, 216, 0.12);
+}
+
+.sb-ic svg {
+  width: 18px;
+  height: 18px;
+}
+
+.sb-sticker-more {
+  margin-top: 4px;
+  padding: 2px 6px;
+  font-size: 12px;
+  color: var(--brand);
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
 }
