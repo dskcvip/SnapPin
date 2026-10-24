@@ -816,6 +816,10 @@ export function OverlayWindow() {
   /** 本浮层的窗口 label：用于识别"这条广播是不是我发的"。 */
   const myLabel = getCurrentWindow().label
 
+  /** 当前选区的镜像（供 querySnap 的异步回调判断"命中的是不是已选中的那个"）。 */
+  const rectRef = useRef<Rect | null>(null)
+  rectRef.current = rect
+
   /** 悬停识窗查询（节流 ~15fps + 乱序丢弃）。只查顶层窗口，
    *  查不到（光标下只有我们自己的窗口）就清空高亮。 */
   const querySnap = useCallback(
@@ -831,7 +835,20 @@ export function OverlayWindow() {
       emit(EVT_HOVER_OWNER, { owner: myLabel }).catch(() => {})
       windowSnap(ctx.monitorId, x, y)
         .then((w) => {
-          if (seq === snapSeqRef.current) setHoverWin(w)
+          if (seq !== snapSeqRef.current) return
+          // 命中的窗口恰好就是当前选区 → 不显示高亮（同一个框画两遍没意义，
+          // 而且盖在选区边框上很难看）。
+          type R = { x: number; y: number; w: number; h: number }
+          const near = (a: number, b: number) => Math.abs(a - b) < 1.5
+          const sel = rectRef.current as R | null
+          const sameAsSel =
+            !!w &&
+            !!sel &&
+            near(w.x, sel.x) &&
+            near(w.y, sel.y) &&
+            near(w.w, sel.w) &&
+            near(w.h, sel.h)
+          setHoverWin(sameAsSel ? null : w)
         })
         .catch((e) => {
           // 首次失败才记日志：15fps 调用，失败刷屏会淹没别的线索
@@ -948,14 +965,13 @@ export function OverlayWindow() {
     // 已有选区时**仍然识别窗口**：光标离开选区到别的窗口上要能高亮，
     // 单击即可换选目标。此前一句 `if (!rect)` 把查询整个挡掉了，导致
     // "左屏（无选区）能高亮、右屏（已选微信窗）不能"的不对称（用户实测）。
+    //
+    // 也不能用"光标在选区内就跳过"来过滤：前边的窗口可能正好落在
+    // 已选中的大窗口内部（微信窗浮在资源管理器上），那样一进选区就
+    // 再也不高亮了（用户实测）。改为**按窗口矩形比对**：
+    // 命中的窗口跟当前选区是同一个才不显示（见 querySnap）。
     if (rect) {
-      const inside =
-        e.clientX >= rect.x &&
-        e.clientX <= rect.x + rect.w &&
-        e.clientY >= rect.y &&
-        e.clientY <= rect.y + rect.h
-      // 在选区内部 = 想调整这个选区，不是想换窗口 → 不查询
-      if (!inside) querySnap(e.clientX, e.clientY)
+      querySnap(e.clientX, e.clientY)
       return
     }
 
