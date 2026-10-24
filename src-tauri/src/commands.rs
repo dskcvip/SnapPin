@@ -1656,6 +1656,64 @@ pub async fn update_config(
     Ok(config)
 }
 
+/// 快捷键录制期间**临时注销全部全局热键**。
+///
+/// 为什么必须这样：录制时用户按下的组合键，如果正好等于当前已注册的键
+/// （例如要改「开始截图」，照着原值按 Ctrl+1），全局热键会立刻触发截图，
+/// 浮层铺满全屏把设置页盖住 —— 用户看到的就是"设置快捷键时突然截图了，
+/// 根本设置不了"（实测反馈）。录制结束（拿到组合键或按 Esc）再恢复。
+#[tauri::command]
+pub fn hotkeys_suspend(app: AppHandle) -> Result<(), String> {
+    app.global_shortcut()
+        .unregister_all()
+        .map_err(|e| e.to_string())?;
+    crate::logln!("[snappin] hotkeys suspended (recording)");
+    Ok(())
+}
+
+/// 录制结束后按**已保存的配置**重新注册全局热键。
+///
+/// 注意用的是 config 里的值而不是前端草稿：用户录完没点「保存设置」的话，
+/// 生效的仍应是旧键（与 update_config 的语义一致）。
+#[tauri::command]
+pub fn hotkeys_resume(app: AppHandle) -> Result<(), String> {
+    // 先全部注销再注册：让本函数**幂等**。它既会被前端的录制结束调用，
+    // 也会被窗口销毁兜底调用；不先注销的话重复注册同一个键会报错。
+    let _ = app.global_shortcut().unregister_all();
+    let cfg = {
+        let state = app.state::<AppState>();
+        let c = state.config.lock().unwrap().clone();
+        c
+    };
+    let capture_sc =
+        parse_shortcut(&cfg.shortcut_capture).unwrap_or_else(crate::default_capture_shortcut);
+    let pin_sc = parse_shortcut(&cfg.shortcut_pin_clipboard)
+        .unwrap_or_else(crate::default_pin_shortcut);
+    {
+        let state = app.state::<AppState>();
+        *state.hotkeys.lock().unwrap() = (capture_sc.clone(), pin_sc.clone());
+    }
+    let gs = app.global_shortcut();
+    let mut errs: Vec<String> = Vec::new();
+    if let Err(e) = gs.register(capture_sc) {
+        errs.push(format!("{}: {e}", cfg.shortcut_capture));
+    }
+    if let Err(e) = gs.register(pin_sc) {
+        errs.push(format!("{}: {e}", cfg.shortcut_pin_clipboard));
+    }
+    crate::logln!(
+        "[snappin] hotkeys resumed: {} / {} {:?}",
+        cfg.shortcut_capture,
+        cfg.shortcut_pin_clipboard,
+        errs
+    );
+    if errs.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("热键恢复失败：{}", errs.join("；")))
+    }
+}
+
 /// 把 "Ctrl+1" / "Ctrl+Shift+A" 这类配置字符串解析成 `Shortcut`。
 ///
 /// 支持的修饰键：Ctrl / Shift / Alt / Super（Win 键 / ⌘）；

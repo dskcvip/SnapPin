@@ -442,47 +442,77 @@
   cursor: nwse-resize;
 }
 
-/* 四条边的中点锚点：**可见的小短条**（此前做成透明热区，用户反馈
-   "左右两个竖边中心位置没有锚点"——看不见就等于没有）。 */
+/* 四条边：**整条线都是拖拽热区**（用户反馈"一定要在锚点上拖动太局限"）。
+   做法：热区做成贴边的透明长条（16px 厚，向外 8px / 向内 8px），
+   视觉上只保留中间那个白色小短条（::before 画），所以既有抓手
+   又不挡画面。定位基准是 padding box（border-box 下外沿在 -5px），
+   故 -13px = -5px（边框外沿） - 8px（半个热区厚度）。 */
 .handle.t,
 .handle.b,
 .handle.l,
 .handle.r {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+}
+/* 注意 width/height:auto：基础 .handle 是 8x8，若不给 auto，
+   即使写了 left/right:0 也会被 width:8px 压住 —— 整条边只有 8px 宽
+   （实测：沿边线拖拽完全失效，只有角上那一小块能拖）。 */
+.handle.t,
+.handle.b {
+  left: 0;
+  right: 0;
+  width: auto;
+  height: 16px;
+  cursor: ns-resize;
+}
+.handle.l,
+.handle.r {
+  top: 0;
+  bottom: 0;
+  width: 16px;
+  height: auto;
+  cursor: ew-resize;
+}
+.handle.t {
+  top: -13px;
+}
+.handle.b {
+  bottom: -13px;
+}
+.handle.l {
+  left: -13px;
+}
+.handle.r {
+  right: -13px;
+}
+
+/* 边中点的可见抓手：画在热区中央，中心正好压在边线上 */
+.handle.t::before,
+.handle.b::before {
+  content: '';
+  position: absolute;
+  left: 50%;
+  margin-left: -6px;
+  top: 4px;
+  width: 12px;
+  height: 8px;
   background: #fff;
   border: 1px solid var(--brand);
   border-radius: 1px;
 }
-.handle.t {
-  left: 50%;
-  margin-left: -6px;
-  top: -9px;
-  width: 12px;
-  height: 8px;
-  cursor: ns-resize;
-}
-.handle.b {
-  left: 50%;
-  margin-left: -6px;
-  bottom: -9px;
-  width: 12px;
-  height: 8px;
-  cursor: ns-resize;
-}
-.handle.l {
+.handle.l::before,
+.handle.r::before {
+  content: '';
+  position: absolute;
   top: 50%;
   margin-top: -6px;
-  left: -9px;
+  left: 4px;
   width: 8px;
   height: 12px;
-  cursor: ew-resize;
-}
-.handle.r {
-  top: 50%;
-  margin-top: -6px;
-  right: -9px;
-  width: 8px;
-  height: 12px;
-  cursor: ew-resize;
+  background: #fff;
+  border: 1px solid var(--brand);
+  border-radius: 1px;
 }
 
 .toolbar {

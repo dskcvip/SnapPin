@@ -4,6 +4,8 @@ import {
   ballCommand,
   closeSelf,
   getConfig,
+  hotkeysResume,
+  hotkeysSuspend,
   openUrl,
   pinFromClipboard,
   startCapture,
@@ -169,10 +171,15 @@ function formatHotkey(e: KeyboardEvent): string | null {
   if (e.shiftKey) parts.push('Shift')
   if (e.altKey) parts.push('Alt')
   if (e.metaKey) parts.push('Super')
+  // 用 e.code（物理键位）而不是 e.key：按住 Shift 时 e.key 会变成符号，
+  // 比如 Shift+1 → "!"、Shift+A → "A"，按 key 判断会把前者整个丢掉
+  // （用户按 Ctrl+Shift+1 看起来"没反应"）。
   let key: string | null = null
-  if (/^[a-z]$/i.test(e.key)) key = e.key.toUpperCase()
-  else if (/^[0-9]$/.test(e.key)) key = e.key
-  else if (/^F([1-9]|1[0-2])$/.test(e.key)) key = e.key.toUpperCase()
+  const letter = /^Key([A-Z])$/.exec(e.code)
+  const digit = /^Digit([0-9])$/.exec(e.code)
+  if (letter) key = letter[1]
+  else if (digit) key = digit[1]
+  else if (/^F([1-9]|1[0-2])$/.test(e.code)) key = e.code
   if (!key) return null
   parts.push(key)
   // 纯主键不算组合键（用户单独按一个字母时不该触发）
@@ -218,8 +225,13 @@ export function MainWindow() {
   }
 
   // 快捷键录制：录制期间拦截键盘，拿到组合键即写入配置草稿
+  //
+  // **录制期间必须挂起全局热键**：否则按下当前已注册的组合（对照着原值试）
+  // 会直接触发截图，浮层盖住设置页，用户以为"快捷键根本设不了"。
+  // cleanup 里恢复（用已保存的配置，未点保存就仍是旧键）。
   useEffect(() => {
     if (!recording) return
+    hotkeysSuspend().catch(() => {})
     const onKey = (e: KeyboardEvent) => {
       e.preventDefault()
       if (e.key === 'Escape') {
@@ -236,7 +248,20 @@ export function MainWindow() {
       setRecording(null)
     }
     window.addEventListener('keydown', onKey, true)
-    return () => window.removeEventListener('keydown', onKey, true)
+    // 兜底：录制中窗口失焦 / 被隐藏 → 取消录制（cleanup 会恢复全局热键）。
+    // 否则用户录到一半去点别处，热键会长时间处于挂起状态。
+    const onBlur = () => setRecording(null)
+    const onVis = () => {
+      if (document.visibilityState === 'hidden') setRecording(null)
+    }
+    window.addEventListener('blur', onBlur)
+    document.addEventListener('visibilitychange', onVis)
+    return () => {
+      window.removeEventListener('keydown', onKey, true)
+      window.removeEventListener('blur', onBlur)
+      document.removeEventListener('visibilitychange', onVis)
+      hotkeysResume().catch(() => {})
+    }
     // patch 每次渲染都是新函数，这里只依赖 recording
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [recording])

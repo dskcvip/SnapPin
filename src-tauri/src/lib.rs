@@ -37,6 +37,18 @@ pub fn run() {
     let esc_sc = long_esc_shortcut();
 
     tauri::Builder::default()
+        // 兜底：设置窗在「快捷键录制中」被关掉时，前端 JS 上下文随之销毁，
+        // React 的 effect cleanup 不一定还能跑 → 全局热键会一直挂在"已注销"
+        // 状态（用户表现：改快捷键时点了 X，之后所有热键全失效）。
+        // 窗口销毁时强制恢复一次（hotkeys_resume 幂等）。
+        .on_window_event(|window, event| {
+            if window.label() == windows::SETTINGS_LABEL
+                && matches!(event, tauri::WindowEvent::Destroyed)
+            {
+                crate::logln!("[snappin] settings destroyed -> resume hotkeys");
+                let _ = commands::hotkeys_resume(window.app_handle().clone());
+            }
+        })
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             // 第二个实例启动时唤出悬浮球，而不是开新进程
             if let Some(w) = app.get_webview_window(windows::BALL_LABEL) {
@@ -336,6 +348,8 @@ pub fn run() {
             commands::drag_window,
             commands::get_config,
             commands::update_config,
+            commands::hotkeys_suspend,
+            commands::hotkeys_resume,
             commands::app_info,
             commands::ocr_show,
             commands::ocr_result,

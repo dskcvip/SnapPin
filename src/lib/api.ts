@@ -150,6 +150,15 @@ export const uiLog = (msg: string): void => {
   invoke('ui_log', { msg }).catch(() => {})
 }
 
+/**
+ * 快捷键录制期间挂起/恢复全局热键。
+ *
+ * 不挂起的话：录制时按下"当前已注册"的组合（比如照着 Ctrl+1 再按一次），
+ * 全局热键会立刻触发截图，浮层盖住设置页 —— 用户会以为设置功能坏了。
+ */
+export const hotkeysSuspend = (): Promise<void> => invoke('hotkeys_suspend')
+export const hotkeysResume = (): Promise<void> => invoke('hotkeys_resume')
+
 export const startCapture = (): Promise<CapturePayload> => invoke('start_capture')
 
 export const overlayContext = (): Promise<OverlayContext> => invoke('overlay_context')

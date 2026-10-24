@@ -92,7 +92,13 @@ const MIN_SIZE = 3
 const EVT_CLEAR_OTHER_SEL = 'overlay-clear-selection'
 
 /** 选区锚点：四角 + 四边中点（边的热区是透明的，只给抓手和光标）。 */
-const CORNER_HANDLES = ['tl', 't', 'tr', 'r', 'br', 'b', 'bl', 'l'] as const
+/**
+ * 选区缩放热区：四条边（整条线都能拖）+ 四角。
+ *
+ * **顺序有意义**：先渲染边、后渲染角 —— DOM 里靠后的盖在上面，
+ * 这样角部（双轴缩放）优先于边部（单轴），否则贴角拖动只会改一个方向。
+ */
+const CORNER_HANDLES = ['t', 'r', 'b', 'l', 'tl', 'tr', 'br', 'bl'] as const
 type HandleEdge = (typeof CORNER_HANDLES)[number]
 
 /**
