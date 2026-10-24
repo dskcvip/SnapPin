@@ -134,6 +134,28 @@ pub fn ensure_ball_window(app: &AppHandle, cfg: &AppConfig) -> tauri::Result<()>
 }
 
 
+/// 悬浮球窗口应有的边长（逻辑像素）：球径 + 两侧留白。
+///
+/// 留白不是装饰：球有外投影、hover 时还会 `scale(1.07)`，窗口正好等于球径
+/// 时这些都会被窗口边界裁成直线（用户看到的就是"球显示不完整"）。
+pub fn ball_window_size(ball: f64) -> f64 {
+    ball + BALL_MARGIN * 2.0
+}
+
+/// 按新球径调整悬浮球窗口，并重新贴回主屏右上角。
+///
+/// 为什么必须重新放：窗口尺寸变了但位置不变时，球的中心会跟着左上角走，
+/// 表现为"改完尺寸球跑偏了"；而且 Windows 会把过窄窗口强制加宽，
+/// 所以位置一律按**实际** inner_size 重算（见 place_ball_top_right）。
+pub fn resize_ball_window(app: &AppHandle, ball: f64) {
+    let Some(w) = app.get_webview_window(BALL_LABEL) else {
+        return;
+    };
+    let side = ball_window_size(ball);
+    let _ = w.set_size(tauri::LogicalSize::new(side, side));
+    place_ball_top_right(app, &w, "resize");
+}
+
 /// 把悬浮球窗口放到**主屏右上角**（内缩 16px）。
 ///
 /// 用实际 inner_size 算右下角：Windows 会把窄窗加宽到最小跟踪尺寸，

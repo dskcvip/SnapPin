@@ -5,6 +5,7 @@ import {
   closeSelf,
   getConfig,
   hotkeysResume,
+  ballPreview,
   hotkeysSuspend,
   openUrl,
   pinFromClipboard,
@@ -175,6 +176,7 @@ function prettyKey(spec: string): string {
 const DEFAULT_CONFIG: AppConfig = {
   themeColor: '#12A5D8',
   ballSize: 56,
+  ballOpacity: 1,
   shortcutCapture: DEFAULT_SHORTCUTS.capture,
   shortcutPinClipboard: DEFAULT_SHORTCUTS.pin,
   saveDir: null,
@@ -468,9 +470,31 @@ export function MainWindow() {
                   max={80}
                   step={2}
                   value={cfg.ballSize}
-                  onChange={(e) => patch({ ballSize: Number(e.target.value) })}
+                  // 拖动即预览：直接把值推给球窗口（不落盘），松手后不保存也没关系
+                  onChange={(e) => {
+                    const v = Number(e.target.value)
+                    patch({ ballSize: v })
+                    void ballPreview(v, cfg.ballOpacity)
+                  }}
                 />
                 <span className="hint">{cfg.ballSize}px</span>
+              </div>
+              <div className="field">
+                <label htmlFor="ball-opacity">悬浮球不透明度</label>
+                <input
+                  id="ball-opacity"
+                  type="range"
+                  min={15}
+                  max={100}
+                  step={5}
+                  value={Math.round(cfg.ballOpacity * 100)}
+                  onChange={(e) => {
+                    const v = Number(e.target.value) / 100
+                    patch({ ballOpacity: v })
+                    void ballPreview(cfg.ballSize, v)
+                  }}
+                />
+                <span className="hint">{Math.round(cfg.ballOpacity * 100)}%</span>
               </div>
               <div className="field">
                 <label htmlFor="target-lang">翻译目标语言</label>

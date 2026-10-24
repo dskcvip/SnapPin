@@ -1,3 +1,4 @@
+import { listen } from '@tauri-apps/api/event'
 import { useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type MouseEvent as ReactMouseEvent } from 'react'
 import { ballCommand, ballMenu, dragWindow, getConfig, uiLog, type AppConfig } from '../lib/api'
 import '../styles/ball.css'
@@ -27,26 +28,24 @@ function shade(hex: string, amount: number): string {
   return `#${((r << 16) | (g << 8) | b).toString(16).padStart(6, '0')}`
 }
 
+/**
+ * 品牌 S 字形。
+ *
+ * 风格参照用户桌面上的那批应用图标（PixPin 的 P、WorkBuddy 的 W）：
+ * **纯白单色字形**，不要渐变、不要投影——立体感交给底的浅色渐变去给，
+ * 字形本身越干净，小尺寸下越清楚。
+ */
 function SGlyph() {
   return (
     <svg viewBox="0 0 1024 1024" aria-hidden>
-      <defs>
-        <linearGradient id="snS" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor="#FFD9B5" />
-          <stop offset="46%" stopColor="#FF9E63" />
-          <stop offset="100%" stopColor="#F5772A" />
-        </linearGradient>
-      </defs>
-      <g fill="none" strokeLinecap="round" strokeLinejoin="round">
-        {/* 投影 */}
-        <path d={S_PATH} transform="translate(0 26)" stroke="rgba(0,0,0,.55)" strokeWidth="112" />
-        {/* 下缘暗边：制造体积感 */}
-        <path d={S_PATH} transform="translate(0 12)" stroke="#B4420F" strokeWidth="108" />
-        {/* 主体：品牌橙垂直渐变 */}
-        <path d={S_PATH} stroke="url(#snS)" strokeWidth="104" />
-        {/* 顶部细高光 */}
-        <path d={S_PATH} transform="translate(0 -14)" stroke="rgba(255,255,255,.26)" strokeWidth="30" />
-      </g>
+      <path
+        d={S_PATH}
+        fill="none"
+        stroke="#ffffff"
+        strokeWidth="104"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
     </svg>
   )
 }
@@ -72,8 +71,27 @@ export function BallWindow() {
       .catch(() => setCfg(null))
   }, [])
 
+  // 设置页拖滑条时的实时预览（不落盘）：只覆盖尺寸/不透明度两个数，
+  // 颜色等其它字段仍以 getConfig 的结果为准。
+  useEffect(() => {
+    let alive = true
+    const un = listen<{ size: number; opacity: number }>('ball-preview', (e) => {
+      if (!alive) return
+      setCfg((prev) =>
+        prev
+          ? { ...prev, ballSize: Math.round(e.payload.size), ballOpacity: e.payload.opacity }
+          : prev,
+      )
+    })
+    return () => {
+      alive = false
+      void un.then((fn) => fn())
+    }
+  }, [])
+
   const color = cfg?.themeColor ?? DEFAULT_COLOR
   const size = cfg?.ballSize ?? 56
+  const opacity = cfg?.ballOpacity ?? 1
 
   // 右键：抑制默认菜单（双保险，初始化脚本已在 window 层抑制），
   // 弹出 Rust 原生菜单。事件挂在 ball-root 上：窗口留白处右键同样有效。
@@ -116,6 +134,7 @@ export function BallWindow() {
             '--ball-color': color,
             '--ball-light': shade(color, 55),
             '--ball-size': `${size}px`,
+            '--ball-opacity': String(opacity),
           } as CSSProperties
         }
         onPointerDown={onPointerDown}

@@ -5,37 +5,42 @@
   place-items: center;
 }
 
+/**
+ * 悬浮球：**圆角矩形**（不是正圆）+ 品牌色底 + 白色字形。
+ *
+ * 风格参照用户桌面上的那批应用图标（PixPin / WorkBuddy / 语雀）：
+ * 圆角方形底 + 简洁白色标志 + 一层柔和外投影。
+ * 之前的深墨蓝正圆 + 橙色渐变 S 是"拟物"路线，和这类扁平图标不是一套。
+ */
 .ball {
   width: var(--ball-size, 56px);
   height: var(--ball-size, 56px);
-  border-radius: 50%;
-  /* 品牌深墨蓝底：顶部冷光 + 底部暗角 + 中段微亮弧，配合橙色 S 形成对比 */
-  background:
-    radial-gradient(circle at 32% 24%, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0) 56%),
-    radial-gradient(circle at 50% 118%, rgba(2, 8, 23, 0.55), rgba(2, 8, 23, 0) 62%),
-    linear-gradient(180deg, #26374F 0%, #1A2740 44%, #0B1220 100%);
+  border-radius: 30%;
+  /* 底：品牌色 + 顶部微亮（扁平但有体积，避免死板纯色） */
+  background: linear-gradient(180deg, var(--ball-light) 0%, var(--ball-color) 58%, var(--ball-color) 100%);
   box-shadow:
-    0 6px 16px rgba(2, 10, 24, 0.42),
-    0 1px 2px rgba(2, 10, 24, 0.28),
-    inset 0 0 0 1px rgba(255, 255, 255, 0.16),
-    inset 0 -8px 14px rgba(0, 0, 0, 0.36);
+    0 4px 10px rgba(2, 10, 24, 0.22),
+    0 1px 2px rgba(2, 10, 24, 0.16),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.22);
   display: grid;
   place-items: center;
   cursor: pointer;
+  /* 不透明度：设置页可调（0.15~1） */
+  opacity: var(--ball-opacity, 1);
   transition:
     transform 0.12s ease,
-    box-shadow 0.12s ease;
+    box-shadow 0.12s ease,
+    opacity 0.12s ease;
 }
 
-/* hover 阴影必须比静止态**更小**：窗口留白 24px（球心到底 52px）是硬上限，
-   放大后的球（scale 1.07）连同外发光一起缩放，超出部分会被窗口边缘裁成直线。 */
+/* hover 阴影比静止态**更小**：窗口留白 24px 是硬上限，放大后的球连同
+   外发光一起缩放，超出部分会被窗口边缘裁成直线。 */
 .ball:hover {
-  transform: scale(1.07);
+  transform: scale(1.06);
   box-shadow:
-    0 5px 12px rgba(2, 10, 24, 0.5),
-    0 0 0 2px rgba(245, 119, 42, 0.18),
-    inset 0 0 0 1px rgba(255, 255, 255, 0.22),
-    inset 0 -8px 14px rgba(0, 0, 0, 0.34);
+    0 3px 8px rgba(2, 10, 24, 0.26),
+    0 0 0 3px rgba(255, 255, 255, 0.18),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.3);
 }
 
 .ball:active {

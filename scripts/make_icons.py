@@ -2,9 +2,12 @@
 # -*- coding: utf-8 -*-
 """SnapPin 应用图标生成器。
 
-以用户提供的 SVG（橙圆 + S 曲线）为基础重绘为高质感版本：
-- 深色圆底（垂直渐变 + 顶部径向高光 + 底部暗角 + 边缘亮环）
-- 橙色渐变 S（三段垂直渐变，圆头笔画，带柔和投影）
+风格参照用户桌面那批应用图标（PixPin 的 P、WorkBuddy 的 W、语雀的鸟）：
+**圆角方形底 + 品牌色 + 纯白简洁字形**，扁平现代，去掉了旧的
+"深色圆底 + 橙色渐变 S + 高光/暗角"那套拟物做法。
+
+- 底：圆角矩形（半径 28%），品牌蓝垂直微渐变（顶亮底深）
+- 字：白色 S，圆头笔画；小尺寸加粗（光学补偿）
 - 2x 超采样抗锯齿，输出 PNG 全家 + icon.ico + icon.icns
 
 用法：python scripts/make_icons.py
@@ -21,13 +24,11 @@ OUT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 BASE = 2048          # 超采样基准尺寸（2x of 1024）
 S = BASE / 1024.0    # 设计坐标(1024) → 像素 的比例
 
-# 圆底渐变（顶 → 底）
-BG_TOP = (30, 41, 59)      # #1E293B
-BG_BOTTOM = (11, 17, 30)   # #0B1220
-# S 渐变（顶 → 底）
-S_TOP = (255, 213, 170)    # #FFD5AA
-S_MID = (255, 158, 99)     # #FF9E63
-S_BOTTOM = (245, 119, 42)  # #F5772A
+# 品牌蓝（与 config.themeColor 默认值 #12A5D8 一致）
+BRAND = (0x12, 0xA5, 0xD8)
+BRAND_LIGHT = (0x45, 0xC6, 0xF0)   # 顶部提亮
+# 字形：纯白（扁平风格，不再做渐变）
+GLYPH = (255, 255, 255)
 
 
 # ---------------------------------------------------------------- 贝塞尔工具
@@ -95,118 +96,51 @@ def lerp(a, b, t):
     return tuple(int(round(a[i] + (b[i] - a[i]) * t)) for i in range(3))
 
 
-def make_logo(size, detail=True):
-    """渲染 size×size 图标（RGBA）。
+def rounded_mask(size, radius_ratio=0.28):
+    """圆角方形蒙版（squircle 观感，用普通圆角矩形近似）。"""
+    mask = Image.new("L", (size, size), 0)
+    r = size * radius_ratio
+    ImageDraw.Draw(mask).rounded_rectangle(
+        [0, 0, size - 1, size - 1], radius=r, fill=255
+    )
+    return mask
 
-    detail=True  —— 完整质感版（圆底渐变 + 高光 + 暗角 + 亮环 + S 投影/高光）
-    detail=False —— 小尺寸简化版：去掉投影/高光/暗角，S 笔画加粗、对比提高。
-                    16/32px 下完整质感版的柔和阴影只会糊成一团，必须做「光学尺寸」简化。
-    """
-    # --- 1. 圆底：垂直渐变 ---
+
+def make_logo(size, detail=True):
+    """渲染 size×size 图标（RGBA）：圆角方底 + 白色 S。"""
     bg = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+
+    # --- 1. 圆角底：垂直微渐变（顶亮底深，扁平但有层次） ---
     d = ImageDraw.Draw(bg)
     for y in range(size):
-        t = y / (size - 1)
-        # 轻微非线性，让中部过渡更柔
-        tt = t * t * (3 - 2 * t)
-        d.line([(0, y), (size, y)], fill=lerp(BG_TOP, BG_BOTTOM, tt) + (255,))
-
-    # 圆形裁剪
-    mask = Image.new("L", (size, size), 0)
-    ImageDraw.Draw(mask).ellipse([0, 0, size - 1, size - 1], fill=255)
+        t = y / max(1, size - 1)
+        c = lerp(BRAND_LIGHT, BRAND, min(1.0, t * 1.25))
+        d.line([(0, y), (size, y)], fill=c + (255,))
+    mask = rounded_mask(size)
     bg.putalpha(mask)
 
-    # --- 2. 质感层：顶部径向高光 + 底部暗角（小尺寸跳过，否则糊成一团） ---
-    if detail:
-        gloss = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-        gd = ImageDraw.Draw(gloss)
-        steps = size // 64
-        for i in range(steps):
-            t = i / steps
-            radius = size * 0.62 * (1 - t) + 1
-            alpha = int(26 * (1 - t) ** 2)
-            gd.ellipse(
-                [size * 0.5 - radius, size * 0.18 - radius * 0.55,
-                 size * 0.5 + radius, size * 0.18 + radius * 0.55],
-                fill=(255, 255, 255, alpha),
-            )
-        gloss = gloss.filter(ImageFilter.GaussianBlur(size * 0.02))
-        bg = Image.alpha_composite(bg, Image.composite(gloss, Image.new("RGBA", (size, size), (0, 0, 0, 0)), mask))
-
-        vignette = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-        vd = ImageDraw.Draw(vignette)
-        for i in range(steps):
-            t = i / steps
-            radius = size * 0.55 * (1 - t) + 1
-            alpha = int(34 * (1 - t) ** 2)
-            vd.ellipse(
-                [size * 0.5 - radius, size * 1.02 - radius * 0.5,
-                 size * 0.5 + radius, size * 1.02 + radius * 0.5],
-                fill=(0, 0, 0, alpha),
-            )
-        vignette = vignette.filter(ImageFilter.GaussianBlur(size * 0.02))
-        bg = Image.alpha_composite(bg, Image.composite(vignette, Image.new("RGBA", (size, size), (0, 0, 0, 0)), mask))
-
-    # --- 3. 边缘亮环（小尺寸加强，靠轮廓线撑住清晰度） ---
-    ring = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    rd = ImageDraw.Draw(ring)
-    w = max(1, int(size * (0.006 if detail else 0.014)))
-    ring_alpha = 38 if detail else 70
-    rd.ellipse([w, w, size - 1 - w, size - 1 - w], outline=(255, 255, 255, ring_alpha), width=w)
-    if detail:
-        rd.ellipse([w * 3, w * 3, size - 1 - w * 3, size - 1 - w * 3], outline=(0, 0, 0, 26), width=max(1, w // 2))
-    bg = Image.alpha_composite(bg, Image.composite(ring, Image.new("RGBA", (size, size), (0, 0, 0, 0)), mask))
-
-    # --- 4. S：投影 + 渐变笔画 ---
-    sc = size / 1024.0  # 本尺寸下的坐标比例（make_logo 可能以非 BASE 尺寸调用）
+    # --- 2. 白色 S ---
+    sc = size / 1024.0
     center = [(x * sc, y * sc) for (x, y) in build_s_centerline()]
-    # 笔画宽度：完整版 108；小尺寸按光学尺寸加权（≤24px 更粗，32px 略收）
+    # 笔画宽度：小尺寸按光学补偿加粗（16px 时 104/1024 会糊成灰）
     if detail:
-        stroke_ratio = 108
+        stroke_ratio = 104
     else:
-        stroke_ratio = 152 if size <= 200 else 136
+        stroke_ratio = 150 if size <= 26 else 130
     stroke_w = stroke_ratio * sc
+    stroke_polyline(bg, center, stroke_w, lambda x, y: GLYPH + (255,))
 
-    if detail:
-        shadow = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-        stroke_polyline(
-            shadow,
-            [(x, y + 0.012 * size) for (x, y) in center],
-            stroke_w,
-            lambda x, y: (0, 0, 0, 90),
+    # --- 3. 内描边：小尺寸靠一圈浅白勾边撑清晰度 ---
+    if not detail:
+        ring = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+        w = max(1, int(size * 0.012))
+        ImageDraw.Draw(ring).rounded_rectangle(
+            [w, w, size - 1 - w, size - 1 - w],
+            radius=size * 0.28,
+            outline=(255, 255, 255, 60),
+            width=w,
         )
-        shadow = shadow.filter(ImageFilter.GaussianBlur(size * 0.016))
-        shadow.putalpha(Image.composite(shadow.getchannel("A"), Image.new("L", (size, size), 0), mask))
-        bg = Image.alpha_composite(bg, shadow)
-
-    def s_color(x, y):
-        t = max(0.0, min(1.0, y / size))
-        if detail:
-            if t < 0.5:
-                c = lerp(S_TOP, S_MID, t * 2)
-            else:
-                c = lerp(S_MID, S_BOTTOM, (t - 0.5) * 2)
-        else:
-            # 小尺寸：压缩渐变区间并提亮，避免暗部吃掉字形
-            c = lerp(S_TOP, S_BOTTOM, t)
-        return c + (255,)
-
-    stroke_polyline(bg, center, stroke_w, s_color)
-
-    # --- 5. S 顶部细高光（模拟立体感，小尺寸不需要） ---
-    if detail:
-        hl = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-        stroke_polyline(
-            hl,
-            [(x, y - stroke_w * 0.30) for (x, y) in center],
-            stroke_w * 0.30,
-            lambda x, y: (255, 255, 255, 70),
-        )
-        hl = hl.filter(ImageFilter.GaussianBlur(size * 0.004))
-        # 高光只在 S 笔画范围内显示：用 S 自身 alpha 做遮罩
-        s_mask = bg.getchannel("A")
-        hl.putalpha(Image.composite(hl.getchannel("A"), Image.new("L", (size, size), 0), s_mask))
-        bg = Image.alpha_composite(bg, hl)
+        bg = Image.alpha_composite(bg, ring)
 
     return bg
 

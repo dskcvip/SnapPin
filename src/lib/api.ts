@@ -86,6 +86,8 @@ export interface PinContext {
 export interface AppConfig {
   themeColor: string
   ballSize: number
+  /** 悬浮球不透明度 0.15~1 */
+  ballOpacity: number
   shortcutCapture: string
   shortcutPinClipboard: string
   saveDir: string | null
@@ -443,6 +445,10 @@ export const pinSetIgnoreCursorEvents = (label: string, ignore: boolean): Promis
 export const pinCopy = (label: string): Promise<void> => invoke('pin_copy', { label })
 
 export const pinSave = (label: string): Promise<void> => invoke('pin_save', { label })
+
+/** 悬浮球实时预览（拖滑条时调用，不落盘） */
+export const ballPreview = (size: number, opacity: number): Promise<void> =>
+  invoke('ball_preview', { size, opacity })
 
 export const ballCommand = (cmd: BallCommand): Promise<void> =>
   invoke('ball_command', { cmd })

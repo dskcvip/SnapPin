@@ -1474,11 +1474,17 @@ export function OverlayWindow() {
           {/* 工具属性（参考图里没有：仅选中工具后出现在工具条下方，保持主条 1:1） */}
           {tool && (
             <div
-              className="sb-props"
+              className={`sb-props${tool === 'sticker' ? ' pad-10' : ''}`}
               ref={propsRef}
               style={
                 anchor && barBox
-                  ? { left: barBox.left, width: barBox.width, top: barBox.bottom + 6 }
+                  ? {
+                      // 只对齐左边缘与顶边，**不设 width**：宽度由内容决定。
+                      // 之前设成和一级条同宽，窄工具条后面就拖出一大截空白
+                      // （贴纸面板搜索框右侧那片"多余"就是这么来的）。
+                      left: barBox.left,
+                      top: barBox.bottom + 6,
+                    }
                   : undefined
               }
               onPointerDown={(e) => e.stopPropagation()}

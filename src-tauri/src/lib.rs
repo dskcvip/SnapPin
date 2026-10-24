@@ -368,6 +368,7 @@ pub fn run() {
             commands::pin_hide_group,
             commands::pin_show_all,
             commands::ball_command,
+            commands::ball_preview,
             commands::ball_menu,
             commands::pin_menu_open,
             commands::read_image_bytes,

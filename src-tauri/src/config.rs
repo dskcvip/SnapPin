@@ -9,6 +9,8 @@ use std::path::Path;
 pub struct AppConfig {
     pub theme_color: String,
     pub ball_size: u32,
+    /// 悬浮球不透明度（0.2~1.0），只影响球的视觉，不影响窗口
+    pub ball_opacity: f64,
     pub shortcut_capture: String,
     pub shortcut_pin_clipboard: String,
     pub save_dir: Option<String>,
@@ -38,6 +40,7 @@ impl Default for AppConfig {
         Self {
             theme_color: "#12A5D8".to_string(),
             ball_size: 56,
+            ball_opacity: 1.0,
             shortcut_capture: DEFAULT_CAPTURE.to_string(),
             shortcut_pin_clipboard: DEFAULT_PIN.to_string(),
             save_dir: None,

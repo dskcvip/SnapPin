@@ -1773,6 +1773,29 @@ pub fn menu_action(app: AppHandle, id: String) -> Result<(), String> {
     Ok(())
 }
 
+/// 悬浮球**实时预览**：拖动尺寸/不透明度滑条时调用，改完不落盘。
+///
+/// 为什么单独一条命令而不是直接 update_config：
+/// 1) 拖滑条每帧存盘会疯狂写 config.json；
+/// 2) 预览要允许"取消"——用户松手不保存时，下次启动仍是旧值。
+/// 落盘仍走 update_config，这里只负责把当前值推给球窗口。
+#[tauri::command]
+pub async fn ball_preview(app: AppHandle, size: u32, opacity: f64) -> Result<(), String> {
+    let size = size.clamp(24, 160) as f64;
+    let opacity = opacity.clamp(0.15, 1.0);
+    let app_cb = app.clone();
+    windows::run_on_main(&app, move |app| {
+        windows::resize_ball_window(app, size);
+        if let Some(w) = app_cb.get_webview_window(windows::BALL_LABEL) {
+            let _ = w.emit(
+                "ball-preview",
+                serde_json::json!({ "size": size, "opacity": opacity }),
+            );
+        }
+    });
+    Ok(())
+}
+
 /// 对调用方窗口启动 OS 原生拖拽循环。
 #[tauri::command]
 pub fn drag_window(window: Window) -> Result<(), String> {
@@ -1802,11 +1825,19 @@ pub async fn update_config(
         let mut guard = state.config.lock().unwrap();
         *guard = config.clone();
     }
-    // 悬浮球尺寸变化立即生效（窗口操作须在主线程执行）
+    // 悬浮球尺寸变化立即生效（窗口操作须在主线程执行）。
+    //
+    // ★ 窗口尺寸必须是 `球径 + 2×留白`（见 windows::ball_window_size）：
+    //   早先这里直接 set_size(球径, 球径)，窗口正好等于球 —— 投影、hover 放大、
+    //   1px 描边全被窗口边界裁掉，表现为"尺寸调小后浮球显示不完整"。
+    //   同时要重新贴右上角：窗口变小后旧位置会把球推离原位。
     let new_size = config.ball_size as f64;
+    let opacity = config.ball_opacity;
     windows::run_on_main(&app, move |app| {
+        windows::resize_ball_window(app, new_size);
         if let Some(w) = app.get_webview_window(windows::BALL_LABEL) {
-            let _ = w.set_size(tauri::LogicalSize::new(new_size, new_size));
+            // 不透明度交给前端 CSS（Windows 下 WebView2 窗口没有 set_opacity）
+            let _ = w.emit("ball-preview", serde_json::json!({ "size": new_size, "opacity": opacity }));
         }
     });
     // 快捷键变化：热重注册（M7）。注册是全局的，换键要先注销旧的；

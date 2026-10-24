@@ -1087,6 +1087,11 @@
 
 /* 贴纸面板：**单行二级条** —— 贴纸 + 颜色 + 尺寸滑块 + 搜索框横排。
    搜索结果是下拉浮层（.sb-sticker-drop），不占这一行的高度。 */
+/* 贴纸面板：搜索框右侧只留 10px（右内边距吃满，不留其它空白） */
+.sb-props.pad-10 {
+  padding-right: 10px;
+}
+
 .sb-sticker-row {
   display: flex;
   flex-direction: row;
@@ -1240,11 +1245,9 @@
 /* 搜索框（右侧，撑满剩余宽度） */
 .sb-sticker-search {
   position: relative;
-  flex: 1 1 auto;
-  min-width: 110px;
-  /* 搜索框右侧留 10px 空白（用户要求）：面板右内边距之外再让出 10px，
-     搜索框不再顶到面板边缘。 */
-  margin-right: 10px;
+  /* 固定宽度：面板宽度由内容决定，flex:1 在这里没有可分配空间 */
+  flex: 0 0 auto;
+  width: 190px;
 }
 
 .sb-sticker-input {
