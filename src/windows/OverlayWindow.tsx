@@ -89,6 +89,8 @@ const MIN_SIZE = 3
  * 各一个框、各一条工具栏）。一次截图只能有一个选区，所以谁开始画，
  * 就广播让别的屏把自己的选区清掉。
  */
+/** 跨屏"只保留一个悬停高亮"的事件名（选中同理见 EVT_CLEAR_OTHER_SEL）。 */
+const EVT_HOVER_OWNER = 'overlay-hover-owner'
 const EVT_CLEAR_OTHER_SEL = 'overlay-clear-selection'
 
 /** 选区锚点：四角 + 四边中点（边的热区是透明的，只给抓手和光标）。 */
@@ -811,6 +813,9 @@ export function OverlayWindow() {
   }, [hint, hintW])
 
   /** 二级面板居中于按钮，但左右两侧不得超出一级工具条的左右边界 */
+  /** 本浮层的窗口 label：用于识别"这条广播是不是我发的"。 */
+  const myLabel = getCurrentWindow().label
+
   /** 悬停识窗查询（节流 ~15fps + 乱序丢弃）。只查顶层窗口，
    *  查不到（光标下只有我们自己的窗口）就清空高亮。 */
   const querySnap = useCallback(
@@ -820,6 +825,10 @@ export function OverlayWindow() {
       if (now - snapAtRef.current < 65) return
       snapAtRef.current = now
       const seq = ++snapSeqRef.current
+      // 广播"光标在我这屏"：其它屏必须清掉自己的高亮，否则光标移过去之后
+      // 原屏的高亮会**冻结**在最后悬停的窗口上（用户实测：两块屏上各有一个
+      // 高亮框，一边 WorkBuddy 一边资源管理器）。
+      emit(EVT_HOVER_OWNER, { owner: myLabel }).catch(() => {})
       windowSnap(ctx.monitorId, x, y)
         .then((w) => {
           if (seq === snapSeqRef.current) setHoverWin(w)
@@ -833,7 +842,7 @@ export function OverlayWindow() {
           if (seq === snapSeqRef.current) setHoverWin(null)
         })
     },
-    [ctx],
+    [ctx, myLabel],
   )
 
   const anchorX = (x: number, w: number) => {
@@ -844,9 +853,6 @@ export function OverlayWindow() {
     if (bar.width <= w) return bar.left + half
     return Math.min(Math.max(x, bar.left + half), bar.right - half)
   }
-
-  /** 本浮层的窗口 label：用于识别"这条广播是不是我发的" */
-  const myLabel = getCurrentWindow().label
 
   /** 广播：让其它显示器的浮层清掉自己的选区。 */
   const clearOtherSelections = useCallback(() => {
@@ -863,6 +869,19 @@ export function OverlayWindow() {
         setDraft(null)
         setHoverWin(null)
       }
+    })
+      .then((f) => {
+        off = f
+      })
+      .catch(() => {})
+    return () => off?.()
+  }, [myLabel])
+
+  /** 光标在别的屏 → 清掉我这块屏的悬停高亮（否则会冻结在最后悬停的窗口上）。 */
+  useEffect(() => {
+    let off: (() => void) | null = null
+    listen<{ owner?: string }>(EVT_HOVER_OWNER, (e) => {
+      if (e.payload?.owner && e.payload.owner !== myLabel) setHoverWin(null)
     })
       .then((f) => {
         off = f
@@ -929,9 +948,12 @@ export function OverlayWindow() {
     if (!d && !rect && !tool) querySnap(e.clientX, e.clientY)
   }
 
-  // 光标移出浮层：收起放大镜（拖选中不移出——指针被窗口捕获）
+  // 光标移出浮层：收起放大镜 + 清掉悬停高亮（拖选中不移出——指针被窗口捕获）
   const onPointerLeave = () => {
-    if (!dragRef.current) setCursor(null)
+    if (!dragRef.current) {
+      setCursor(null)
+      setHoverWin(null)
+    }
   }
 
   const onPointerUp = () => {

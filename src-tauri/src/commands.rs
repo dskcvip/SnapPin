@@ -2580,11 +2580,26 @@ pub fn ocr_result(app: AppHandle) -> OcrResultPayload {
 /// 只会命中浮层，必须沿 z 序往下找第一个"别人家的、可见的、包含该点"的窗。
 #[tauri::command]
 pub fn window_snap(
+    app: AppHandle,
     state: State<'_, AppState>,
     monitor_id: String,
     x: f64,
     y: f64,
 ) -> Option<crate::winsnap::WindowSnap> {
+    // 只跳过**截图浮层自己**，不按进程过滤。
+    // 早期按"本进程"过滤 → 光标停在设置窗上时，设置窗被跳过，
+    // 扫描继续往下找到它背后的程序，高亮就跑偏了（用户实测反馈）。
+    #[cfg(windows)]
+    let skip: Vec<isize> = app
+        .webview_windows()
+        .keys()
+        .filter(|label| label.starts_with(crate::windows::OVERLAY_PREFIX))
+        .map(|label| overlay_window_hwnd(&app, label))
+        .filter(|h| *h != 0)
+        .collect();
+    #[cfg(not(windows))]
+    let skip: Vec<isize> = Vec::new();
+
     // 只在"吸附结果变了"时打日志（含变成 none）：前端 ~15fps 调用，
     // 每次都打会淹没日志；但只记"找到了"又分不清"没调用"和"没命中"。
     static LAST: std::sync::Mutex<Option<Option<String>>> = std::sync::Mutex::new(None);
@@ -2593,7 +2608,7 @@ pub fn window_snap(
         let m = monitors.iter().find(|m| m.id == monitor_id)?;
         let sf = m.scale_factor as f64;
         // monitor 原点在 Windows 上是物理像素（见 MonitorShot::logical_origin）
-        let mut s = crate::winsnap::snap_at(x, y, m.x as f64, m.y as f64, sf)?;
+        let mut s = crate::winsnap::snap_at(x, y, m.x as f64, m.y as f64, sf, &skip)?;
         // 窗口可能跨屏：钳进当前显示器（浮层逻辑坐标以本显示器左上为原点）
         let lw = m.width as f64 / sf;
         let lh = m.height as f64 / sf;
