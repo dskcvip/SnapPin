@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   appInfo,
   ballCommand,
@@ -15,6 +15,7 @@ import {
   type AppInfo,
   type TranslationConfig,
 } from '../lib/api'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import '../styles/main.css'
 
 /** 左侧导航的一项。 */
@@ -220,6 +221,39 @@ export function MainWindow() {
 
   // 快捷键录制中（字段名 → 等待用户按键）
   const [recording, setRecording] = useState<string | null>(null)
+
+  /**
+   * 关闭前的未保存保护。
+   *
+   * 起因（实测事故）：用户在模型弹层填了 API Key、点了「确定」，但没点页面
+   * 底部的「保存设置」就关窗 —— 改动静默丢失，回到设置页还显示"有未保存的
+   * 修改"，用户以为"设置好了但无效"。Key 丢了尤其难察觉（输入框是密码框，
+   * 重开只看到一串点）。
+   *
+   * 策略：第一次点关闭 → 拦下并提示；5 秒内再点一次 → 认可"放弃修改"。
+   * 不用原生确认框（要额外 dialog 权限，且会阻塞 UI 线程）。
+   */
+  const dirtyRef = useRef(false)
+  dirtyRef.current = dirty
+  const closeAskedAt = useRef(0)
+  useEffect(() => {
+    let un: (() => void) | null = null
+    getCurrentWindow()
+      .onCloseRequested((e) => {
+        if (!dirtyRef.current) return
+        const now = Date.now()
+        if (now - closeAskedAt.current < 5000) return // 二次确认：放弃修改
+        e.preventDefault()
+        closeAskedAt.current = now
+        setToast('有未保存的修改：再点一次关闭将丢弃；要保留请先点「保存设置」')
+        window.setTimeout(() => setToast(''), 5000)
+      })
+      .then((f) => {
+        un = f
+      })
+      .catch(() => {})
+    return () => un?.()
+  }, [])
 
   // 模型编辑弹层：null = 关闭；'new' = 新建；否则是模型 id
   const [editing, setEditing] = useState<string | null>(null)

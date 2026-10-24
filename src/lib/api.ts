@@ -159,6 +159,18 @@ export const uiLog = (msg: string): void => {
 export const hotkeysSuspend = (): Promise<void> => invoke('hotkeys_suspend')
 export const hotkeysResume = (): Promise<void> => invoke('hotkeys_resume')
 
+/**
+ * 缩放贴图：真改窗口尺寸（图片按新尺寸渲染）。
+ *
+ * 不用 CSS `transform`：transform 只改绘制不改窗口，放大超出窗口就被裁掉、
+ * 缩小则四周留透明边——这是路线图 M2 里遗留的"贴图缩放同步改窗口"。
+ */
+export const pinSetDisplaySize = (
+  label: string,
+  width: number,
+  height: number,
+): Promise<void> => invoke('pin_set_display_size', { label, width, height })
+
 export const startCapture = (): Promise<CapturePayload> => invoke('start_capture')
 
 export const overlayContext = (): Promise<OverlayContext> => invoke('overlay_context')

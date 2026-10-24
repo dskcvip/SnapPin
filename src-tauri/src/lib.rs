@@ -360,6 +360,7 @@ pub fn run() {
             commands::pin_copy,
             commands::pin_save,
             commands::pin_apply_edit,
+            commands::pin_set_display_size,
             commands::ball_command,
             commands::ball_menu,
             commands::pin_menu_open,

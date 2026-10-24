@@ -8,6 +8,7 @@ import {
   pinClose,
   pinContext,
   pinCopy,
+  pinSetDisplaySize,
   pinMenuOpen,
   pinPublishFlags,
   pinSave,
@@ -91,6 +92,18 @@ export function PinWindow() {
   const [toolbar, setToolbar] = useState(true)
   const [passThrough, setPassThrough] = useState(false)
   const [edit, setEdit] = useState<EditParams>(DEFAULT_EDIT)
+  /**
+   * 滚轮缩放：**真改窗口尺寸**，不是 CSS transform（见 pin.css / api.ts 注释）。
+   * 窗口尺寸改在 Rust 侧做（resize_pin_keep_center 会保住中心不动，
+   * 且 set_size + set_position 一次完成，不会看到"先大后挪"的抖动）。
+   */
+  useEffect(() => {
+    if (!ctx) return
+    const w = Math.max(8, Math.round(ctx.width * scale))
+    const h = Math.max(8, Math.round(ctx.height * scale))
+    pinSetDisplaySize(ctx.label, w, h).catch(() => {})
+  }, [ctx, scale])
+
   const [origReady, setOrigReady] = useState(false)
   const passTimer = useRef<number | undefined>(undefined)
   /** 原图（只加载一次；后续处理都从它重算，绝不拿处理结果当新原图） */
@@ -399,10 +412,11 @@ export function PinWindow() {
         className="pin-img"
         src={imgSrc(ctx.src)}
         style={{
-          width: ctx.width,
-          height: ctx.height,
+          width: Math.round(ctx.width * scale),
+          height: Math.round(ctx.height * scale),
           opacity,
-          transform: `scale(${scale})`,
+          // 阴影同比放大（见 pin.css 的 --pin-k）
+          ['--pin-k' as string]: String(scale),
         }}
         draggable={false}
         alt=""

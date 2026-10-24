@@ -7,7 +7,9 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type Dispatch,
   type PointerEvent as ReactPointerEvent,
+  type SetStateAction,
 } from 'react'
 import {
   cancelCapture,
@@ -58,6 +60,7 @@ import {
   // StickerIcon,  // 贴纸工具未开发，按钮已临时撤下（见工具条处注释）
   TextIcon,
   TranslateIcon,
+  RedoIcon,
   UndoIcon,
   WatermarkIcon,
   ZoomIcon,
@@ -188,6 +191,14 @@ export function OverlayWindow() {
   const [actError, setActError] = useState<string | null>(null)
   // 标注状态
   const [shapes, setShapes] = useState<ShapeDraft[]>([])
+  /**
+   * 重做栈：撤销时把被摘掉的形状压进来，重做时弹回 shapes。
+   *
+   * 纯"删最后一个"的撤销（原先的实现）没有重做；有了这个栈之后，
+   * 只有**新增标注**会清空它（标准编辑器语义：画了新东西，旧的撤销分支作废）。
+   */
+  const redoRef = useRef<ShapeDraft[]>([])
+  const [redoCount, setRedoCount] = useState(0)
   /** null = 未选工具（"选择"态）：此时画布不拦截鼠标，可在选区内重新框选 */
   const [tool, setTool] = useState<AnnotateTool | null>(null)
   const [color, setColor] = useState<Rgba>(PRESET_COLORS[0])
@@ -429,6 +440,8 @@ export function OverlayWindow() {
       setDraft(null)
       setHoverWin(null)
       setShapes([])
+      redoRef.current = []
+      setRedoCount(0)
       setTool(null)
       setHint(null)
       setCursor(null)
@@ -506,8 +519,13 @@ export function OverlayWindow() {
         e.preventDefault()
         void finish('copy')
       } else if (e.ctrlKey && e.key.toLowerCase() === 'z') {
+        // Ctrl+Shift+Z 是重做（macOS/PS 习惯）；Ctrl+Y 也给，Windows 习惯
         e.preventDefault()
-        setShapes((s) => s.slice(0, -1))
+        if (e.shiftKey) redoShape()
+        else undoShape()
+      } else if (e.ctrlKey && e.key.toLowerCase() === 'y') {
+        e.preventDefault()
+        redoShape()
       } else if (
         (e.key === 'c' || e.key === 'C') &&
         !e.ctrlKey &&
@@ -921,6 +939,41 @@ export function OverlayWindow() {
     setHoverWin(null)
   }
 
+  /** 撤销：摘掉最后一个形状并压入重做栈。 */
+  const undoShape = useCallback(() => {
+    setShapes((prev) => {
+      if (prev.length === 0) return prev
+      redoRef.current = [...redoRef.current, prev[prev.length - 1]]
+      setRedoCount(redoRef.current.length)
+      return prev.slice(0, -1)
+    })
+  }, [])
+
+  /** 重做：把重做栈顶弹回形状列表。 */
+  const redoShape = useCallback(() => {
+    setShapes((prev) => {
+      const stack = redoRef.current
+      if (stack.length === 0) return prev
+      const back = stack[stack.length - 1]
+      redoRef.current = stack.slice(0, -1)
+      setRedoCount(redoRef.current.length)
+      return [...prev, back]
+    })
+  }, [])
+
+  /** 供标注层用的 shapes setter：新增形状时清空重做栈。 */
+  const setShapesFromLayer = useCallback<Dispatch<SetStateAction<ShapeDraft[]>>>((action) => {
+    setShapes((prev) => {
+      const next =
+        typeof action === 'function' ? (action as (p: ShapeDraft[]) => ShapeDraft[])(prev) : action
+      if (next.length > prev.length) {
+        redoRef.current = []
+        setRedoCount(0)
+      }
+      return next
+    })
+  }, [])
+
   const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
     if (e.button !== 0 || !ctx) return
     // 本屏开始画 → 让其它屏清掉它们的选区（双屏只能有一个选区/一条工具条）
@@ -1096,7 +1149,7 @@ export function OverlayWindow() {
             eraserRadius={eraserRadius}
             zoomLevel={zoomLevel}
             shapes={shapes}
-            onShapesChange={setShapes}
+            onShapesChange={setShapesFromLayer}
             onPickSample={onPickSample}
             onPickEnd={onPickEnd}
             onQrRegion={(x, y, w, h) => void onQrRegion(x, y, w, h)}
@@ -1336,9 +1389,17 @@ export function OverlayWindow() {
                 className="sbtn"
                 title="撤销 (Ctrl+Z)"
                 disabled={shapes.length === 0}
-                onClick={() => setShapes((s) => s.slice(0, -1))}
+                onClick={undoShape}
               >
                 <UndoIcon />
+              </button>
+              <button
+                className="sbtn"
+                title="重做 (Ctrl+Shift+Z / Ctrl+Y)"
+                disabled={redoCount === 0}
+                onClick={redoShape}
+              >
+                <RedoIcon />
               </button>
               <button
                 className="sbtn"

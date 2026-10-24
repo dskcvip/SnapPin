@@ -235,6 +235,17 @@ export const UndoIcon = (p: IconProps) => (
   </Icon>
 )
 
+/// 重做（向右的回转箭头，是撤销的**水平镜像**）。
+///
+/// x 轴镜像：`x' = 24 - x`。手写而不是给 UndoIcon 加 transform，
+/// 是因为反转后的笔画端点要落到整数附近，缩放变换会让线条发虚。
+export const RedoIcon = (p: IconProps) => (
+  <Icon scale={1.1} {...p}>
+    <path d="M15.6 6.7 19.7 10.7l-4.1 4" />
+    <path d="M19.4 10.7H8.8a4.2 4.2 0 0 0 0 8.4H20" />
+  </Icon>
+)
+
 /** 保存（托盘 + 向下箭头） */
 export const SaveIcon = (p: IconProps) => (
   <Icon scale={1.28} {...p}>

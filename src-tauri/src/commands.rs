@@ -1260,6 +1260,29 @@ pub fn pin_copy(app: AppHandle, state: State<'_, AppState>, label: String) -> Re
 /// async 原因：内部要调 `resize_pin_keep_center`，它会 `run_on_main_thread`
 /// 投递闭包并**等**完成；同步命令本身就在主线程跑，会自等待死锁
 /// （同 update_config / ball_menu 的注释）。
+/// 只改贴图的**显示尺寸**（滚轮缩放），不重渲染图片。
+///
+/// 为什么单独一个命令：`pin_apply_edit` 要传新 PNG（旋转/翻转才会变像素），
+/// 而缩放只是"同一张图放大显示" —— 每滚一格都重新编码 PNG 纯属浪费
+/// （大图上一次编码几十毫秒，滚轮会卡）。窗口尺寸变化本身由
+/// `resize_pin_keep_center` 保证中心不动。
+///
+/// async 原因同 `pin_apply_edit`：内部要 `run_on_main_thread`。
+#[tauri::command]
+pub async fn pin_set_display_size(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    label: String,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
+    // 与其它 pin 命令一致：只认登记表里的窗口，防止前端拿任意 label 改尺寸
+    if !state.pins.lock().unwrap().contains_key(&label) {
+        return Err("pin window not found".to_string());
+    }
+    windows::resize_pin_keep_center(&app, &label, width, height)
+}
+
 #[tauri::command]
 pub async fn pin_apply_edit(
     app: AppHandle,

@@ -18,10 +18,16 @@
   display: block;
   border-radius: 2px;
   /* 内边框（贴近参考观感）+ 淡橙色外阴影；
-     窗口比图片大一圈（Rust 侧 PIN_MARGIN），阴影才有空间显示 */
+     窗口比图片大一圈（Rust 侧 PIN_MARGIN），阴影才有空间显示。
+     阴影随缩放同比放大（--pin-k 由 PinWindow 写入 scale）：
+     固定 14px 的模糊在小图上很假、在大图上又太薄。上限 2 倍，
+     否则放大到 8 倍时阴影能糊满半屏。 */
+  --pin-k: 1;
+  --pin-k-clamped: min(var(--pin-k), 2);
   box-shadow:
     inset 0 0 0 1px rgba(255, 255, 255, 0.55),
-    0 0 14px 2px rgba(255, 150, 64, 0.3);
+    0 0 calc(14px * var(--pin-k-clamped)) calc(2px * var(--pin-k-clamped))
+      rgba(255, 150, 64, 0.3);
   -webkit-user-drag: none;
 }
 
