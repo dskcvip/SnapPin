@@ -92,19 +92,19 @@ function StickerPanel(p: Props) {
           <ColorPickerGlyph />
         </button>
         {openColor && (
-          <div className="sb-dd-panel" onPointerDown={(e) => e.stopPropagation()}>
+          /* 向右展开的横向浮层：9 个色点一排 */
+          <div className="sb-fly" onPointerDown={(e) => e.stopPropagation()}>
             {STICKER_COLORS.map((c) => (
               <button
                 key={c}
-                className={`sb-dd-item ${p.stickerColor === c ? 'on' : ''}`}
+                className={`swatch-dot ${p.stickerColor === c ? 'on' : ''}`}
+                style={{ background: c }}
+                title={STICKER_COLOR_NAMES[c] ?? c}
                 onClick={() => {
                   p.onStickerColor(c)
                   setOpenColor(false)
                 }}
-              >
-                <span className="sb-dd-dot" style={{ background: c }} />
-                {STICKER_COLOR_NAMES[c] ?? c}
-              </button>
+              />
             ))}
           </div>
         )}
@@ -123,12 +123,11 @@ function StickerPanel(p: Props) {
           {p.stickerSize}px
         </button>
         {openSize && (
-          <div className="sb-dd-panel sb-dd-size" onPointerDown={(e) => e.stopPropagation()}>
-            <div className="sb-dd-size-val">{p.stickerSize}px</div>
-            {/* 竖排滑块：writing-mode + direction 让"值越大越靠上"
-                （Chromium 121+ 原生支持，WebView2 现行版本都带）。 */}
+          /* 向右展开的横向浮层：当前值 + 横排滑块 */
+          <div className="sb-fly" onPointerDown={(e) => e.stopPropagation()}>
+            <span className="sb-fly-val">{p.stickerSize}px</span>
             <input
-              className="sb-dd-vslider"
+              className="sb-fly-slider"
               type="range"
               min={16}
               max={160}

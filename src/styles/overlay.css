@@ -1176,75 +1176,57 @@
 }
 
 /* 竖排下拉面板 */
-/* 大小下拉：竖排滑块 + 当前值 */
-.sb-dd-size {
-  align-items: center;
-  min-width: 44px;
-  padding: 8px 5px;
+/* 颜色浮层里的色点（.sb-dd 那版样式随竖排下拉一起删掉了，这里补回） */
+.swatch-dot {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid rgba(15, 23, 42, 0.18);
+  border-radius: 50%;
+  cursor: pointer;
 }
 
-.sb-dd-size-val {
+.swatch-dot.on {
+  outline: 2px solid var(--brand);
+  outline-offset: 1px;
+}
+
+/* 向右展开的横向浮层（颜色 / 大小）：
+   起点贴着按钮右边，垂直居中；内容横排，故宽度由内容决定。 */
+.sb-fly {
+  position: absolute;
+  left: calc(100% + 6px);
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 30;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 9px;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  box-shadow: var(--shadow-lg);
+  white-space: nowrap;
+}
+
+.sb-fly-val {
+  min-width: 34px;
   font-size: 12px;
   color: var(--text);
-  padding-bottom: 4px;
+  text-align: right;
 }
 
-.sb-dd-vslider {
-  writing-mode: vertical-rl;
-  direction: rtl;
-  width: 22px;
-  height: 140px;
+.sb-fly-slider {
+  width: 128px;
   margin: 0;
   accent-color: var(--brand);
   cursor: pointer;
 }
 
-.sb-dd-panel {
-  position: absolute;
-  top: calc(100% + 6px);
-  left: 0;
-  z-index: 30;
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  min-width: 92px;
-  padding: 5px;
-  background: var(--panel-bg);
-  border: 1px solid var(--panel-border);
-  border-radius: 8px;
-  box-shadow: var(--shadow-lg);
-}
 
-.sb-dd-item {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  padding: 5px 7px;
-  font-size: 12px;
-  color: var(--text);
-  background: transparent;
-  border: none;
-  border-radius: 5px;
-  cursor: pointer;
-  text-align: left;
-}
-
-.sb-dd-item:hover {
-  background: rgba(15, 23, 42, 0.06);
-}
-
-.sb-dd-item.on {
-  color: var(--brand);
-  background: rgba(18, 165, 216, 0.1);
-}
-
-.sb-dd-dot {
-  width: 13px;
-  height: 13px;
-  border: 1px solid rgba(15, 23, 42, 0.18);
-  border-radius: 50%;
-  flex: 0 0 auto;
-}
 
 /* 紧凑滑条（单行里不放量名） */
 .sb-width.compact {
@@ -1260,6 +1242,9 @@
   position: relative;
   flex: 1 1 auto;
   min-width: 110px;
+  /* 搜索框右侧留 10px 空白（用户要求）：面板右内边距之外再让出 10px，
+     搜索框不再顶到面板边缘。 */
+  margin-right: 10px;
 }
 
 .sb-sticker-input {
