@@ -96,6 +96,22 @@ def lerp(a, b, t):
     return tuple(int(round(a[i] + (b[i] - a[i]) * t)) for i in range(3))
 
 
+def s_metrics(size):
+    """按最终像素尺寸给 S 的笔画比例与字形缩放（光学补偿）。
+
+    小尺寸的问题不是"没超采样"，而是**白笔画太细**：抗锯齿把 1~2px 的笔画
+    和背景混在一起，视觉上就糊了。这里直接加粗 + 略放大字形，
+    保证 16px 下 S 的转折仍能分辨。
+    """
+    if size <= 20:
+        return 182, 1.10
+    if size <= 26:
+        return 162, 1.06
+    if size <= 40:
+        return 142, 1.02
+    return 104, 1.0
+
+
 def rounded_mask(size, radius_ratio=0.28):
     """圆角方形蒙版（squircle 观感，用普通圆角矩形近似）。"""
     mask = Image.new("L", (size, size), 0)
@@ -120,14 +136,20 @@ def make_logo(size, detail=True):
     bg.putalpha(mask)
 
     # --- 2. 白色 S ---
+    #
+    # 光学补偿（用户 2026-10-25 提醒"注意清晰度"）：1024 基准下 104 的笔画比例
+    # 缩到 16px 只有 1.6px，抗锯齿会把笔画吃成灰糊 —— 小尺寸必须同时
+    #   a) 加粗笔画  b) 把字形整体放大一点，让"白/蓝"面积比站得住
+    # 判定按**最终像素尺寸**分档，而不是看 detail 标志。
     sc = size / 1024.0
-    center = [(x * sc, y * sc) for (x, y) in build_s_centerline()]
-    # 笔画宽度：小尺寸按光学补偿加粗（16px 时 104/1024 会糊成灰）
-    if detail:
-        stroke_ratio = 104
-    else:
-        stroke_ratio = 150 if size <= 26 else 130
-    stroke_w = stroke_ratio * sc
+    stroke_ratio, glyph_scale = s_metrics(size)
+    cx0 = cy0 = 512.0
+    center = [
+        ((x - cx0) * glyph_scale * sc + size / 2.0,
+         (y - cy0) * glyph_scale * sc + size / 2.0)
+        for (x, y) in build_s_centerline()
+    ]
+    stroke_w = stroke_ratio * glyph_scale * sc
     stroke_polyline(bg, center, stroke_w, lambda x, y: GLYPH + (255,))
 
     # --- 3. 内描边：小尺寸靠一圈浅白勾边撑清晰度 ---
