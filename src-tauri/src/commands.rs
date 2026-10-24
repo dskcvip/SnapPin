@@ -1260,6 +1260,151 @@ pub fn pin_copy(app: AppHandle, state: State<'_, AppState>, label: String) -> Re
 /// async 原因：内部要调 `resize_pin_keep_center`，它会 `run_on_main_thread`
 /// 投递闭包并**等**完成；同步命令本身就在主线程跑，会自等待死锁
 /// （同 update_config / ball_menu 的注释）。
+/// 贴图默认分组名
+pub const DEFAULT_PIN_GROUP: &str = "默认";
+
+/// 可选分组（右键菜单里切换归属）
+pub const PIN_GROUPS: [&str; 4] = ["默认", "工作", "收藏", "重要"];
+
+// ---- 分组的核心逻辑（自由函数）----
+// 为什么不用 `State<'_, AppState>` 参数：`menu_action` 里也要调它们，
+// 而 Tauri 的 `State` 只能在命令签名里出现、无法手工构造。所以这里拆成
+// 自由函数，命令壳只负责转发。
+
+fn pin_groups_impl(state: &AppState) -> Vec<String> {
+    let guard = state.pins.lock().unwrap();
+    let mut out: Vec<String> = PIN_GROUPS.iter().map(|g| g.to_string()).collect();
+    for m in guard.values() {
+        if !m.group.is_empty() && !out.contains(&m.group) {
+            out.push(m.group.clone());
+        }
+    }
+    out
+}
+
+fn pin_group_of_impl(state: &AppState, label: &str) -> String {
+    state
+        .pins
+        .lock()
+        .unwrap()
+        .get(label)
+        .map(|m| m.group.clone())
+        .unwrap_or_default()
+}
+
+fn pin_set_group_impl(state: &AppState, label: &str, group: &str) {
+    let mut guard = state.pins.lock().unwrap();
+    if let Some(m) = guard.get_mut(label) {
+        // 分组名去首尾空白；空值回退默认（否则"空组"在菜单里没法看）
+        let g = group.trim();
+        m.group = if g.is_empty() {
+            DEFAULT_PIN_GROUP.to_string()
+        } else {
+            g.to_string()
+        };
+    }
+}
+
+/// 批量设置贴图可见性（窗口操作走主线程，与其它 pin 命令一致）
+fn set_pins_visible(app: &AppHandle, items: Vec<(String, bool)>) {
+    let app_cb = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        for (label, visible) in items {
+            if let Some(w) = app_cb.get_webview_window(&label) {
+                if visible {
+                    let _ = w.show();
+                } else {
+                    let _ = w.hide();
+                }
+            }
+        }
+    });
+}
+
+fn pin_show_group_only_impl(app: &AppHandle, state: &AppState, group: &str) {
+    let items: Vec<(String, bool)> = state
+        .pins
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(l, m)| (l.clone(), m.group == group))
+        .collect();
+    set_pins_visible(app, items);
+}
+
+fn pin_hide_group_impl(app: &AppHandle, state: &AppState, group: &str) {
+    let items: Vec<(String, bool)> = state
+        .pins
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(l, m)| (l.clone(), m.group != group))
+        .collect();
+    set_pins_visible(app, items);
+}
+
+fn pin_show_all_impl(app: &AppHandle, state: &AppState) {
+    let items: Vec<(String, bool)> = state
+        .pins
+        .lock()
+        .unwrap()
+        .keys()
+        .map(|l| (l.clone(), true))
+        .collect();
+    set_pins_visible(app, items);
+}
+
+// ---- 命令壳 ----
+
+/// 当前存活贴图的分组清单（去重，含预设四项）。
+/// 右键菜单的「分组」子菜单靠它渲染。
+#[tauri::command]
+pub fn pin_groups(state: State<'_, AppState>) -> Vec<String> {
+    pin_groups_impl(&state)
+}
+
+/// 某个贴图当前所在分组
+#[tauri::command]
+pub fn pin_group_of(state: State<'_, AppState>, label: String) -> String {
+    pin_group_of_impl(&state, &label)
+}
+
+/// 把贴图移到指定分组；返回刷新后的分组清单（菜单据此重画）。
+#[tauri::command]
+pub fn pin_set_group(state: State<'_, AppState>, label: String, group: String) -> Vec<String> {
+    pin_set_group_impl(&state, &label, &group);
+    pin_groups_impl(&state)
+}
+
+/// 只看本组：隐藏其它分组的贴图（贴图一多，屏幕上一片叠加时最有用）
+#[tauri::command]
+pub fn pin_show_group_only(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    group: String,
+) -> Result<(), String> {
+    pin_show_group_only_impl(&app, &state, &group);
+    Ok(())
+}
+
+/// 隐藏某一分组的全部贴图
+#[tauri::command]
+pub fn pin_hide_group(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    group: String,
+) -> Result<(), String> {
+    pin_hide_group_impl(&app, &state, &group);
+    Ok(())
+}
+
+/// 显示全部贴图（所有分组都放出来）
+#[tauri::command]
+pub fn pin_show_all(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    pin_show_all_impl(&app, &state);
+    Ok(())
+}
+
 /// 只改贴图的**显示尺寸**（滚轮缩放），不重渲染图片。
 ///
 /// 为什么单独一个命令：`pin_apply_edit` 要传新 PNG（旋转/翻转才会变像素），
@@ -1590,6 +1735,32 @@ pub fn menu_action(app: AppHandle, id: String) -> Result<(), String> {
     crate::menuwin::hide_menu(&app);
     match route {
         Some((MenuKind::Pin, Some(label))) => {
+            // 分组动作是**全局**操作（影响所有贴图），在 Rust 侧直接做完，
+            // 不转发给单个贴图窗 —— 转发过去那个窗也没法操作别人的窗口。
+            if let Some(rest) = id.strip_prefix("pin-group:") {
+                let state = app.state::<AppState>();
+                pin_set_group_impl(&state, &label, rest);
+                return Ok(());
+            }
+            match id.as_str() {
+                "pin-group-show-all" => {
+                    pin_show_all_impl(&app, &app.state::<AppState>());
+                    return Ok(());
+                }
+                "pin-group-only" => {
+                    let state = app.state::<AppState>();
+                    let g = pin_group_of_impl(&state, &label);
+                    pin_show_group_only_impl(&app, &state, &g);
+                    return Ok(());
+                }
+                "pin-group-hide" => {
+                    let state = app.state::<AppState>();
+                    let g = pin_group_of_impl(&state, &label);
+                    pin_hide_group_impl(&app, &state, &g);
+                    return Ok(());
+                }
+                _ => {}
+            }
             if let Some(w) = app.get_webview_window(&label) {
                 w.emit("pin-menu-action", PinMenuActionPayload { id })
                     .map_err(|e| format!("emit pin-menu-action failed: {e}"))?;
@@ -1899,6 +2070,7 @@ fn register_pin(state: &AppState, label: &str, src: &str, width: f64, height: f6
             src: src.to_string(),
             width,
             height,
+            group: DEFAULT_PIN_GROUP.to_string(),
             edited: None,
         },
     );

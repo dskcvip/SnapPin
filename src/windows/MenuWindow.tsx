@@ -13,6 +13,8 @@ import {
   menuFit,
   menuState,
   pinFlags,
+  pinGroupOf,
+  pinGroups,
   pinSetOpacity,
   uiLog,
   type PinFlags,
@@ -117,6 +119,8 @@ function pinMenu(
   flags: PinFlags,
   opacity: number,
   onSlide: (v: number) => void,
+  groups: string[],
+  curGroup: string,
 ): MenuNode[] {
   return [
     {
@@ -125,6 +129,23 @@ function pinMenu(
       slider: { value: opacity, min: 0.15, max: 1, step: 0.05, onInput: onSlide },
     },
     SEP('sep-0'),
+    // 多贴图分组管理：换归属 / 只看本组 / 隐藏本组 / 显示全部。
+    // 动作 id 由 Rust 的 menu_action 直接处理（全局操作，不转发给贴图窗）。
+    {
+      id: 'pin-group',
+      label: '分组',
+      children: [
+        ...groups.map((g) => ({
+          id: `pin-group:${g}`,
+          label: g,
+          checked: g === curGroup,
+        })),
+        SEP('sep-group-0'),
+        { id: 'pin-group-only', label: `只看「${curGroup || '默认'}」组` },
+        { id: 'pin-group-hide', label: `隐藏「${curGroup || '默认'}」组` },
+        { id: 'pin-group-show-all', label: '显示全部贴图' },
+      ],
+    },
     {
       id: 'pin-image',
       label: '图像处理',
@@ -203,6 +224,9 @@ export function MenuWindow() {
   const [pinLabel, setPinLabel] = useState<string | null>(null)
   /** 贴图状态快照（null = 还没读到，用默认值渲染） */
   const [pinOn, setPinOn] = useState<PinFlags | null>(null)
+  /** 贴图分组：清单 + 当前贴图所在组（右键菜单打开时取） */
+  const [pinGroupsList, setPinGroupsList] = useState<string[]>(['默认'])
+  const [pinGroup, setPinGroup] = useState<string>('默认')
   /** 滑块拖动中的本地值（null = 还没拖过，用快照值）。
    *  拖动期间不能再跟随快照：贴图窗每帧都会回报新值，跟着走会与指针抢控制权。 */
   const [slideOp, setSlideOp] = useState<number | null>(null)
@@ -219,6 +243,12 @@ export function MenuWindow() {
       pinFlags(label)
         .then((f) => setPinOn(f))
         .catch(() => setPinOn(null))
+      pinGroups()
+        .then((g) => setPinGroupsList(g))
+        .catch(() => {})
+      pinGroupOf(label)
+        .then((g) => setPinGroup(g))
+        .catch(() => {})
     } else {
       setPinLabel(null)
       setPinOn(null)
@@ -433,7 +463,7 @@ export function MenuWindow() {
     setSlideOp(v)
     if (pinLabel) pinSetOpacity(pinLabel, v).catch((e) => uiLog(`pin opacity error: ${String(e)}`))
   }
-  const nodes = pinLabel ? pinMenu(flags, opVal, onSlide) : appMenu(failed)
+  const nodes = pinLabel ? pinMenu(flags, opVal, onSlide, pinGroupsList, pinGroup) : appMenu(failed)
 
   return (
     // is-pin：贴图菜单的根面板更窄（200px，见 menu.css），应用菜单保持 224px

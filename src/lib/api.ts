@@ -165,6 +165,13 @@ export const hotkeysResume = (): Promise<void> => invoke('hotkeys_resume')
  * 不用 CSS `transform`：transform 只改绘制不改窗口，放大超出窗口就被裁掉、
  * 缩小则四周留透明边——这是路线图 M2 里遗留的"贴图缩放同步改窗口"。
  */
+/** 贴图分组（多贴图管理）：分组清单 / 当前分组 / 换组 */
+export const pinGroups = (): Promise<string[]> => invoke('pin_groups')
+export const pinGroupOf = (label: string): Promise<string> =>
+  invoke('pin_group_of', { label })
+export const pinSetGroup = (label: string, group: string): Promise<string[]> =>
+  invoke('pin_set_group', { label, group })
+
 export const pinSetDisplaySize = (
   label: string,
   width: number,

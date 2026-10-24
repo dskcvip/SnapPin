@@ -18,6 +18,8 @@ pub struct PinMeta {
     pub width: f64,
     /// 逻辑像素显示高
     pub height: f64,
+    /// 所属分组名（多贴图分组管理用；默认 "默认"）
+    pub group: String,
     /// 图像处理产生的临时文件（None = 原图，未处理过）。
     /// 关窗/再次处理时删除，避免临时目录无限增长。
     pub edited: Option<String>,
