@@ -10,6 +10,7 @@ import {
   openUrl,
   pinFromClipboard,
   startCapture,
+  uiLog,
   transTest,
   updateConfig,
   type AppConfig,
@@ -237,18 +238,42 @@ export function MainWindow() {
    */
   const dirtyRef = useRef(false)
   dirtyRef.current = dirty
-  const closeAskedAt = useRef(0)
+  /**
+   * 关闭二次确认。
+   *
+   * 早先用"5 秒内再点一次"的计时窗口，实际很难用：提示条在**页面底部**，
+   * 而设置页比窗口高、要滚动才能看到底部 —— 用户点 ✕ 时提示根本不在视口里，
+   * 加上计时窗口一过就重置，表现就是"窗口关不掉"（用户 2026-10-25 反馈）。
+   *
+   * 现在改成：第一次拦下并**持久**进入待确认态，直到用户再次修改配置
+   * （`patch` 里清掉）或点保存；期间任意时刻再点 ✕ 都直接关闭，不再计时。
+   */
+  const [closeArmed, setCloseArmed] = useState(false)
+  const closeArmedRef = useRef(false)
+  /** 已经在销毁中：防止 close/destroy 重入 */
+  const closingRef = useRef(false)
+  closeArmedRef.current = closeArmed
   useEffect(() => {
     let un: (() => void) | null = null
     getCurrentWindow()
       .onCloseRequested((e) => {
-        if (!dirtyRef.current) return
-        const now = Date.now()
-        if (now - closeAskedAt.current < 5000) return // 二次确认：放弃修改
+        // 留一行日志：这个交互出过"点了关不掉"的问题，日志比截图好复现
+        uiLog(`settings close requested: dirty=${dirtyRef.current} armed=${closeArmedRef.current}`)
+        // 有未保存修改且还没确认 → 拦下并进入待确认态
+        if (dirtyRef.current && !closeArmedRef.current) {
+          e.preventDefault()
+          setCloseArmed(true)
+          return
+        }
+        // ★ 放行时必须**自己销毁窗口**，不能指望"不调 preventDefault 就会关"。
+        //   实测（WM_CLOSE + 日志）：dirty=false 走到这里，框架并没有关闭窗口，
+        //   表现就是"设置窗口怎么点都关不掉"。显式 destroy 是确定的行为。
+        if (closingRef.current) return
+        closingRef.current = true
         e.preventDefault()
-        closeAskedAt.current = now
-        setToast('有未保存的修改：再点一次关闭将丢弃；要保留请先点「保存设置」')
-        window.setTimeout(() => setToast(''), 5000)
+        void getCurrentWindow()
+          .destroy()
+          .catch((err) => uiLog(`settings destroy failed: ${String(err)}`))
       })
       .then((f) => {
         un = f
@@ -256,6 +281,35 @@ export function MainWindow() {
       .catch(() => {})
     return () => un?.()
   }, [])
+
+  /**
+   * Esc 关闭：和标题栏 ✕ 走**同一套**判断。
+   *
+   * 加它的理由：✕ 那条路依赖"再点一次"，用户一旦没看到提示就会觉得
+   * "关不掉"。留一个键盘出口，任何情况下都能退出来。
+   */
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      // 弹层打开时 Esc 归弹层用（关弹层），不要连带关窗口
+      if (document.querySelector('.modal-mask')) return
+      e.preventDefault()
+      if (!dirtyRef.current || closeArmedRef.current) {
+        void getCurrentWindow().destroy()
+        return
+      }
+      setCloseArmed(true)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
+  /** 保存后立即关闭（提示条上的"保存并关闭"） */
+  const saveAndClose = () => {
+    void updateConfig(cfg)
+      .then(() => getCurrentWindow().destroy())
+      .catch(() => {})
+  }
 
   // 模型编辑弹层：null = 关闭；'new' = 新建；否则是模型 id
   const [editing, setEditing] = useState<string | null>(null)
@@ -271,9 +325,12 @@ export function MainWindow() {
   const patch = (p: Partial<AppConfig>) => {
     setCfg((c) => ({ ...c, ...p }))
     setDirty(true)
+    // 又改了东西 → 之前那次"确认放弃"失效，下次点 ✕ 要重新确认
+    setCloseArmed(false)
   }
 
   const save = () => {
+    setCloseArmed(false)
     updateConfig(cfg)
       .then((c) => {
         setCfg(c)
@@ -772,6 +829,29 @@ export function MainWindow() {
           </span>
         </div>
       </div>
+
+      {/* 关闭确认提示：**固定在视口底部**，不随页面滚动跑出视野 */}
+      {closeArmed && (
+        <div className="close-warn" role="alert">
+          <span>有未保存的修改</span>
+          <button className="close-warn-btn primary" onClick={saveAndClose}>
+            保存并关闭
+          </button>
+          <button
+            className="close-warn-btn"
+            onClick={() => void getCurrentWindow().destroy()}
+          >
+            放弃并关闭
+          </button>
+          <button
+            className="close-warn-btn ghost"
+            title="继续编辑（Esc 也是这个意思）"
+            onClick={() => setCloseArmed(false)}
+          >
+            取消
+          </button>
+        </div>
+      )}
 
       {/* ---------------- 模型编辑弹层 ---------------- */}
       {editing && draft && (
