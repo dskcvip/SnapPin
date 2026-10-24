@@ -2420,6 +2420,20 @@ fn restore_long_overlay(app: &AppHandle, idx: usize, hwnd: isize, ensure_visible
     }
 }
 
+/// 取 NSWindow 的 CGWindowNumber（非 macOS / 失败返回 0）。
+///
+/// `CGWindowList` 里标识窗口用的就是这个号，跳过"浮层自己"要靠它。
+#[cfg(target_os = "macos")]
+fn overlay_window_number(w: &tauri::WebviewWindow) -> isize {
+    match w.ns_window() {
+        Ok(ns) => crate::winsnap::ns_window_number(ns),
+        Err(e) => {
+            eprintln!("[snappin] ns_window failed for {}: {e}", w.label());
+            0
+        }
+    }
+}
+
 /// 取浮层顶层窗口的 Win32 HWND（非 Windows / 失败返回 0）。
 #[cfg(windows)]
 fn overlay_window_hwnd(app: &AppHandle, label: &str) -> isize {
@@ -2612,7 +2626,16 @@ pub fn window_snap(
         .map(|label| overlay_window_hwnd(&app, label))
         .filter(|h| *h != 0)
         .collect();
-    #[cfg(not(windows))]
+    // macOS 用 CGWindowNumber 标识窗口（见 winsnap_mac.rs）
+    #[cfg(target_os = "macos")]
+    let skip: Vec<isize> = app
+        .webview_windows()
+        .iter()
+        .filter(|(label, _)| label.starts_with(crate::windows::OVERLAY_PREFIX))
+        .map(|(_, w)| overlay_window_number(w))
+        .filter(|n| *n != 0)
+        .collect();
+    #[cfg(not(any(windows, target_os = "macos")))]
     let skip: Vec<isize> = Vec::new();
 
     // 只在"吸附结果变了"时打日志（含变成 none）：前端 ~15fps 调用，
@@ -2622,7 +2645,10 @@ pub fn window_snap(
         let monitors = state.monitors.lock().unwrap();
         let m = monitors.iter().find(|m| m.id == monitor_id)?;
         let sf = m.scale_factor as f64;
-        // monitor 原点在 Windows 上是物理像素（见 MonitorShot::logical_origin）
+        // `m.x/m.y` 的**单位随平台不同，各平台实现自己解释**（见 winsnap.rs）：
+        // - Windows：物理像素，platform::snap_at 内部按 `mon + local * sf` 换算
+        // - macOS：点（CGDisplayBounds），winsnap_mac 直接 `mon + local`，不乘 sf
+        // 所以这里原样传 `m.x`，不要提前除/乘 scale_factor。
         let mut s = crate::winsnap::snap_at(x, y, m.x as f64, m.y as f64, sf, &skip)?;
         // 窗口可能跨屏：钳进当前显示器（浮层逻辑坐标以本显示器左上为原点）
         let lw = m.width as f64 / sf;

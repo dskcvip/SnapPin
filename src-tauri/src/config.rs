@@ -17,13 +17,29 @@ pub struct AppConfig {
     pub translation: snappin_core_platform::translate::TranslateConfig,
 }
 
+/// 默认快捷键字符串。
+///
+/// **平台差异**：macOS 习惯是 ⌘（Command），Windows/Linux 是 Ctrl。
+/// 默认给 Ctrl+1 在 mac 上"能用但不对劲"——用户肌肉记忆是按 ⌘1。
+/// 已保存过配置的老用户不受影响（读的是自己 config.json 里的值）。
+const DEFAULT_CAPTURE: &str = if cfg!(target_os = "macos") {
+    "Super+1"
+} else {
+    "Ctrl+1"
+};
+const DEFAULT_PIN: &str = if cfg!(target_os = "macos") {
+    "Super+2"
+} else {
+    "Ctrl+2"
+};
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
             theme_color: "#12A5D8".to_string(),
             ball_size: 56,
-            shortcut_capture: "Ctrl+1".to_string(),
-            shortcut_pin_clipboard: "Ctrl+2".to_string(),
+            shortcut_capture: DEFAULT_CAPTURE.to_string(),
+            shortcut_pin_clipboard: DEFAULT_PIN.to_string(),
             save_dir: None,
             translation: Default::default(),
         }

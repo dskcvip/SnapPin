@@ -2,15 +2,19 @@
 //!
 //! 参考行为：QQ 截图 / 微信截图 / Shottr 的"悬停识窗、单击选中"。
 //!
-//! **平台门控**：实现全部是 Win32，只在 Windows 编译；其它平台给空实现
-//! （返回 None = 不吸附）。不能让 FFI 声明漏到 macOS 构建里——那里没有
-//! EnumWindows 这些符号，会直接链接失败（本项目 CI 会打 macOS dmg）。
+//! **平台分派**：
+//! - Windows：本文件的 `platform` 模块（EnumWindows + 沿 z 序扫 + DWM 边框）
+//! - macOS：`winsnap_mac.rs`（CGWindowList，数组本身即 z 序）
+//! - 其它（Linux）：空实现，返回 None = 不吸附
+//!
+//! 平台实现必须隔离：Win32 的 FFI 符号在 macOS 上不存在，混进 macOS 构建
+//! 会直接链接失败（本项目 CI 会打 universal dmg）。
 
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WindowSnap {
-    /// 逻辑坐标（与浮层选区同一坐标系，已按当前显示器 scale_factor 换算）
+    /// 逻辑坐标（与浮层选区同一坐标系；Windows 上已按 scale_factor 换算）
     pub x: f64,
     pub y: f64,
     pub w: f64,
@@ -19,20 +23,19 @@ pub struct WindowSnap {
     pub title: String,
 }
 
-#[cfg(not(windows))]
-pub fn snap_at(
-    _x: f64,
-    _y: f64,
-    _mon_x: f64,
-    _mon_y: f64,
-    _sf: f64,
-    _skip: &[isize],
-) -> Option<WindowSnap> {
-    None
+/// 把吸附矩形钳制进当前显示器（窗口可能跨屏，浮层只能选自己这块）。
+///
+/// 纯数学，与平台无关 —— 两个平台的原点都已换算成"浮层内逻辑坐标"。
+pub fn clamp_to_monitor(snap: &mut WindowSnap, mon_x: f64, mon_y: f64, mon_w: f64, mon_h: f64) {
+    let x0 = snap.x.max(mon_x);
+    let y0 = snap.y.max(mon_y);
+    let x1 = (snap.x + snap.w).min(mon_x + mon_w);
+    let y1 = (snap.y + snap.h).min(mon_y + mon_h);
+    snap.x = x0;
+    snap.y = y0;
+    snap.w = (x1 - x0).max(0.0);
+    snap.h = (y1 - y0).max(0.0);
 }
-
-#[cfg(not(windows))]
-pub fn clamp_to_monitor(_s: &mut WindowSnap, _x: f64, _y: f64, _w: f64, _h: f64) {}
 
 #[cfg(windows)]
 mod platform {
@@ -218,24 +221,6 @@ mod platform {
         })
     }
 
-    /// 把吸附矩形钳制进当前显示器（窗口可能跨屏，浮层只能选自己这块）。
-    pub fn clamp_to_monitor(
-        snap: &mut WindowSnap,
-        mon_x: f64,
-        mon_y: f64,
-        mon_w: f64,
-        mon_h: f64,
-    ) {
-        let x0 = snap.x.max(mon_x);
-        let y0 = snap.y.max(mon_y);
-        let x1 = (snap.x + snap.w).min(mon_x + mon_w);
-        let y1 = (snap.y + snap.h).min(mon_y + mon_h);
-        snap.x = x0;
-        snap.y = y0;
-        snap.w = (x1 - x0).max(0.0);
-        snap.h = (y1 - y0).max(0.0);
-    }
-
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -254,33 +239,6 @@ mod platform {
             assert!(!contains(&r, POINT { x: 5, y: 20 }));
         }
 
-        #[test]
-        fn clamp_cross_monitor_window() {
-            // 窗口从副屏伸到主屏外：钳到主屏 (0,0,1920,1200)
-            let mut s = WindowSnap {
-                x: -300.0,
-                y: 100.0,
-                w: 1500.0,
-                h: 900.0,
-                title: "w".into(),
-            };
-            clamp_to_monitor(&mut s, 0.0, 0.0, 1920.0, 1200.0);
-            assert_eq!((s.x, s.y, s.w, s.h), (0.0, 100.0, 1200.0, 900.0));
-        }
-
-        #[test]
-        fn clamp_window_larger_than_monitor() {
-            let mut s = WindowSnap {
-                x: -5000.0,
-                y: -5000.0,
-                w: 99999.0,
-                h: 99999.0,
-                title: String::new(),
-            };
-            clamp_to_monitor(&mut s, 0.0, 0.0, 1920.0, 1200.0);
-            assert_eq!((s.x, s.y, s.w, s.h), (0.0, 0.0, 1920.0, 1200.0));
-        }
-
         /// 人工探针（`cargo test -- --ignored manual_probe_desktop --nocapture`）：
         /// 在真实桌面上验证 EnumWindows + z 序 + DWM 边界。CI 不跑。
         #[test]
@@ -295,4 +253,91 @@ mod platform {
 }
 
 #[cfg(windows)]
-pub use platform::{clamp_to_monitor, snap_at};
+pub use platform::snap_at;
+
+/// macOS 实现（CGWindowList）。单独文件便于用
+/// `rustc --emit=metadata --target aarch64-apple-darwin` 在不带 mac 工具链的
+/// 机器上做类型检查（`cargo check --target` 会卡在 objc2 的 C 编译步骤）。
+#[cfg(target_os = "macos")]
+#[path = "winsnap_mac.rs"]
+mod mac;
+
+#[cfg(target_os = "macos")]
+pub use mac::ns_window_number;
+
+#[cfg(target_os = "macos")]
+pub fn snap_at(
+    x: f64,
+    y: f64,
+    mon_x: f64,
+    mon_y: f64,
+    _sf: f64,
+    skip: &[isize],
+) -> Option<WindowSnap> {
+    // macOS 的坐标单位是"点"，与显示器原点同系，不需要乘 scale_factor
+    // （Windows 那边才要，那部分换算在 platform::snap_at 内完成）。
+    mac::snap_at(x, y, mon_x, mon_y, skip).map(|m| WindowSnap {
+        x: m.x,
+        y: m.y,
+        w: m.w,
+        h: m.h,
+        title: m.title,
+    })
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+pub fn snap_at(
+    _x: f64,
+    _y: f64,
+    _mon_x: f64,
+    _mon_y: f64,
+    _sf: f64,
+    _skip: &[isize],
+) -> Option<WindowSnap> {
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clamp_cross_monitor_window() {
+        // 窗口从副屏伸到主屏外：钳到主屏 (0,0,1920,1200)
+        let mut s = WindowSnap {
+            x: -300.0,
+            y: 100.0,
+            w: 1500.0,
+            h: 900.0,
+            title: "w".into(),
+        };
+        clamp_to_monitor(&mut s, 0.0, 0.0, 1920.0, 1200.0);
+        assert_eq!((s.x, s.y, s.w, s.h), (0.0, 100.0, 1200.0, 900.0));
+    }
+
+    #[test]
+    fn clamp_window_larger_than_monitor() {
+        let mut s = WindowSnap {
+            x: -5000.0,
+            y: -5000.0,
+            w: 99999.0,
+            h: 99999.0,
+            title: String::new(),
+        };
+        clamp_to_monitor(&mut s, 0.0, 0.0, 1920.0, 1200.0);
+        assert_eq!((s.x, s.y, s.w, s.h), (0.0, 0.0, 1920.0, 1200.0));
+    }
+
+    #[test]
+    fn clamp_keeps_inner_window_untouched() {
+        let mut s = WindowSnap {
+            x: 100.0,
+            y: 100.0,
+            w: 400.0,
+            h: 300.0,
+            title: String::new(),
+        };
+        clamp_to_monitor(&mut s, 0.0, 0.0, 1920.0, 1200.0);
+        assert_eq!((s.x, s.y, s.w, s.h), (100.0, 100.0, 400.0, 300.0));
+    }
+}

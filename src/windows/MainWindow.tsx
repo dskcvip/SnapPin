@@ -147,11 +147,35 @@ const MODEL_PRESETS: {
   },
 ]
 
+/**
+ * 是否 macOS。用于快捷键的**显示**与默认值：
+ * - 显示：mac 上按习惯写成 ⌘⌥⌃⇧（后端协议里 Command 存成 "Super"）
+ * - 默认：mac 用 ⌘1/⌘2，Windows/Linux 用 Ctrl+1/Ctrl+2
+ *   （与 Rust 侧 config::DEFAULT_CAPTURE 保持一致，两边不能对不上）
+ */
+const IS_MAC =
+  typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.userAgent)
+
+const DEFAULT_SHORTCUTS = {
+  capture: IS_MAC ? 'Super+1' : 'Ctrl+1',
+  pin: IS_MAC ? 'Super+2' : 'Ctrl+2',
+}
+
+/** 后端快捷键字符串 → 平台习惯写法（只影响显示，写回仍用原字符串）。 */
+function prettyKey(spec: string): string {
+  if (!IS_MAC) return spec
+  return spec
+    .replace(/Super/g, '⌘')
+    .replace(/Ctrl/g, '⌃')
+    .replace(/Alt/g, '⌥')
+    .replace(/Shift/g, '⇧')
+}
+
 const DEFAULT_CONFIG: AppConfig = {
   themeColor: '#12A5D8',
   ballSize: 56,
-  shortcutCapture: 'Ctrl+1',
-  shortcutPinClipboard: 'Ctrl+2',
+  shortcutCapture: DEFAULT_SHORTCUTS.capture,
+  shortcutPinClipboard: DEFAULT_SHORTCUTS.pin,
   saveDir: null,
   translation: {
     models: [],
@@ -476,8 +500,8 @@ export function MainWindow() {
                   className="btn"
                   onClick={() => {
                     patch({
-                      shortcutCapture: 'Ctrl+1',
-                      shortcutPinClipboard: 'Ctrl+2',
+                      shortcutCapture: DEFAULT_SHORTCUTS.capture,
+                      shortcutPinClipboard: DEFAULT_SHORTCUTS.pin,
                     })
                     setToast('已恢复默认快捷键，记得保存')
                   }}
@@ -508,7 +532,7 @@ export function MainWindow() {
                               className={`key-pill ${isRec ? 'editing' : ''}`}
                               onClick={() => setRecording(isRec ? null : row.field!)}
                             >
-                              {isRec ? '按下新组合键…' : value}
+                              {isRec ? '按下新组合键…' : prettyKey(value ?? '')}
                             </button>
                           ) : (
                             <span className="key-fixed">{row.fixed}</span>
@@ -522,8 +546,8 @@ export function MainWindow() {
                               onClick={() =>
                                 patch(
                                   row.field === 'shortcutCapture'
-                                    ? { shortcutCapture: 'Ctrl+1' }
-                                    : { shortcutPinClipboard: 'Ctrl+2' },
+                                    ? { shortcutCapture: DEFAULT_SHORTCUTS.capture }
+                                    : { shortcutPinClipboard: DEFAULT_SHORTCUTS.pin },
                                 )
                               }
                             >

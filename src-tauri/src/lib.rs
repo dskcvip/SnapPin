@@ -18,14 +18,32 @@ pub fn long_esc_shortcut() -> Shortcut {
     Shortcut::new(None, Code::Escape)
 }
 
-/// 内置默认快捷键：截图（Ctrl+1）。配置里可改，这里只做默认值。
+/// 内置默认快捷键：截图。配置里可改，这里只做默认值/解析失败时的兜底。
+///
+/// macOS 用 ⌘（Command，插件里叫 SUPER），Windows/Linux 用 Ctrl ——
+/// 与 [`crate::config`] 的默认字符串保持一致，否则"配置解析失败回退默认"
+/// 会回退到一个跟 UI 显示不一样的键。
 pub fn default_capture_shortcut() -> Shortcut {
-    Shortcut::new(Some(Modifiers::CONTROL), Code::Digit1)
+    #[cfg(target_os = "macos")]
+    {
+        Shortcut::new(Some(Modifiers::SUPER), Code::Digit1)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Shortcut::new(Some(Modifiers::CONTROL), Code::Digit1)
+    }
 }
 
-/// 内置默认快捷键：剪贴板贴图（Ctrl+2）。
+/// 内置默认快捷键：剪贴板贴图。
 pub fn default_pin_shortcut() -> Shortcut {
-    Shortcut::new(Some(Modifiers::CONTROL), Code::Digit2)
+    #[cfg(target_os = "macos")]
+    {
+        Shortcut::new(Some(Modifiers::SUPER), Code::Digit2)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Shortcut::new(Some(Modifiers::CONTROL), Code::Digit2)
+    }
 }
 
 pub fn run() {
