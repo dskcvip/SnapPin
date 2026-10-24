@@ -935,17 +935,35 @@ export function OverlayWindow() {
         w: Math.abs(e.clientX - d.x),
         h: Math.abs(e.clientY - d.y),
       })
-    } else if (rect || tool || longMode !== 'off') {
-      // 已出选区 / 正在标注 / 长截图中：光标交给各自的交互层，
+    } else if (tool || longMode !== 'off') {
+      // 正在标注 / 长截图中：光标交给各自的交互层，
       // 不再跟踪（避免无谓的重渲染，也避免与标注层抢光标语义）。
       return
     }
-    // 选区阶段（悬停或拖选）：持续跟踪光标，驱动放大镜 + 颜色读数。
+
+    if (d) return
+    // 光标压在工具条上：不识别窗口（否则高亮会跟着工具条乱跳）
+    if ((e.target as HTMLElement).closest('.shot-bar')) return
+
+    // 已有选区时**仍然识别窗口**：光标离开选区到别的窗口上要能高亮，
+    // 单击即可换选目标。此前一句 `if (!rect)` 把查询整个挡掉了，导致
+    // "左屏（无选区）能高亮、右屏（已选微信窗）不能"的不对称（用户实测）。
+    if (rect) {
+      const inside =
+        e.clientX >= rect.x &&
+        e.clientX <= rect.x + rect.w &&
+        e.clientY >= rect.y &&
+        e.clientY <= rect.y + rect.h
+      // 在选区内部 = 想调整这个选区，不是想换窗口 → 不查询
+      if (!inside) querySnap(e.clientX, e.clientY)
+      return
+    }
+
+    // 未出选区（悬停或拖选中）：持续跟踪光标，驱动放大镜 + 颜色读数。
     // 两次 setState 在同一事件里，React 自动批合成一次重渲染。
     setCursor({ x: e.clientX, y: e.clientY })
     setDragColor(sampleMonitorPixel(e.clientX, e.clientY))
-    // 悬停识窗：只在"还没选区、没在拖、没在标注"时查，节流在 querySnap 里
-    if (!d && !rect && !tool) querySnap(e.clientX, e.clientY)
+    querySnap(e.clientX, e.clientY)
   }
 
   // 光标移出浮层：收起放大镜 + 清掉悬停高亮（拖选中不移出——指针被窗口捕获）
@@ -973,6 +991,9 @@ export function OverlayWindow() {
       setHoverWin(null)
       return
     }
+    // 拖出一个新选区：清掉吸附高亮（否刚它会在新选区上残留，
+    // 有 rect 之后鼠标一动还可能被误当成"换目标"）
+    setHoverWin(null)
     setDraft((dr) => {
       if (dr && dr.w >= MIN_SIZE && dr.h >= MIN_SIZE) setRect(dr)
       return null
@@ -1072,10 +1093,11 @@ export function OverlayWindow() {
         </>
       )}
 
-      {/* 悬停识窗高亮：不出选区时，鼠标下方的窗口描边 + 标题。
+      {/* 悬停识窗高亮：鼠标下方的窗口描边 + 标题。
           单击即选中整窗（QQ/微信截图同款手感）。pointer-events:none
-          保证不挡住下面的鼠标事件。 */}
-      {hoverWin && !rect && !draft && (
+          保证不挡住下面的鼠标事件。
+          **有选区时也渲染**：光标移到别的窗口上要能看到"点这里会换目标"。 */}
+      {hoverWin && !draft && !(hoverWin.w < 2 || hoverWin.h < 2) && (
         <div
           className="win-snap"
           style={{
