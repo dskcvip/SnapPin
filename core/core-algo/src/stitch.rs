@@ -92,6 +92,45 @@ pub struct StitchStep {
     pub height: u32,
     /// 累计步数（含被丢弃的帧）
     pub steps: u32,
+    /// 超长模式降采样倍数：1 = 原分辨率；2 = 已整体缩小一半（高度上限翻倍）
+    pub scale: u32,
+}
+
+/// 整数倍盒式降采样（零依赖：core-algo 不吃任何图像库）。
+///
+/// `k` 必须是 2 的幂（超长模式每次减半）。落单的尾行/尾列直接丢弃——
+/// 差 1 行对拼接无影响，比补边省事且不会引入色边。
+fn downscale_by(buf: &RgbaBuffer, k: u32) -> Result<RgbaBuffer, AlgoError> {
+    let k = k.max(1);
+    if k == 1 {
+        return Ok(buf.clone());
+    }
+    let w = (buf.width / k).max(1);
+    let h = (buf.height / k).max(1);
+    let mut out = vec![0u8; w as usize * h as usize * 4];
+    let kk = (k * k) as u32;
+    for oy in 0..h {
+        for ox in 0..w {
+            let mut acc = [0u32; 4];
+            for dy in 0..k {
+                let sy = oy * k + dy;
+                let row = (sy as usize) * (buf.width as usize) * 4;
+                for dx in 0..k {
+                    let sx = ox * k + dx;
+                    let i = row + (sx as usize) * 4;
+                    acc[0] += buf.data[i] as u32;
+                    acc[1] += buf.data[i + 1] as u32;
+                    acc[2] += buf.data[i + 2] as u32;
+                    acc[3] += buf.data[i + 3] as u32;
+                }
+            }
+            let o = ((oy as usize) * (w as usize) + ox as usize) * 4;
+            for c in 0..4 {
+                out[o + c] = (acc[c] / kk) as u8;
+            }
+        }
+    }
+    RgbaBuffer::new(w, h, out)
 }
 
 // ---------------------------------------------------------------- 拼接器
@@ -111,7 +150,12 @@ pub struct Stitcher {
     steps: u32,
     /// 行哈希降采样步长（宽 / 此值 = 每行采样列数，至少 16 列）
     hash_step: u32,
+    /// 超长模式：>1 表示整条链路已按此倍数降采样（画布与后续帧一起缩）
+    scale: u32,
 }
+
+/// 超长模式允许的最大降采样倍数（再大就没意义了：1/8 已经糊到不可读）。
+const MAX_LONG_SCALE: u32 = 8;
 
 impl Stitcher {
     /// 用第一帧初始化（第一帧直接作为累积图）。
@@ -128,6 +172,7 @@ impl Stitcher {
             still_count: 0,
             steps: 0,
             hash_step: (first.width / 64).max(1),
+            scale: 1,
         };
         s.rebuild_tail_hashes();
         s.prev = Some(first.clone());
@@ -135,8 +180,63 @@ impl Stitcher {
         Ok(s)
     }
 
+    /// 当前超长模式的降采样倍数（1 = 原分辨率）。
+    pub fn scale(&self) -> u32 {
+        self.scale
+    }
+
+    /// 帧按当前 scale 降采样（超长模式下画布与帧必须同一比例，否则宽度对不上）。
+    fn fit_frame(&self, raw: &RgbaBuffer) -> Result<RgbaBuffer, AlgoError> {
+        if self.scale <= 1 {
+            return Ok(raw.clone());
+        }
+        downscale_by(raw, self.scale)
+    }
+
+    /// 进入/推进超长模式：把画布与参考帧整体缩小一半，scale 翻倍。
+    ///
+    /// 返回 false = 已经到最大降采样倍数，无法再压（此时才真正报 TooTall）。
+    fn shrink(&mut self) -> bool {
+        if self.scale >= MAX_LONG_SCALE {
+            return false;
+        }
+        let Ok(half) = downscale_by(&self.canvas, 2) else {
+            return false;
+        };
+        self.canvas = half;
+        self.width = self.canvas.width;
+        self.hash_step = (self.width / 64).max(1);
+        self.scale *= 2;
+        // 参考帧必须同步缩，否则下一轮帧差/匹配的尺度不一致
+        if let Some(prev) = self.prev.take() {
+            self.prev = downscale_by(&prev, 2).ok();
+        }
+        self.rebuild_tail_hashes();
+        true
+    }
+
     /// 推入一帧，返回拼接结果。
-    pub fn push(&mut self, frame: &RgbaBuffer) -> Result<StitchStep, AlgoError> {
+    ///
+    /// 超长模式：高度累积到 `max_height` 时不再直接报错，而是**整体降采样一半**
+    /// 后继续拼（高度上限随之翻倍）。这是长截图工具通行做法——宁可整张清晰度
+    /// 掉一半，也不要"滚到一半告诉你拼不下了"。中途收缩时本轮会按新尺度重算，
+    /// 保证不破坏已有的拼接结果。
+    pub fn push(&mut self, raw: &RgbaBuffer) -> Result<StitchStep, AlgoError> {
+        let mut frame = self.fit_frame(raw)?;
+        loop {
+            match self.push_once(&frame) {
+                Err(AlgoError::TooTall { .. }) if self.shrink() => {
+                    // 收缩后本轮按新尺度重来（push_once 在报错前没有改动状态）
+                    frame = downscale_by(&frame, 2)?;
+                    continue;
+                }
+                other => return other,
+            }
+        }
+    }
+
+    /// 单轮拼接（不含超长模式处理）。TooTall 在此**不改状态**，便于调用方收缩后重试。
+    fn push_once(&mut self, frame: &RgbaBuffer) -> Result<StitchStep, AlgoError> {
         if frame.width != self.width {
             return Err(AlgoError::WidthMismatch {
                 expected: self.width,
@@ -159,6 +259,7 @@ impl Stitcher {
                 still_count: self.still_count,
                 height: self.canvas.height,
                 steps: self.steps,
+                scale: self.scale,
             });
         }
         self.still_count = 0;
@@ -169,6 +270,8 @@ impl Stitcher {
             Some((shift, score)) => {
                 let append_rows = frame.height - shift;
                 if self.canvas.height as u64 + append_rows as u64 > self.opts.max_height as u64 {
+                    // 回退步数：调用方可能收缩后重试本轮（见 push 的超长模式）
+                    self.steps -= 1;
                     return Err(AlgoError::TooTall {
                         max: self.opts.max_height,
                     });
@@ -182,6 +285,7 @@ impl Stitcher {
                     still_count: 0,
                     height: self.canvas.height,
                     steps: self.steps,
+                    scale: self.scale,
                 })
             }
             None => {
@@ -194,6 +298,7 @@ impl Stitcher {
                     still_count: 0,
                     height: self.canvas.height,
                     steps: self.steps,
+                    scale: self.scale,
                 })
             }
         }
@@ -490,19 +595,54 @@ mod tests {
         assert_eq!(step.kind, StitchStepKind::Still); // 帧相同，走静止分支
     }
 
+    /// 超长模式：到上限不再报错，而是整体降采样一半后继续（上限随之翻倍）。
     #[test]
-    fn max_height_guard() {
+    fn long_mode_shrinks_instead_of_failing() {
         let opts = StitchOptions {
             max_height: 700,
             ..StitchOptions::for_frame(600)
         };
         let page = web_page(1200, 64);
         let mut st = Stitcher::new(&crop_rows(&page, 0, 600), opts).unwrap();
-        // 推进 100 行：600 + 100 = 700 恰好达标；再进一步必超限
+        // 推进 100 行：600 + 100 = 700 恰好达标
         let ok = st.push(&crop_rows(&page, 100, 700)).unwrap();
         assert_eq!(ok.kind, StitchStepKind::Appended);
-        let err = st.push(&crop_rows(&page, 200, 800)).unwrap_err();
-        assert!(matches!(err, AlgoError::TooTall { .. }));
+        assert_eq!(ok.scale, 1);
+        // 再推进 100 行会超 700 → 触发超长模式：画布减半、scale=2，然后拼上
+        let step = st.push(&crop_rows(&page, 200, 800)).unwrap();
+        assert_eq!(step.kind, StitchStepKind::Appended);
+        assert_eq!(step.scale, 2, "超限应进入超长模式而不是报错");
+        // 减半后高度 ≈ 700/2 + 50，远低于上限
+        assert!(step.height < 700, "收缩后高度应明显下降: {}", step.height);
+        assert_eq!(st.canvas().width, 32, "画布宽度也应同步减半");
+    }
+
+    /// 降到最大倍数后仍然超限，才真正报 TooTall（不会无限降采样）。
+    #[test]
+    fn long_mode_eventually_stops_at_max_scale() {
+        let opts = StitchOptions {
+            max_height: 1200,
+            ..StitchOptions::for_frame(600)
+        };
+        let page = web_page(9000, 64);
+        let mut st = Stitcher::new(&crop_rows(&page, 0, 600), opts).unwrap();
+        let mut max_seen = 1;
+        let mut err = None;
+        // 一直往下推，直到报错或走完；记录见过的最大降采样倍数
+        for y in (100..8400).step_by(100) {
+            match st.push(&crop_rows(&page, y, y + 600)) {
+                Ok(step) => max_seen = max_seen.max(step.scale),
+                Err(e) => {
+                    max_seen = max_seen.max(st.scale());
+                    err = Some(e);
+                    break;
+                }
+            }
+        }
+        assert_eq!(max_seen, 8, "应一路收缩到最大倍数 8，不会无限降采样");
+        if let Some(e) = err {
+            assert!(matches!(e, AlgoError::TooTall { .. }), "只有到 8 倍仍超限才报 TooTall");
+        }
     }
 
     #[test]

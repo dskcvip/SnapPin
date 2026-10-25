@@ -2523,7 +2523,16 @@ fn run_long_driver(app: &AppHandle) {
                     step.steps,
                     step.score,
                     &thumb,
-                    format!("正在拼接… 已 {} px", step.height),
+                    // 超长模式：降采样后高度上限翻倍，但清晰度下降，必须让用户看到
+                    format!(
+                        "正在拼接… 已 {} px{}",
+                        step.height,
+                        if step.scale > 1 {
+                            format!("（超长模式 · 清晰度 1/{}）", step.scale)
+                        } else {
+                            String::new()
+                        }
+                    ),
                 );
             }
             StitchStepKind::NoMatch => {
