@@ -27,6 +27,7 @@ import {
   ocrShow,
   overlayContext,
   readImageBytes,
+  transStart,
   uiLog,
   windowSnap,
   type DecodedCode,
@@ -64,7 +65,6 @@ import {
   RedoIcon,
   UndoIcon,
   WatermarkIcon,
-  ZoomIcon,
 } from '../annotate/icons'
 import {
   ERASER_RADIUS,
@@ -249,6 +249,8 @@ export function OverlayWindow() {
   const [qrError, setQrError] = useState<string | null>(null)
   /** OCR 识别结果（null = 未识别 / 未打开面板） */
   const [ocrBusy, setOcrBusy] = useState(false)
+  /** 翻译进行中：防止连点重复跑识别+请求 */
+  const [transBusy, setTransBusy] = useState(false)
   const [ocrError, setOcrError] = useState<string | null>(null)
   /** OCR 模型是否就绪（null = 还没查到）。false 时按钮提示去下载模型。 */
   const [ocrModelsOk, setOcrModelsOk] = useState<boolean | null>(null)
@@ -761,6 +763,45 @@ export function OverlayWindow() {
       showHint(String(e), null, '', 4000)
     } finally {
       setOcrBusy(false)
+    }
+  }
+
+  /**
+   * 框选 → 识别 → 翻译（工具条「翻译」按钮）。
+   *
+   * 复用 OCR 的识别结果当原文：翻译窗本身就是"左原文 / 右译文"，
+   * 所以**不再开 OCR 窗**（两个窗一起弹太重），直接把识别文本交给 trans_start。
+   * 失败分三种，都要有可见出口：
+   *   1. 没框选        → 就地提示
+   *   2. 没识别到文字  → 就地提示（不开空窗）
+   *   3. 翻译未配置/网络错 → Rust 把错误塞进 trans 状态，翻译窗里会显示
+   */
+  const runTranslate = async (anchor?: HTMLElement | null) => {
+    if (!ctx || !rect) {
+      if (anchor) showHint('请先框选要翻译的区域', anchor)
+      return
+    }
+    if (transBusy) return
+    setTransBusy(true)
+    if (anchor) showHint('识别并翻译中…', anchor, '', 1200)
+    try {
+      const lines = await ocrRecognize(ctx.monitorId, rect, ctx.sessionId)
+      const text = lines
+        .map((l) => l.text)
+        .join('\n')
+        .trim()
+      if (!text) {
+        showHint('这块区域没识别到文字', anchor ?? null, '', 3000)
+        return
+      }
+      // 翻译窗打开后本轮截图就不需要了（与 OCR 一致：不留一个卡住的浮层）
+      await transStart(text)
+      void exitCapture()
+    } catch (e) {
+      uiLog(`translate failed: ${String(e)}`)
+      showHint(String(e), anchor ?? null, '', 4000)
+    } finally {
+      setTransBusy(false)
     }
   }
 
@@ -1350,14 +1391,9 @@ export function OverlayWindow() {
               >
                 <WatermarkIcon />
               </button>
-              <button
-                data-tool="zoom"
-                className={`sbtn ${tool === 'zoom' ? 'active' : ''}`}
-                title="放大镜"
-                onClick={() => pickTool('zoom')}
-              >
-                <ZoomIcon />
-              </button>
+              {/* 放大镜（zoom）按钮按用户要求撤下：
+                  工具本身的实现保留（Shape::Zoom / 手势代码仍在），
+                  只是不在工具条上给入口，避免节距变宽。 */}
               <button
                 data-tool="smartErase"
                 className={`sbtn ${tool === 'smartErase' ? 'active' : ''}`}
@@ -1372,7 +1408,12 @@ export function OverlayWindow() {
 
             {/* 第二组：识别类 */}
             <div className="sb-group">
-              <button className="sbtn" disabled title="翻译（即将支持）">
+              <button
+                className={`sbtn ${transBusy ? 'active' : ''}`}
+                title="翻译（框选后一键识别并翻译，左原文右译文）"
+                disabled={transBusy}
+                onClick={(e) => void runTranslate(e.currentTarget)}
+              >
                 <TranslateIcon />
               </button>
               <button
