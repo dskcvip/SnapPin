@@ -820,10 +820,17 @@ pub fn show_long_preview(app: &AppHandle) -> Result<(), String> {
 }
 
 /// 关闭长截图预览窗（会话结束/中止时调用，窗口内容不保留）。
+///
+/// **必须投主线程**：调用方是长截图驱动线程（spawn_blocking），非主线程直接
+/// `close()` 在本项目反复踩过（设置窗关不掉的 ACL 事故之后又一条）——
+/// 实测预览窗在会话结束时残留不消失，就是漏了这一步。
 pub fn close_long_preview(app: &AppHandle) {
-    if let Some(w) = app.get_webview_window(LONG_PREVIEW_LABEL) {
-        let _ = w.close();
-    }
+    let app_cb = app.clone();
+    run_on_main(app, move |_app| {
+        if let Some(w) = app_cb.get_webview_window(LONG_PREVIEW_LABEL) {
+            let _ = w.close();
+        }
+    });
 }
 
 /// 关闭文档型窗口（内容仍留在 state 里，下次打开重取）。
