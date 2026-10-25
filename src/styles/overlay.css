@@ -953,9 +953,15 @@
 }
 
 /* 长截图公共面板外观（与 .ocr-panel 同语言） */
+/* 结果面板：常态屏幕居中；最大化时宽度贴着内容（长图原始宽度）、高度占 88vh。
+   刻意**不用内联样式算几何** —— vh/innerHeight 那套在这里反复出错，
+   而 CSS 的 fit-content / vh 是浏览器自己的强项，不需要 JS 参与。 */
 .long-result {
-  /* 固定宽度：面板位置由 JS 按选区算，宽度固定后按钮坐标才稳定 */
-  width: 320px;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: fit-content;
+  min-width: 320px;
 }
 
 .long-bar,
@@ -1077,6 +1083,11 @@
 .long-result.is-max {
   display: flex;
   flex-direction: column;
+  /* 宽度跟内容走（长图多少像素就多宽），上限 94vw；高度固定 88vh。
+     之前写死 94vw 会把 1100px 的图放进 1800px 面板，两侧各留一大块空白。 */
+  width: fit-content;
+  max-width: 94vw;
+  height: 88vh;
 }
 
 .long-result.is-max .long-shot-wrap {

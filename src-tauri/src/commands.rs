@@ -2611,6 +2611,9 @@ fn run_long_driver(app: &AppHandle) {
         &thumb,
         &message,
     );
+    // 诊断：结果面板出现时把屏幕上所有中小窗口打一遍（排查"多出来的灰框"）
+    #[cfg(windows)]
+    crate::winsnap::log_window_inventory("long-result-shown");
 
     // 还原浮层 + 注销 Esc（幂等；commit 也会做一遍，双保险）
     let anchor = {

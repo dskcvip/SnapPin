@@ -1693,25 +1693,6 @@ export function OverlayWindow() {
             <div
               className={`long-result${longMax ? ' is-max' : ''}${longMin ? ' is-min' : ''}`}
               onPointerDown={(e) => e.stopPropagation()}
-              style={
-                longMax
-                  ? {
-                      // 最大化：铺开大半屏，长图按**原始像素**1:1 展示（内部滚动）
-                      left: Math.round(window.innerWidth * 0.03),
-                      top: Math.round(window.innerHeight * 0.05),
-                      width: Math.round(window.innerWidth * 0.94),
-                      height: Math.round(window.innerHeight * 0.88),
-                    }
-                  : {
-                      // 常态：**屏幕居中**。
-                      // 原先按选区上方/下方定位，选区靠上时面板会被顶到屏幕左上角
-                      // （用户误认为"预览窗还在"）；结果面板是模态性质的操作面板，
-                      // 居中比贴着选区更稳、也更像"结果页"。
-                      left: '50%',
-                      top: '50%',
-                      transform: 'translate(-50%, -50%)',
-                    }
-              }
             >
               <div className="long-head">
                 <span>

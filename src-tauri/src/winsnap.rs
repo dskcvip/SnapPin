@@ -67,6 +67,8 @@ mod platform {
         fn IsWindowVisible(hwnd: isize) -> i32;
         fn GetWindowRect(hwnd: isize, rect: *mut RECT) -> i32;
         fn GetWindowTextW(hwnd: isize, text: *mut u16, count: i32) -> i32;
+        fn GetClassNameW(hwnd: isize, text: *mut u16, count: i32) -> i32;
+        fn GetWindowThreadProcessId(hwnd: isize, pid: *mut u32) -> u32;
         fn GetWindowLongW(hwnd: isize, index: i32) -> i32;
         fn DwmGetWindowAttribute(hwnd: isize, attr: u32, pv: *mut core::ffi::c_void, cb: u32)
             -> i32;
@@ -82,6 +84,44 @@ mod platform {
     const GWL_EXSTYLE: i32 = -20;
     const WS_EX_TRANSPARENT: i32 = 0x0000_0020;
     const WS_EX_NOACTIVATE: i32 = 0x0800_0000;
+
+    /// 把当前**所有可见顶层窗口**的标题/类名/位置/尺寸/进程写进日志。
+    ///
+    /// 用途：用户报告"屏幕上多出一块灰色小窗"但截图认不出是谁 —— 与其猜，
+    /// 不如在长截图结束那一刻把窗口清单打到日志里，一眼定位。
+    pub fn log_window_inventory(tag: &str) {
+        unsafe extern "system" fn cb(hwnd: isize, _lparam: isize) -> i32 {
+            unsafe {
+                if IsWindowVisible(hwnd) == 0 {
+                    return 1;
+                }
+                let mut title = [0u16; 128];
+                let n = GetWindowTextW(hwnd, title.as_mut_ptr(), 128);
+                let title = String::from_utf16_lossy(&title[..n.max(0) as usize]);
+                let mut cls = [0u16; 128];
+                let cn = GetClassNameW(hwnd, cls.as_mut_ptr(), 128);
+                let cls = String::from_utf16_lossy(&cls[..cn.max(0) as usize]);
+                let mut r = RECT::default();
+                GetWindowRect(hwnd, &mut r);
+                let mut pid: u32 = 0;
+                GetWindowThreadProcessId(hwnd, &mut pid);
+                let w = r.right - r.left;
+                let h = r.bottom - r.top;
+                // 只记有可能被用户当成"多出来的小窗"的尺寸段，日志才不至于淹没
+                if (60..1200).contains(&w) && (40..1200).contains(&h) {
+                    crate::logln!(
+                        "[win-inv] ({},{}) {}x{} pid={} class={cls:?} title={title:?}",
+                        r.left, r.top, w, h, pid
+                    );
+                }
+                1
+            }
+        }
+        crate::logln!("[win-inv] ---- {tag} ----");
+        unsafe {
+            EnumWindows(Some(cb), 0);
+        }
+    }
 
     fn rect_of(hwnd: isize) -> RECT {
         let mut r = RECT::default();
@@ -254,6 +294,10 @@ mod platform {
 
 #[cfg(windows)]
 pub use platform::snap_at;
+
+/// 窗口清单诊断（排查"屏幕上多出来的灰框"用，见 platform 里的实现注释）。
+#[cfg(windows)]
+pub use platform::log_window_inventory;
 
 /// macOS 实现（CGWindowList）。单独文件便于用
 /// `rustc --emit=metadata --target aarch64-apple-darwin` 在不带 mac 工具链的
