@@ -1168,8 +1168,12 @@ export function OverlayWindow() {
 
   return (
     <div
+      // ★ 结果态这里**不能**叫 long-result：.long-result 是「结果面板」自己的
+      // 样式（宽 340 / 居中 / 面板底色 / 圆角）。根元素一旦也挂这个类，就会把自己
+      // 从 inset:0 的全屏根缩成一块 340 宽的灰卡片，其余区域透明但仍在拦鼠标
+      // （用户症状：中间一块灰框、整个桌面点不动）。用 -mode 后缀把两者分开。
       className={`overlay-root${longMode === 'running' ? ' long-running' : ''}${
-        longMode === 'result' ? ' long-result' : ''
+        longMode === 'result' ? ' long-result-mode' : ''
       }`}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}

@@ -448,11 +448,27 @@ pub fn close_overlays(app: &AppHandle) {
         }
     }
     // 恢复因采集而隐藏的悬浮球
-    if BALL_HIDDEN_BY_CAPTURE.swap(false, Ordering::SeqCst) {
-        if let Some(ball) = app.get_webview_window(BALL_LABEL) {
+    restore_ball_after_capture(app);
+}
+
+/// 把"因采集而隐藏"的悬浮球显示回来（幂等：没隐藏过就什么都不做）。
+///
+/// 两个调用点：截图会话真正结束（关闭浮层）、以及长截图**出结果面板时**
+/// ——后者原来没有，导致结果面板期间球一直藏着，前端一旦渲染异常用户就
+/// 无路可退（Esc 被全局热键吃掉、桌面被全屏浮层拦住）。
+pub fn restore_ball_after_capture(app: &AppHandle) {
+    if !BALL_HIDDEN_BY_CAPTURE.swap(false, Ordering::SeqCst) {
+        return;
+    }
+    let app_cb = app.clone();
+    // **必须用 post_to_main（不等待）**：调用方 close_overlays ← end_capture_session
+    // ← cancel_capture（tauri 命令，可能就在主线程执行）。若用 run_on_main 同步等，
+    // 在主线程调用时自己排的任务自己等 —— 必超时，白卡 2 秒。
+    post_to_main(app, move |_app| {
+        if let Some(ball) = app_cb.get_webview_window(BALL_LABEL) {
             let _ = ball.show();
         }
-    }
+    });
 }
 
 /// 在主线程执行闭包并同步等待完成。

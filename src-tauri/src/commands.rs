@@ -2586,6 +2586,8 @@ fn run_long_driver(app: &AppHandle) {
     };
     let Some((height, thumb)) = final_info else {
         state.long_active.store(false, Ordering::SeqCst);
+        // 这条路径（会话已被 commit 取走）同样要注销 Esc，否则会一直占着全局 Esc
+        unregister_long_esc(app);
         return;
     };
 
@@ -2625,10 +2627,19 @@ fn run_long_driver(app: &AppHandle) {
         restore_long_overlay(app, idx, hwnd, used_fallback);
     }
     state.long_active.store(false, Ordering::SeqCst);
-    // 没有新会话顶着才注销 Esc（用户极快速重开长截图的竞态）
-    if state.long.lock().unwrap().is_none() {
-        unregister_long_esc(app);
-    }
+    // **无条件**注销 Esc。
+    //
+    // 这里原来是"state.long 为空才注销"，而 done/error 之后会话**仍留在 state 里**
+    // （要供结果面板的保存/复制/贴图用），条件永远不成立 → 全局 Esc 一直被本程序
+    // 注册着。Windows 会把该键交给全局热键、不再传给前台窗口，于是：
+    //   浮层的 keydown 收不到 Esc（前端那句 exitCapture 永远不执行）
+    //   热键处理器看 long_active=false 也什么都不做
+    // 用户实测：结果面板上连按 30+ 次 Esc 全无反应（日志 30+ 条 hotkey pressed）。
+    unregister_long_esc(app);
+    // 结果面板期间就把悬浮球还回来：万一前端渲染出问题，球是用户唯一的逃生口
+    // （点球可重新截图、右键有菜单）。原来只在 end session 时恢复，而结果面板
+    // 期间浮层不关，球就一直藏着 —— 用户反馈"悬浮球看不见"。
+    windows::restore_ball_after_capture(app);
 }
 
 /// 发一条长截图进度事件。

@@ -941,14 +941,17 @@
    工具条此时点不到（Rust 已把浮层设为整体光标穿透），故一并隐藏，
    状态/操作由 .long-bar / .long-result 承担。 */
 .overlay-root.long-running .frozen,
-.overlay-root.long-result .frozen {
+/* 结果态：隐藏冻结图与工具条。
+   注意用 -mode 后缀（根元素的状态类），不要和 .long-result（面板自己）混用——
+   混用会把面板的宽度/居中/底色套到全屏根元素上，变成一块挡住桌面的灰框。 */
+.overlay-root.long-result-mode .frozen {
   visibility: hidden;
 }
 
 .overlay-root.long-running .shot-bar,
-.overlay-root.long-result .shot-bar,
+.overlay-root.long-result-mode .shot-bar,
 .overlay-root.long-running .annotate-wrap,
-.overlay-root.long-result .annotate-wrap {
+.overlay-root.long-result-mode .annotate-wrap {
   display: none;
 }
 
@@ -1015,11 +1018,16 @@
   font-size: 11px;
 }
 
-/* 结果面板：缩略大图（高度封顶，内部可滚动看全图）+ 信息 + 动作行 */
+/* 结果面板：固定宽度的小卡片，内容一屏排下，**不做内部滚动**。
+   内部滚动在这套浮层里是个雷：.long-result 本身是 fixed + transform 元素，
+   再给自己 overflow:auto，一滚内容层就被裁没了（实测整块糊成一片底色，
+   用户反馈"滑动一下内容就消失"）；而且纵向滚动条占宽还会把横向滚动条顶出来。 */
 .long-result {
   width: 340px;
-  max-height: 320px;
-  overflow: auto;
+  /* 高度自适应：**不设 max-height / 不 overflow**。
+     设过 overflow:hidden，长错误消息会把底部按钮整排裁掉（用户无法保存/退出）；
+     设过 overflow:auto，滚动会直接把面板内容糊没（见上方注释）。
+     高度交给内容决定，缩略图已在下方限高 140px，面板不会过高。 */
 }
 
 .long-head {
@@ -1046,7 +1054,7 @@
 .long-thumb-big {
   display: block;
   max-width: 100%;
-  max-height: 180px;
+  max-height: 140px;
   margin: 8px auto;
   border: 1px solid rgba(15, 23, 42, 0.12);
   border-radius: 6px;
@@ -1056,6 +1064,7 @@
 .long-msg-row {
   color: #6b7280;
   line-height: 1.5;
+  word-break: break-all;
 }
 
 .long-error {

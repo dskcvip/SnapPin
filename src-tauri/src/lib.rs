@@ -448,7 +448,7 @@ fn setup_tray(
     sc_failed: &[&'static str],
     mac_perm_ok: bool,
 ) -> tauri::Result<()> {
-    use tauri::tray::{MouseButtonState, TrayIconBuilder, TrayIconEvent};
+    use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
     // tooltip 是用户唯一常驻可见的状态位：热键被占用、以及（macOS）缺屏幕录制
     // 权限都必须写在这里，否则用户只会觉得"这软件坏了"。
@@ -481,7 +481,7 @@ fn setup_tray(
                 ..
             } => {
                 crate::logln!("tray click: {button:?} / {button_state:?}");
-                if button_state == MouseButtonState::Up {
+                if button_state == MouseButtonState::Up && button != MouseButton::Right {
                     let app = tray.app_handle().clone();
                     // 建 webview 不能在事件处理器（主线程）里同步做
                     tauri::async_runtime::spawn_blocking(move || {
@@ -511,6 +511,16 @@ fn setup_tray(
         let menu: &'static tauri::menu::Menu<tauri::Wry> = Box::leak(Box::new(menu));
         builder = builder.menu(menu).show_menu_on_left_click(false);
     }
+
+    // 原生菜单项点击分发（macOS 右键兜底菜单走这里）。
+    //
+    // **没有这个处理器，macOS 的原生菜单点了完全没反应** —— 曾经真实发生过：
+    // 注释里写着"菜单事件统一由托盘 on_menu_event 分发"，但 setup_tray 里
+    // 从来没注册过它，于是那份"用户唯一永远点得动的退出入口"是死的。
+    // 自绘菜单（menuwin / 贴图 / 悬浮球）走前端 invoke('menu_action')，与此无关。
+    let builder = builder.on_menu_event(|app, event| {
+        crate::handle_menu_event(app, event.id.as_ref());
+    });
 
     let tray = builder.build(app)?;
 

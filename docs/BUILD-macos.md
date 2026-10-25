@@ -181,6 +181,14 @@ macOS 会启用路径随机化（App Translocation），每次启动路径都不
 macOS 上建 webview 窗口必须在主线程而当时没投递 → 菜单建不出来 → 出口全灭。
 （0.1.2 起：修了主线程建窗，并且**右键改成系统原生菜单**做兜底，见第五节。）
 
+**第二个坑（0.1.3 修，同一个症状）**：那份原生兜底菜单当时是"死的"——
+`setup_tray` 从来没注册 `on_menu_event`，而注释里却写着"菜单事件统一由托盘
+on_menu_event 分发"。系统菜单点了不触发任何处理器，用户依然只能 `pkill`。
+修：`builder.on_menu_event(|app, ev| handle_menu_event(app, ev.id.as_ref()))`。
+顺带在点击事件里排除右键（`button != MouseButton::Right`），
+否则 macOS 右键会同时弹原生菜单和自绘菜单两个。
+**教训**：注释声称存在的东西，不等于代码里真的注册了。
+
 **旧版本卡住时怎么退**（任选其一）：
 
 ```bash
