@@ -8,7 +8,6 @@ export type WindowKind =
   | 'settings'
   | 'ocr'
   | 'trans'
-  | 'longpreview'
   | 'pinmanager'
 
 declare global {
@@ -26,7 +25,6 @@ export function getWindowKind(): WindowKind {
     kind === 'menu' ||
     kind === 'ocr' ||
     kind === 'trans' ||
-    kind === 'longpreview' ||
     kind === 'pinmanager' ||
     kind === 'settings'
   ) {

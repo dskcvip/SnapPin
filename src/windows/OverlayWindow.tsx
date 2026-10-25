@@ -251,6 +251,9 @@ export function OverlayWindow() {
   const [ocrBusy, setOcrBusy] = useState(false)
   /** 翻译进行中：防止连点重复跑识别+请求 */
   const [transBusy, setTransBusy] = useState(false)
+  /** 结果面板：最小化（只留标题栏）/ 最大化（占据大半屏看图） */
+  const [longMin, setLongMin] = useState(false)
+  const [longMax, setLongMax] = useState(false)
   const [ocrError, setOcrError] = useState<string | null>(null)
   /** OCR 模型是否就绪（null = 还没查到）。false 时按钮提示去下载模型。 */
   const [ocrModelsOk, setOcrModelsOk] = useState<boolean | null>(null)
@@ -854,6 +857,8 @@ export function OverlayWindow() {
       setLongProgress(p)
       if (p.phase === 'done' || p.phase === 'error') {
         setLongMode('result')
+        setLongMin(false)
+        setLongMax(false)
         uiLog(`long ${p.phase}: ${p.message} (${p.height}px, ${p.steps} steps)`)
       }
     })
@@ -1682,15 +1687,25 @@ export function OverlayWindow() {
               到底 / Esc 停止 / 出错都会到这里；出错时仍可保存已拼部分。 */}
           {longMode === 'result' && rect && (
             <div
-              className="long-result"
+              className={`long-result${longMax ? ' is-max' : ''}${longMin ? ' is-min' : ''}`}
               onPointerDown={(e) => e.stopPropagation()}
-              style={{
-                left: Math.max(0, Math.min(rect.x, window.innerWidth - 340)),
-                top:
-                  rect.y + rect.h + 8 + 320 > window.innerHeight
-                    ? Math.max(0, rect.y - 328)
-                    : rect.y + rect.h + 8,
-              }}
+              style={
+                longMax
+                  ? {
+                      // 最大化：铺开大半屏，方便看清拼出来的长图
+                      left: Math.round(window.innerWidth * 0.03),
+                      top: Math.round(window.innerHeight * 0.05),
+                      width: Math.round(window.innerWidth * 0.94),
+                      height: Math.round(window.innerHeight * 0.88),
+                    }
+                  : {
+                      left: Math.max(0, Math.min(rect.x, window.innerWidth - 340)),
+                      top:
+                        rect.y + rect.h + 8 + 320 > window.innerHeight
+                          ? Math.max(0, rect.y - 328)
+                          : rect.y + rect.h + 8,
+                    }
+              }
             >
               <div className="long-head">
                 <span>
@@ -1698,14 +1713,39 @@ export function OverlayWindow() {
                     ? '长截图出错'
                     : `长截图完成 · ${longProgress?.height ?? 0} px`}
                 </span>
-                <button
-                  className="long-close"
-                  title="退出截图 (Esc)"
-                  onClick={() => void exitCapture()}
-                >
-                  ×
-                </button>
+                <div className="long-hbtns">
+                  <button
+                    className="long-close"
+                    title={longMin ? '展开' : '最小化（只留标题栏）'}
+                    onClick={() => {
+                      setLongMin((v) => !v)
+                      setLongMax(false)
+                    }}
+                  >
+                    {/* 用字符画按钮：与 × 同一套轻量风格，不引图标依赖 */}
+                    <span className="long-ico">&#8211;</span>
+                  </button>
+                  <button
+                    className="long-close"
+                    title={longMax ? '还原大小' : '最大化'}
+                    onClick={() => {
+                      setLongMax((v) => !v)
+                      setLongMin(false)
+                    }}
+                  >
+                    <span className="long-ico">{longMax ? '❐' : '▢'}</span>
+                  </button>
+                  <button
+                    className="long-close"
+                    title="退出截图 (Esc)"
+                    onClick={() => void exitCapture()}
+                  >
+                    ×
+                  </button>
+                </div>
               </div>
+              {!longMin && (
+                <>
               {longProgress?.thumb && (
                 <img
                   className="long-thumb-big"
@@ -1739,6 +1779,8 @@ export function OverlayWindow() {
                   {longCommit === 'pin' ? '贴图中…' : '贴图'}
                 </button>
               </div>
+                </>
+              )}
             </div>
           )}
 

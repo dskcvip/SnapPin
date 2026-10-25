@@ -22,8 +22,6 @@ pub const TRANS_LABEL: &str = "trans";
 /// 撞名会导致 `get_webview_window("main")` 取到那个加载 index.html 失败的黑框，
 /// 设置窗永远开不出来。用 "settings" 彻底避开。
 pub const SETTINGS_LABEL: &str = "settings";
-/// 长截图实时缩略预览小窗（非常驻，随长截图会话创建/销毁）
-pub const LONG_PREVIEW_LABEL: &str = "longpreview";
 /// 贴图管理面板（列出所有贴图的缩略图，跨窗口操作）
 pub const PIN_MANAGER_LABEL: &str = "pinmanager";
 
@@ -679,7 +677,6 @@ fn doc_html(label: &str) -> Option<&'static str> {
         OCR_LABEL => Some("ocr.html"),
         TRANS_LABEL => Some("trans.html"),
         SETTINGS_LABEL => Some("settings.html"),
-        LONG_PREVIEW_LABEL => Some("longpreview.html"),
         PIN_MANAGER_LABEL => Some("pinmanager.html"),
         _ => None,
     }
@@ -801,63 +798,6 @@ pub fn show_pin_manager(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// 长截图实时预览窗：小、置顶、无边框、不可缩放，默认贴主屏右下角。
-///
-/// 为什么不复用 show_doc_window：那个走的是"文档窗"范式（可缩放、有标题栏、
-/// 800×600），预览窗是一块常驻小卡片，参数完全不同。
-pub fn show_long_preview(app: &AppHandle) -> Result<(), String> {
-    if let Some(w) = app.get_webview_window(LONG_PREVIEW_LABEL) {
-        let _ = w.show();
-        let _ = w.set_focus();
-        return Ok(());
-    }
-    let (pw, ph) = (230.0_f64, 300.0_f64);
-    let window = WebviewWindowBuilder::new(
-        app,
-        LONG_PREVIEW_LABEL,
-        WebviewUrl::App("longpreview.html".into()),
-    )
-    .title("SnapPin 长截图预览")
-    .inner_size(pw, ph)
-    .decorations(false)
-    .transparent(true)
-    .always_on_top(true)
-    .skip_taskbar(true)
-    .resizable(false)
-    .shadow(false)
-    .initialization_script(WEBVIEW_GUARD)
-    .build()
-    .map_err(|e| format!("long preview window: {e}"))?;
-
-    // 贴主屏右下角：悬浮球占了右上角，放右下不打架
-    if let Ok(Some(mon)) = window.primary_monitor() {
-        let size = mon.size();
-        let pos = mon.position();
-        let sf = mon.scale_factor();
-        let wpx = (pw * sf).round() as i32;
-        let hpx = (ph * sf).round() as i32;
-        let x = pos.x + size.width as i32 - wpx - 16;
-        let y = pos.y + size.height as i32 - hpx - 48;
-        let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
-    }
-    let _ = window.show();
-    Ok(())
-}
-
-/// 关闭长截图预览窗（会话结束/中止时调用，窗口内容不保留）。
-///
-/// **必须投主线程**：调用方是长截图驱动线程（spawn_blocking），非主线程直接
-/// `close()` 在本项目反复踩过（设置窗关不掉的 ACL 事故之后又一条）——
-/// 实测预览窗在会话结束时残留不消失，就是漏了这一步。
-pub fn close_long_preview(app: &AppHandle) {
-    let app_cb = app.clone();
-    run_on_main(app, move |_app| {
-        if let Some(w) = app_cb.get_webview_window(LONG_PREVIEW_LABEL) {
-            let _ = w.close();
-        }
-    });
-}
-
 /// 关闭文档型窗口（内容仍留在 state 里，下次打开重取）。
 pub fn close_doc_window(app: &AppHandle, label: &str) {
     if let Some(w) = app.get_webview_window(label) {
@@ -880,7 +820,6 @@ mod tests {
         OCR_LABEL,
         TRANS_LABEL,
         SETTINGS_LABEL,
-        LONG_PREVIEW_LABEL,
         PIN_MANAGER_LABEL,
     ] {
             let html = doc_html(label)
@@ -901,7 +840,6 @@ mod tests {
         doc_html(OCR_LABEL),
         doc_html(TRANS_LABEL),
         doc_html(SETTINGS_LABEL),
-        doc_html(LONG_PREVIEW_LABEL),
         doc_html(PIN_MANAGER_LABEL),
     ];
         let mut seen = std::collections::HashSet::new();

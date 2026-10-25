@@ -953,6 +953,11 @@
 }
 
 /* 长截图公共面板外观（与 .ocr-panel 同语言） */
+.long-result {
+  /* 固定宽度：面板位置由 JS 按选区算，宽度固定后按钮坐标才稳定 */
+  width: 320px;
+}
+
 .long-bar,
 .long-result {
   position: fixed;
@@ -1028,12 +1033,60 @@
   color: #6b7280;
   font-size: 16px;
   line-height: 1;
-  padding: 2px 4px;
+  /* 三个按钮统一 24×22 的可点区域：字符本身只有几像素宽，
+     不加尺寸的话鼠标很难点中（实测多次点偏） */
+  min-width: 24px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
   cursor: pointer;
 }
 
 .long-close:hover {
+  background: rgba(15, 23, 42, 0.07);
+}
+
+.long-close:hover {
   color: #111827;
+}
+
+/* 标题栏右侧三个按钮（最小化 / 最大化 / 关闭） */
+.long-hbtns {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: 8px;
+}
+
+.long-ico {
+  font-size: 13px;
+  line-height: 1;
+}
+
+/* 最大化：面板铺开大半屏，缩略图占满剩余高度（长图按 contain 完整可见） */
+.long-result.is-max {
+  display: flex;
+  flex-direction: column;
+}
+
+.long-result.is-max .long-thumb-big {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+  max-width: 100%;
+  object-fit: contain;
+}
+
+.long-result.is-max .long-msg-row,
+.long-result.is-max .long-actions {
+  flex: 0 0 auto;
+}
+
+/* 最小化：只留标题栏 */
+.long-result.is-min {
+  padding-bottom: 6px;
 }
 
 .long-thumb-big {
