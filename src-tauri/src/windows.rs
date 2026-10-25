@@ -138,6 +138,31 @@ pub fn ensure_ball_window(app: &AppHandle, cfg: &AppConfig) -> tauri::Result<()>
 }
 
 
+/// 隐藏**所有**截图浮层（长截图期间用）。
+///
+/// 为什么必须隐藏而不是留着：长截图时浮层被设成光标穿透 + 采集排除，
+/// 于是它既不挡采集也不响应鼠标 —— 但**仍然画在屏幕上**。此时浮层内部
+/// 已切到"拼接中"的紧凑态，剩下的那点 UI 在半透明窗口里就成了一块没用的
+/// 灰方块（用户 2026-10-25 反馈"主副屏各多一个没用的窗口"）。
+/// 进度现在由独立的预览小窗负责，浮层这段时间没有任何存在价值。
+pub fn hide_all_overlays(app: &AppHandle) {
+    let labels: Vec<String> = app
+        .webview_windows()
+        .into_keys()
+        .filter(|l| l.starts_with(OVERLAY_PREFIX))
+        .collect();
+    let n = labels.len();
+    let app_cb = app.clone();
+    run_on_main(app, move |_app| {
+        for label in labels {
+            if let Some(w) = app_cb.get_webview_window(&label) {
+                let _ = w.hide();
+            }
+        }
+    });
+    crate::logln!("[snappin] long: hid {n} overlay window(s)");
+}
+
 /// 悬浮球窗口应有的边长（逻辑像素）：球径 + 两侧留白。
 ///
 /// 留白不是装饰：球有外投影、hover 时还会 `scale(1.07)`，窗口正好等于球径

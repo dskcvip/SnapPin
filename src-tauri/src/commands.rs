@@ -2328,6 +2328,10 @@ fn begin_long_session(
     };
     // 光标穿透：滚轮与点击都要落到下层的目标窗口
     windows::set_window_ignore_cursor_events(app, &overlay_label, true);
+    // 浮层在拼接期间整体隐藏：它们此时既不响应鼠标、也不进采集帧，
+    // 留在屏幕上只是一块内容塌缩的半透明方块（主副屏各一个，用户明确反馈
+    // 是"多两个没用的窗口"）。进度改由独立预览窗显示。
+    windows::hide_all_overlays(app);
 
     // 停止标志复位（上次异常退出可能留着 true），克隆进会话
     let stop = state.long_stop.clone();
@@ -2664,9 +2668,10 @@ fn restore_long_overlay(app: &AppHandle, idx: usize, hwnd: isize, ensure_visible
     if hwnd != 0 {
         snappin_core_platform::stitch::set_hwnd_capture_excluded(hwnd, false);
     }
-    if ensure_visible {
-        let _ = overlay_set_visible(app, &label, true);
-    }
+    // **无条件**重新显示：拼接期间浮层被 hide_all_overlays 整体收起了，
+    // 而结果面板（复制/贴图/保存）就画在浮层里，不重新显示用户就取不到图。
+    let _ = ensure_visible; // 参数保留：老调用点仍在传，语义已并入无条件显示
+    let _ = overlay_set_visible(app, &label, true);
 }
 
 /// 取 NSWindow 的 CGWindowNumber（非 macOS / 失败返回 0）。
