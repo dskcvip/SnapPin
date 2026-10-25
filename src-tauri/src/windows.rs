@@ -251,6 +251,7 @@ pub fn hide_ball_for_capture(app: &AppHandle) -> bool {
         .map(|w| w.is_visible().unwrap_or(false))
         .unwrap_or(false);
     if !visible {
+        crate::logln!("[snappin] ball hide skipped: not visible");
         return false;
     }
     run_on_main(app, |app| {
@@ -259,6 +260,12 @@ pub fn hide_ball_for_capture(app: &AppHandle) -> bool {
         }
     });
     BALL_HIDDEN_BY_CAPTURE.store(true, Ordering::SeqCst);
+    // 日志：确认隐藏真的发生了（用户报过球被截进图里）
+    let still = app
+        .get_webview_window(BALL_LABEL)
+        .map(|w| w.is_visible().unwrap_or(true))
+        .unwrap_or(false);
+    crate::logln!("[snappin] ball hidden for capture (visible_after={still})");
     true
 }
 

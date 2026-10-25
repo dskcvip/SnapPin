@@ -500,7 +500,10 @@ pub fn do_capture(app: &AppHandle, state: &AppState, src: &str) -> Result<Captur
     // 1. 采集前隐藏悬浮球（否则球体会被截进冻结图），并等待合成器刷新
     let ball_hidden = windows::hide_ball_for_capture(app);
     if ball_hidden {
-        std::thread::sleep(Duration::from_millis(100));
+        // 300ms 不是保守值，是实测下限：Windows 对 hide() 会走一个约 200ms 的
+        // 淡出动画（"动画显示窗口"开启时）。只等 100ms 抓到的帧里球还在，
+        // 表现为冻结图上有一块很淡的圆角方块残影（用户报"截图会把图标也截出来"）。
+        std::thread::sleep(Duration::from_millis(300));
     }
 
     // 2. 并行预创建隐藏浮层（与采集重叠；失败无妨，第 4 步会兜底创建）
@@ -2352,6 +2355,7 @@ fn begin_long_session(
         overlay_idx: idx,
         overlay_hwnd,
         used_fallback: !excluded,
+        full: None,
         thumb,
     });
     state.long_active.store(true, Ordering::SeqCst);
@@ -3043,6 +3047,29 @@ pub async fn pin_focus(app: AppHandle, state: State<'_, AppState>, label: String
     });
     rx.recv_timeout(std::time::Duration::from_secs(5))
         .map_err(|_| "pin focus: main thread timeout (5s)".to_string())?
+}
+
+/// 取长截图结果的**全分辨率**临时 PNG 路径（结果面板"最大化"按 1:1 展示用）。
+///
+/// 为什么单独按需生成：状态条/结果面板一直用的是 ≤240px 宽的缩略图
+/// （`write_thumbnail`），在最大化视图里被放大后一片糊。全图编码对超长图
+/// 要几百毫秒到一两秒，没必要在拼接结束时就付这笔开销 —— 用户点最大化才做，
+/// 并且结果缓存在会话里（反复展开/收起只编码一次）。
+#[tauri::command]
+pub async fn long_result_full(state: State<'_, AppState>) -> Result<String, String> {
+    let mut guard = state.long.lock().unwrap();
+    let session = guard.as_mut().ok_or_else(|| "no long session".to_string())?;
+    if let Some(p) = &session.full {
+        return Ok(p.to_string_lossy().to_string());
+    }
+    let canvas = session.capture.canvas();
+    let path = snappin_core_platform::new_temp_png_path();
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    snappin_core_platform::save_png_fast(canvas, &path).map_err(|e| e.to_string())?;
+    session.full = Some(path.clone());
+    Ok(path.to_string_lossy().to_string())
 }
 
 /// 一条贴图记录（贴图管理面板用）。

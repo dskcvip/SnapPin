@@ -1065,18 +1065,37 @@
   line-height: 1;
 }
 
-/* 最大化：面板铺开大半屏，缩略图占满剩余高度（长图按 contain 完整可见） */
+/* 图片容器：常态下就是普通居中一张预览图 */
+.long-shot-wrap {
+  display: flex;
+  justify-content: center;
+}
+
+/* 最大化：面板铺开大半屏，长图**按原始像素 1:1 展示**，靠滚动看完整内容。
+   之前用 object-fit: contain 把 3000+px 的长图压进面板高度，结果只剩一条
+   几像素宽的窄条（用户反馈"最大化只是把窗口放大了"）。 */
 .long-result.is-max {
   display: flex;
   flex-direction: column;
 }
 
-.long-result.is-max .long-thumb-big {
+.long-result.is-max .long-shot-wrap {
   flex: 1 1 auto;
   min-height: 0;
+  overflow: auto;
+  align-items: flex-start;
+  background: rgba(15, 23, 42, 0.05);
+  border-radius: 6px;
+  padding: 6px;
+}
+
+.long-result.is-max .long-thumb-big {
+  /* 关键：不缩放、不限制尺寸，按 PNG 自身的像素尺寸画出来 */
+  flex: 0 0 auto;
+  max-width: none;
   max-height: none;
-  max-width: 100%;
-  object-fit: contain;
+  margin: 0 auto;
+  image-rendering: -webkit-optimize-contrast;
 }
 
 .long-result.is-max .long-msg-row,

@@ -27,6 +27,7 @@ import {
   ocrShow,
   overlayContext,
   readImageBytes,
+  longResultFull,
   transStart,
   uiLog,
   windowSnap,
@@ -254,6 +255,8 @@ export function OverlayWindow() {
   /** 结果面板：最小化（只留标题栏）/ 最大化（占据大半屏看图） */
   const [longMin, setLongMin] = useState(false)
   const [longMax, setLongMax] = useState(false)
+  /** 全分辨率结果图路径（点最大化时按需生成；缩略图只有 240px 宽，放大会糊） */
+  const [longFull, setLongFull] = useState<string | null>(null)
   const [ocrError, setOcrError] = useState<string | null>(null)
   /** OCR 模型是否就绪（null = 还没查到）。false 时按钮提示去下载模型。 */
   const [ocrModelsOk, setOcrModelsOk] = useState<boolean | null>(null)
@@ -859,6 +862,7 @@ export function OverlayWindow() {
         setLongMode('result')
         setLongMin(false)
         setLongMax(false)
+        setLongFull(null)
         uiLog(`long ${p.phase}: ${p.message} (${p.height}px, ${p.steps} steps)`)
       }
     })
@@ -1692,18 +1696,20 @@ export function OverlayWindow() {
               style={
                 longMax
                   ? {
-                      // 最大化：铺开大半屏，方便看清拼出来的长图
+                      // 最大化：铺开大半屏，长图按**原始像素**1:1 展示（内部滚动）
                       left: Math.round(window.innerWidth * 0.03),
                       top: Math.round(window.innerHeight * 0.05),
                       width: Math.round(window.innerWidth * 0.94),
                       height: Math.round(window.innerHeight * 0.88),
                     }
                   : {
-                      left: Math.max(0, Math.min(rect.x, window.innerWidth - 340)),
-                      top:
-                        rect.y + rect.h + 8 + 320 > window.innerHeight
-                          ? Math.max(0, rect.y - 328)
-                          : rect.y + rect.h + 8,
+                      // 常态：**屏幕居中**。
+                      // 原先按选区上方/下方定位，选区靠上时面板会被顶到屏幕左上角
+                      // （用户误认为"预览窗还在"）；结果面板是模态性质的操作面板，
+                      // 居中比贴着选区更稳、也更像"结果页"。
+                      left: '50%',
+                      top: '50%',
+                      transform: 'translate(-50%, -50%)',
                     }
               }
             >
@@ -1729,8 +1735,14 @@ export function OverlayWindow() {
                     className="long-close"
                     title={longMax ? '还原大小' : '最大化'}
                     onClick={() => {
-                      setLongMax((v) => !v)
+                      const next = !longMax
+                      setLongMax(next)
                       setLongMin(false)
+                      if (next && !longFull) {
+                        longResultFull()
+                          .then(setLongFull)
+                          .catch((e) => uiLog(`long full image failed: ${String(e)}`))
+                      }
                     }}
                   >
                     <span className="long-ico">{longMax ? '❐' : '▢'}</span>
@@ -1747,12 +1759,18 @@ export function OverlayWindow() {
               {!longMin && (
                 <>
               {longProgress?.thumb && (
-                <img
-                  className="long-thumb-big"
-                  src={`${imgSrc(longProgress.thumb)}?t=done`}
-                  alt=""
-                  draggable={false}
-                />
+                <div className="long-shot-wrap">
+                  <img
+                    className="long-thumb-big"
+                    src={
+                      longMax && longFull
+                        ? imgSrc(longFull)
+                        : `${imgSrc(longProgress.thumb)}?t=done`
+                    }
+                    alt=""
+                    draggable={false}
+                  />
+                </div>
               )}
               <div className="long-msg-row">{longProgress?.message ?? '长截图已结束'}</div>
               {longActError && <div className="long-error">{longActError}</div>}

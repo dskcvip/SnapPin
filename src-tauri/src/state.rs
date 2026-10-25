@@ -37,6 +37,9 @@ pub struct LongSession {
     pub used_fallback: bool,
     /// 缩略图临时路径（驱动循环每步覆盖写，前端状态条预览用）
     pub thumb: PathBuf,
+    /// 全分辨率结果的临时 PNG 路径（**按需**生成：只有用户点最大化时才写，
+    /// 生成后缓存在这里，反复展开不再重复编码）
+    pub full: Option<PathBuf>,
 }
 
 /// 自绘菜单的种类：决定菜单内容与点击后的动作路由。

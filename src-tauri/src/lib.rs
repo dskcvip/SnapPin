@@ -351,6 +351,7 @@ pub fn run() {
             commands::ocr_recognize,
             commands::long_capture_start,
             commands::long_capture_stop,
+            commands::long_result_full,
             commands::long_capture_commit,
             commands::pin_from_clipboard,
             commands::pin_context,
