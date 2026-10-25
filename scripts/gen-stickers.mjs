@@ -22,8 +22,22 @@ const srcDir = join(root, 'assets', 'stickers')
 const outDir = join(root, 'public')
 const outFile = join(outDir, 'stickers.json')
 
-if (!existsSync(srcDir)) {
-  console.error(`[stickers] 源目录不存在：${srcDir}`)
+// 源目录缺失或为空时：若已有提交进 git 的产物 json，就保留它并正常退出。
+//
+// 为什么需要这条：assets/stickers/（2079 个 SVG，5.4MB）**不在 git 里**，
+// CI checkout 后这个目录是空的 —— 原先直接 exit(1)，于是 macOS dmg 的
+// "构建前端"步骤每次都失败（prebuild 挂在 npm run build 前面）。
+// 产物 public/stickers.json 才是前端唯一的事实来源（见 src/stickers/library.ts），
+// 所以 CI 用已提交的那份完全正确；本地有源时照常重新生成。
+const srcMissing = !existsSync(srcDir) || readdirSync(srcDir).length === 0
+if (srcMissing) {
+  if (existsSync(outFile)) {
+    console.warn(
+      `[stickers] 源目录缺失或为空（${srcDir}），保留已提交的 ${outFile}`,
+    )
+    process.exit(0)
+  }
+  console.error(`[stickers] 源目录不存在，且没有可用的产物：${srcDir}`)
   process.exit(1)
 }
 
