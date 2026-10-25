@@ -89,6 +89,7 @@ function appMenu(failed: string[]): MenuNode[] {
     { id: 'pin-clipboard', label: '剪贴板贴图', hint: 'Ctrl+2' },
     { id: 'toggle-ball', label: '显示 / 隐藏悬浮球' },
     SEP('sep-1'),
+    { id: 'pin-manager', label: '贴图管理…' },
     { id: 'settings', label: '设置' },
     { id: 'about', label: '关于 SnapPin' },
     { id: 'open-log', label: '打开运行日志' },

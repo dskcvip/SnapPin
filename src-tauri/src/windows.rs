@@ -24,6 +24,8 @@ pub const TRANS_LABEL: &str = "trans";
 pub const SETTINGS_LABEL: &str = "settings";
 /// 长截图实时缩略预览小窗（非常驻，随长截图会话创建/销毁）
 pub const LONG_PREVIEW_LABEL: &str = "longpreview";
+/// 贴图管理面板（列出所有贴图的缩略图，跨窗口操作）
+pub const PIN_MANAGER_LABEL: &str = "pinmanager";
 
 /// 注入到所有 webview 的守卫脚本（document-start，早于页面脚本执行）。
 ///
@@ -653,6 +655,7 @@ fn doc_html(label: &str) -> Option<&'static str> {
         TRANS_LABEL => Some("trans.html"),
         SETTINGS_LABEL => Some("settings.html"),
         LONG_PREVIEW_LABEL => Some("longpreview.html"),
+        PIN_MANAGER_LABEL => Some("pinmanager.html"),
         _ => None,
     }
 }
@@ -760,6 +763,19 @@ pub fn show_main_window(app: &AppHandle) -> Result<(), String> {
     show_doc_window(app, SETTINGS_LABEL, "SnapPin 设置", 780.0, 640.0)
 }
 
+/// 贴图管理面板（单例）：所有贴图的缩略图 + 置前 / 关闭 / 改分组。
+///
+/// **必须置顶**：贴图窗口本身是 always-on-top 的，管理面板若按普通窗口显示
+/// 会被自己管理的贴图盖住（实测：打开面板只看到贴图内容，面板在底下）。
+pub fn show_pin_manager(app: &AppHandle) -> Result<(), String> {
+    show_doc_window(app, PIN_MANAGER_LABEL, "SnapPin 贴图管理", 560.0, 460.0)?;
+    if let Some(win) = app.get_webview_window(PIN_MANAGER_LABEL) {
+        let _ = win.set_always_on_top(true);
+        let _ = win.set_focus();
+    }
+    Ok(())
+}
+
 /// 长截图实时预览窗：小、置顶、无边框、不可缩放，默认贴主屏右下角。
 ///
 /// 为什么不复用 show_doc_window：那个走的是"文档窗"范式（可缩放、有标题栏、
@@ -828,7 +844,13 @@ mod tests {
     #[test]
     fn doc_window_html_entries_exist_in_dist() {
         let dist = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../dist");
-        for label in [OCR_LABEL, TRANS_LABEL, SETTINGS_LABEL, LONG_PREVIEW_LABEL] {
+        for label in [
+        OCR_LABEL,
+        TRANS_LABEL,
+        SETTINGS_LABEL,
+        LONG_PREVIEW_LABEL,
+        PIN_MANAGER_LABEL,
+    ] {
             let html = doc_html(label)
                 .unwrap_or_else(|| panic!("label {label} 没有登记 HTML 入口（见 doc_html）"));
             let path = dist.join(html);
@@ -848,6 +870,7 @@ mod tests {
         doc_html(TRANS_LABEL),
         doc_html(SETTINGS_LABEL),
         doc_html(LONG_PREVIEW_LABEL),
+        doc_html(PIN_MANAGER_LABEL),
     ];
         let mut seen = std::collections::HashSet::new();
         for h in all.into_iter().flatten() {

@@ -3029,6 +3029,75 @@ fn snapshot_trans(app: &AppHandle) -> crate::state::TransState {
 /// 打开设置窗（托盘菜单 / 翻译失败时的"去设置"都用它）。
 ///
 /// 同 `ocr_show`：必须 async，避免在主线程的 webview IPC 回调里建窗死锁。
+/// 把某张贴图置前（管理面板点缩略图）。
+#[tauri::command]
+pub async fn pin_focus(app: AppHandle, state: State<'_, AppState>, label: String) -> Result<(), String> {
+    if !state.pins.lock().unwrap().contains_key(&label) {
+        return Err("pin window not found".to_string());
+    }
+    let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
+    let app_cb = app.clone();
+    let label_cb = label.clone();
+    let _ = app.run_on_main_thread(move || {
+        let r = (|| -> Result<(), String> {
+            let w = app_cb
+                .get_webview_window(&label_cb)
+                .ok_or_else(|| "pin window not found".to_string())?;
+            let _ = w.show();
+            let _ = w.unminimize();
+            let _ = w.set_focus();
+            Ok(())
+        })();
+        let _ = tx.send(r);
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(5))
+        .map_err(|_| "pin focus: main thread timeout (5s)".to_string())?
+}
+
+/// 一条贴图记录（贴图管理面板用）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PinInfoPayload {
+    pub label: String,
+    /// 当前显示的图片路径（可能指向处理后的临时文件）
+    pub src: String,
+    pub width: f64,
+    pub height: f64,
+    pub group: String,
+}
+
+/// 列出所有贴图（按加入顺序稳定排序，面板不会每次刷新跳位）。
+#[tauri::command]
+pub async fn pin_list(state: State<'_, AppState>) -> Result<Vec<PinInfoPayload>, String> {
+    let pins = state.pins.lock().unwrap();
+    let mut out: Vec<PinInfoPayload> = pins
+        .iter()
+        .map(|(label, m)| PinInfoPayload {
+            label: label.clone(),
+            src: m.src.clone(),
+            width: m.width,
+            height: m.height,
+            group: m.group.clone(),
+        })
+        .collect();
+    out.sort_by(|a, b| a.label.cmp(&b.label));
+    Ok(out)
+}
+
+/// 打开贴图管理面板。
+///
+/// 与设置窗同一条铁律：菜单/托盘事件里**不能同步建窗**（Windows 会死锁），
+/// 必须投递主线程并同步等结果。
+#[tauri::command]
+pub async fn open_pin_manager(app: AppHandle) -> Result<(), String> {
+    let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
+    let app_cb = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let _ = tx.send(windows::show_pin_manager(&app_cb));
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(10))
+        .map_err(|_| "pin manager: main thread timeout (10s)".to_string())?
+}
+
 #[tauri::command]
 pub async fn open_settings_window(app: AppHandle) -> Result<(), String> {
     let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();

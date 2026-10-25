@@ -28,6 +28,7 @@ export default defineConfig({
         ocr: 'ocr.html',
         trans: 'trans.html',
         longpreview: 'longpreview.html',
+        pinmanager: 'pinmanager.html',
       },
     },
   },

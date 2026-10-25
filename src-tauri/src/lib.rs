@@ -355,6 +355,9 @@ pub fn run() {
             commands::pin_from_clipboard,
             commands::pin_context,
             commands::pin_close,
+            commands::pin_list,
+            commands::pin_focus,
+            commands::open_pin_manager,
             commands::pin_set_topmost,
             commands::pin_set_ignore_cursor_events,
             commands::pin_copy,
@@ -580,6 +583,15 @@ pub(crate) fn handle_menu_event(app: &AppHandle, id: &str) {
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = crate::commands::open_settings_window(app_cb).await {
                     crate::logln!("open settings window failed: {e}");
+                }
+            });
+        }
+        // 贴图管理（缩略图列表 / 批量关闭 / 改分组）；同样不能同步建窗
+        "pin-manager" => {
+            let app_cb = app.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = crate::commands::open_pin_manager(app_cb).await {
+                    crate::logln!("open pin manager failed: {e}");
                 }
             });
         }

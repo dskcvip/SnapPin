@@ -430,6 +430,22 @@ export const pinContext = (): Promise<PinContext> => invoke('pin_context')
 
 export const pinClose = (label: string): Promise<void> => invoke('pin_close', { label })
 
+/** 贴图记录（管理面板用） */
+export interface PinInfo {
+  label: string
+  /** 当前显示图片的本地路径（处理后可能指向临时文件） */
+  src: string
+  width: number
+  height: number
+  group: string
+}
+
+/** 列出所有贴图 */
+export const pinList = (): Promise<PinInfo[]> => invoke('pin_list')
+
+/** 把某张贴图置前 */
+export const pinFocus = (label: string): Promise<void> => invoke('pin_focus', { label })
+
 /** 切换贴图窗置顶（置顶时压在其他窗口之上）。 */
 export const pinSetTopmost = (label: string, topmost: boolean): Promise<void> =>
   invoke('pin_set_topmost', { label, topmost })
