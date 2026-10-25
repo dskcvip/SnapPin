@@ -2355,7 +2355,6 @@ fn begin_long_session(
         overlay_idx: idx,
         overlay_hwnd,
         used_fallback: !excluded,
-        full: None,
         thumb,
     });
     state.long_active.store(true, Ordering::SeqCst);
@@ -3050,29 +3049,6 @@ pub async fn pin_focus(app: AppHandle, state: State<'_, AppState>, label: String
     });
     rx.recv_timeout(std::time::Duration::from_secs(5))
         .map_err(|_| "pin focus: main thread timeout (5s)".to_string())?
-}
-
-/// 取长截图结果的**全分辨率**临时 PNG 路径（结果面板"最大化"按 1:1 展示用）。
-///
-/// 为什么单独按需生成：状态条/结果面板一直用的是 ≤240px 宽的缩略图
-/// （`write_thumbnail`），在最大化视图里被放大后一片糊。全图编码对超长图
-/// 要几百毫秒到一两秒，没必要在拼接结束时就付这笔开销 —— 用户点最大化才做，
-/// 并且结果缓存在会话里（反复展开/收起只编码一次）。
-#[tauri::command]
-pub async fn long_result_full(state: State<'_, AppState>) -> Result<String, String> {
-    let mut guard = state.long.lock().unwrap();
-    let session = guard.as_mut().ok_or_else(|| "no long session".to_string())?;
-    if let Some(p) = &session.full {
-        return Ok(p.to_string_lossy().to_string());
-    }
-    let canvas = session.capture.canvas();
-    let path = snappin_core_platform::new_temp_png_path();
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    }
-    snappin_core_platform::save_png_fast(canvas, &path).map_err(|e| e.to_string())?;
-    session.full = Some(path.clone());
-    Ok(path.to_string_lossy().to_string())
 }
 
 /// 一条贴图记录（贴图管理面板用）。

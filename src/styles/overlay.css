@@ -953,15 +953,11 @@
 }
 
 /* 长截图公共面板外观（与 .ocr-panel 同语言） */
-/* 结果面板：常态屏幕居中；最大化时宽度贴着内容（长图原始宽度）、高度占 88vh。
-   刻意**不用内联样式算几何** —— vh/innerHeight 那套在这里反复出错，
-   而 CSS 的 fit-content / vh 是浏览器自己的强项，不需要 JS 参与。 */
+/* 结果面板：屏幕居中，宽度固定（见下方 .long-result 的 340px） */
 .long-result {
   left: 50%;
   top: 50%;
   transform: translate(-50%, -50%);
-  width: fit-content;
-  min-width: 320px;
 }
 
 .long-bar,
@@ -1039,84 +1035,12 @@
   color: #6b7280;
   font-size: 16px;
   line-height: 1;
-  /* 三个按钮统一 24×22 的可点区域：字符本身只有几像素宽，
-     不加尺寸的话鼠标很难点中（实测多次点偏） */
-  min-width: 24px;
-  height: 22px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 4px;
+  padding: 2px 4px;
   cursor: pointer;
 }
 
 .long-close:hover {
-  background: rgba(15, 23, 42, 0.07);
-}
-
-.long-close:hover {
   color: #111827;
-}
-
-/* 标题栏右侧三个按钮（最小化 / 最大化 / 关闭） */
-.long-hbtns {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  margin-left: 8px;
-}
-
-.long-ico {
-  font-size: 13px;
-  line-height: 1;
-}
-
-/* 图片容器：常态下就是普通居中一张预览图 */
-.long-shot-wrap {
-  display: flex;
-  justify-content: center;
-}
-
-/* 最大化：面板铺开大半屏，长图**按原始像素 1:1 展示**，靠滚动看完整内容。
-   之前用 object-fit: contain 把 3000+px 的长图压进面板高度，结果只剩一条
-   几像素宽的窄条（用户反馈"最大化只是把窗口放大了"）。 */
-.long-result.is-max {
-  display: flex;
-  flex-direction: column;
-  /* 宽度跟内容走（长图多少像素就多宽），上限 94vw；高度固定 88vh。
-     之前写死 94vw 会把 1100px 的图放进 1800px 面板，两侧各留一大块空白。 */
-  width: fit-content;
-  max-width: 94vw;
-  height: 88vh;
-}
-
-.long-result.is-max .long-shot-wrap {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow: auto;
-  align-items: flex-start;
-  background: rgba(15, 23, 42, 0.05);
-  border-radius: 6px;
-  padding: 6px;
-}
-
-.long-result.is-max .long-thumb-big {
-  /* 关键：不缩放、不限制尺寸，按 PNG 自身的像素尺寸画出来 */
-  flex: 0 0 auto;
-  max-width: none;
-  max-height: none;
-  margin: 0 auto;
-  image-rendering: -webkit-optimize-contrast;
-}
-
-.long-result.is-max .long-msg-row,
-.long-result.is-max .long-actions {
-  flex: 0 0 auto;
-}
-
-/* 最小化：只留标题栏 */
-.long-result.is-min {
-  padding-bottom: 6px;
 }
 
 .long-thumb-big {

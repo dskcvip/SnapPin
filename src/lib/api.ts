@@ -442,8 +442,6 @@ export interface PinInfo {
 
 /** 列出所有贴图 */
 /** 长截图结果的**全分辨率**临时 PNG 路径（最大化时按 1:1 展示用，按需生成） */
-export const longResultFull = (): Promise<string> => invoke('long_result_full')
-
 export const pinList = (): Promise<PinInfo[]> => invoke('pin_list')
 
 /** 把某张贴图置前 */
