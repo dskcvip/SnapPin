@@ -22,6 +22,8 @@ pub const TRANS_LABEL: &str = "trans";
 /// 撞名会导致 `get_webview_window("main")` 取到那个加载 index.html 失败的黑框，
 /// 设置窗永远开不出来。用 "settings" 彻底避开。
 pub const SETTINGS_LABEL: &str = "settings";
+/// 长截图实时缩略预览小窗（非常驻，随长截图会话创建/销毁）
+pub const LONG_PREVIEW_LABEL: &str = "longpreview";
 
 /// 注入到所有 webview 的守卫脚本（document-start，早于页面脚本执行）。
 ///
@@ -650,6 +652,7 @@ fn doc_html(label: &str) -> Option<&'static str> {
         OCR_LABEL => Some("ocr.html"),
         TRANS_LABEL => Some("trans.html"),
         SETTINGS_LABEL => Some("settings.html"),
+        LONG_PREVIEW_LABEL => Some("longpreview.html"),
         _ => None,
     }
 }
@@ -757,6 +760,56 @@ pub fn show_main_window(app: &AppHandle) -> Result<(), String> {
     show_doc_window(app, SETTINGS_LABEL, "SnapPin 设置", 780.0, 640.0)
 }
 
+/// 长截图实时预览窗：小、置顶、无边框、不可缩放，默认贴主屏右下角。
+///
+/// 为什么不复用 show_doc_window：那个走的是"文档窗"范式（可缩放、有标题栏、
+/// 800×600），预览窗是一块常驻小卡片，参数完全不同。
+pub fn show_long_preview(app: &AppHandle) -> Result<(), String> {
+    if let Some(w) = app.get_webview_window(LONG_PREVIEW_LABEL) {
+        let _ = w.show();
+        let _ = w.set_focus();
+        return Ok(());
+    }
+    let (pw, ph) = (230.0_f64, 300.0_f64);
+    let window = WebviewWindowBuilder::new(
+        app,
+        LONG_PREVIEW_LABEL,
+        WebviewUrl::App("longpreview.html".into()),
+    )
+    .title("SnapPin 长截图预览")
+    .inner_size(pw, ph)
+    .decorations(false)
+    .transparent(true)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .resizable(false)
+    .shadow(false)
+    .initialization_script(WEBVIEW_GUARD)
+    .build()
+    .map_err(|e| format!("long preview window: {e}"))?;
+
+    // 贴主屏右下角：悬浮球占了右上角，放右下不打架
+    if let Ok(Some(mon)) = window.primary_monitor() {
+        let size = mon.size();
+        let pos = mon.position();
+        let sf = mon.scale_factor();
+        let wpx = (pw * sf).round() as i32;
+        let hpx = (ph * sf).round() as i32;
+        let x = pos.x + size.width as i32 - wpx - 16;
+        let y = pos.y + size.height as i32 - hpx - 48;
+        let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+    }
+    let _ = window.show();
+    Ok(())
+}
+
+/// 关闭长截图预览窗（会话结束/中止时调用，窗口内容不保留）。
+pub fn close_long_preview(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window(LONG_PREVIEW_LABEL) {
+        let _ = w.close();
+    }
+}
+
 /// 关闭文档型窗口（内容仍留在 state 里，下次打开重取）。
 pub fn close_doc_window(app: &AppHandle, label: &str) {
     if let Some(w) = app.get_webview_window(label) {
@@ -775,7 +828,7 @@ mod tests {
     #[test]
     fn doc_window_html_entries_exist_in_dist() {
         let dist = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../dist");
-        for label in [OCR_LABEL, TRANS_LABEL, SETTINGS_LABEL] {
+        for label in [OCR_LABEL, TRANS_LABEL, SETTINGS_LABEL, LONG_PREVIEW_LABEL] {
             let html = doc_html(label)
                 .unwrap_or_else(|| panic!("label {label} 没有登记 HTML 入口（见 doc_html）"));
             let path = dist.join(html);
@@ -790,7 +843,12 @@ mod tests {
     /// 映射表不允许出现重复 html（两个窗口共用入口会互相顶内容）。
     #[test]
     fn doc_html_mapping_is_unique() {
-        let all = [doc_html(OCR_LABEL), doc_html(TRANS_LABEL), doc_html(SETTINGS_LABEL)];
+        let all = [
+        doc_html(OCR_LABEL),
+        doc_html(TRANS_LABEL),
+        doc_html(SETTINGS_LABEL),
+        doc_html(LONG_PREVIEW_LABEL),
+    ];
         let mut seen = std::collections::HashSet::new();
         for h in all.into_iter().flatten() {
             assert!(seen.insert(h), "html 入口重复：{h}");

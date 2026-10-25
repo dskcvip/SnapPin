@@ -27,6 +27,7 @@ export default defineConfig({
         settings: 'settings.html',
         ocr: 'ocr.html',
         trans: 'trans.html',
+        longpreview: 'longpreview.html',
       },
     },
   },

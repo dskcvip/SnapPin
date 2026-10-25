@@ -5,6 +5,7 @@ import { MainWindow } from './windows/MainWindow'
 import { MenuWindow } from './windows/MenuWindow'
 import { OcrWindow } from './windows/OcrWindow'
 import { TranslationWindow } from './windows/TranslationWindow'
+import { LongPreviewWindow } from './windows/LongPreviewWindow'
 import { getWindowKind } from './lib/windowKind'
 
 /**
@@ -32,6 +33,8 @@ export function App() {
       return <OcrWindow />
     case 'trans':
       return <TranslationWindow />
+    case 'longpreview':
+      return <LongPreviewWindow />
     default:
       return <MainWindow />
   }

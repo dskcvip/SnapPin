@@ -2163,6 +2163,7 @@ pub fn discard_long_session(app: &AppHandle, state: &AppState, why: &str) {
     let Some(session) = session else {
         return;
     };
+    windows::close_long_preview(app);
     eprintln!(
         "[snappin] discard long capture (why={why}, height={}px, steps={})",
         session.capture.height(),
@@ -2251,6 +2252,15 @@ pub async fn long_capture_start(
     // 防重入（驱动循环持锁期间这里会立刻失败）
     if state.long.lock().unwrap().is_some() {
         return Err("long capture already in progress".to_string());
+    }
+    // 打开实时缩略预览窗（主线程；失败不影响拼接，只是少个预览）
+    {
+        let app_cb = app.clone();
+        windows::run_on_main(&app, move |_app| {
+            if let Err(e) = windows::show_long_preview(&app_cb) {
+                crate::logln!("[snappin] long preview window failed: {e}");
+            }
+        });
     }
     // monitor_id "m0" → xcap::Monitor::all()[0]（id 即采集下标，见 capture_shot）
     let idx = monitor_index(&monitor_id)?;
@@ -2640,6 +2650,10 @@ fn emit_long(
         message: message.into(),
     };
     let _ = app.emit(LONG_EVENT, payload);
+    // 会话收尾（done/error）就收起预览窗：结果已经在浮层的结果面板里了
+    if phase != "scrolling" {
+        windows::close_long_preview(app);
+    }
 }
 
 /// 还原长截图期间改过的浮层状态：光标穿透解除、采集排除解除、

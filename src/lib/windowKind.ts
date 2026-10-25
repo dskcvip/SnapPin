@@ -8,6 +8,7 @@ export type WindowKind =
   | 'settings'
   | 'ocr'
   | 'trans'
+  | 'longpreview'
 
 declare global {
   interface Window {
@@ -24,6 +25,7 @@ export function getWindowKind(): WindowKind {
     kind === 'menu' ||
     kind === 'ocr' ||
     kind === 'trans' ||
+    kind === 'longpreview' ||
     kind === 'settings'
   ) {
     return kind
