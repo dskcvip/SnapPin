@@ -428,6 +428,46 @@ impl Drop for CaptureGuard<'_> {
 /// 运行的代码在 Windows 开发机上永远不被编译器检查（API 改名、类型不匹配
 /// 都发现不了，只能等 CI/mac 构建时炸）。这里改成运行时判定——非 macOS 时
 /// `has_screen_capture_permission()` 恒为 true，第一行就返回，零副作用。
+/// 清掉本应用的屏幕录制授权记录，并提示用户重启（macOS）。
+///
+/// 这是"设置里明明勾着、却始终 preflight=false"的**唯一可靠解法**：
+/// 授权与代码签名绑定，adhoc 签名的 cdhash 每次构建都变，旧记录就成了
+/// "看着有效、实际匹配不上"的僵尸条目；而系统因为有这条记录，**再也不会
+/// 主动弹授权框**。`tccutil reset ScreenCapture <bundle-id>` 把记录删掉，
+/// 下次启动才会重新走一遍系统授权流程。
+pub(crate) fn reset_screen_permission_and_hint(app: &AppHandle) {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+
+    let id = app.config().identifier.clone();
+    let app_cb = app.clone();
+    match snappin_core_platform::reset_screen_capture_permission(&id) {
+        Ok(()) => {
+            crate::logln!("[snappin] tccutil reset ScreenCapture {id} ok");
+            app_cb
+                .dialog()
+                .message(format!(
+                    "已清除「{id}」的屏幕录制授权记录。\n\n现在请：\n① 完全退出 SnapPin（菜单栏图标右键 → 退出 SnapPin）；\n② 重新打开 SnapPin —— 系统这次会弹出「SnapPin 想要录制屏幕」，点「打开系统设置」并打开开关；\n③ 系统提示需要重新打开应用时，再退出重开一次。\n\n如果系统框一直不弹，说明还有残留：再点一次本按钮，然后在「系统设置 → 隐私与安全性 → 屏幕录制」里手动点「−」删掉 SnapPin 条目后重启。"
+                ))
+                .title("已重置，请重启应用")
+                .kind(MessageDialogKind::Info)
+                .buttons(MessageDialogButtons::Ok)
+                .show(|_| {});
+        }
+        Err(e) => {
+            crate::logln!("[snappin] tccutil reset failed: {e}");
+            app_cb
+                .dialog()
+                .message(format!(
+                    "自动重置失败：{e}\n\n请在「终端」里手动执行这一行，然后重启 SnapPin：\n\ntccutil reset ScreenCapture {id}"
+                ))
+                .title("重置失败")
+                .kind(MessageDialogKind::Error)
+                .buttons(MessageDialogButtons::Ok)
+                .show(|_| {});
+        }
+    }
+}
+
 fn mac_capture_gate(app: &AppHandle) -> Result<(), String> {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -468,20 +508,21 @@ fn mac_capture_gate(app: &AppHandle) -> Result<(), String> {
         LAST_ALERT.store(now, Ordering::SeqCst);
         crate::logln!("[snappin] capture blocked: 无「屏幕录制」权限");
         use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+        let app_for_cb = app.clone();
         app.dialog()
             .message(
-                "SnapPin 没有「屏幕录制」权限，macOS 会把它截到的画面里其他应用的窗口全部过滤掉——只能看到桌面壁纸。\n\n① 把 SnapPin 拖到「应用程序」文件夹后再运行（直接从 dmg 里跑，系统记录的授权路径对不上）；\n② 打开「系统设置 → 隐私与安全性 → 屏幕录制」，勾选 SnapPin；\n③ **如果列表里有多条 SnapPin，点左下角的「−」把旧的全部删掉**（每升级一次版本签名都会变，系统会认为是一个新程序，旧条目永远匹配不上当前这份）；\n④ 再点「+」重新添加 /Applications/SnapPin.app，并勾选；\n⑤ 然后退出 SnapPin 再重新打开（macOS 要求重启后才生效）。",
+                "SnapPin 没有「屏幕录制」权限，macOS 会把它截到的画面里其他应用的窗口全部过滤掉——只能看到桌面壁纸。\n\n**先把 SnapPin 彻底退出**（菜单栏图标右键 → 退出），然后按下面顺序来：\n\n① **确认从哪里运行**：一定是「应用程序」文件夹里的那份。如果 dmg 还挂着（访达左边栏有 SnapPin 卷），先点它右边的「⏏」推出 —— 从 dmg 里直接打开会被系统当成另一个程序，设置里勾了也不算数。\n② 打开「系统设置 → 隐私与安全性 → 屏幕录制」，**点左下角「−」把列表里所有 SnapPin 条目删掉**（不是取消勾选，是删掉。升级一次版本签名就变一次，旧条目永远匹配不上当前这份）。\n③ 回到「应用程序」，双击 SnapPin 启动。此时系统应该**主动弹出**「SnapPin 想要录制屏幕」的对话框 —— 在系统框里点「打开系统设置」并打开开关。（如果没弹框，说明系统里还残留记录，重复步骤②再启动。）\n④ 系统会提示需要重新打开应用，**退出 SnapPin 再启动一次**。\n\n判定成功的标志：菜单栏图标右键 →「打开运行日志」，里面出现 `屏幕录制权限 preflight = true`。\n\n如果做完还是 false，在终端执行一次（去掉下载隔离属性，再走一遍步骤②③）： `xattr -dr com.apple.quarantine /Applications/SnapPin.app`",
             )
             .title("需要「屏幕录制」权限")
             .kind(MessageDialogKind::Warning)
             .buttons(MessageDialogButtons::OkCancelCustom(
-                "打开系统设置".to_string(),
+                "重置授权并重试".to_string(),
                 "知道了".to_string(),
             ))
-            .show(|open_settings| {
-                if open_settings {
-                    // 直达「隐私与安全性 → 屏幕录制」面板（常量与托盘菜单共用）
-                    crate::open_external(crate::SCREEN_RECORDING_SETTINGS_URL);
+            .show(move |reset| {
+                if reset {
+                    // dialog 的回调要求 'static：借用 &AppHandle 会逃逸，必须 clone
+                    crate::commands::reset_screen_permission_and_hint(&app_for_cb);
                 }
             });
     }

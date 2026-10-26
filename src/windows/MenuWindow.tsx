@@ -93,6 +93,11 @@ function appMenu(failed: string[]): MenuNode[] {
     { id: 'settings', label: '设置' },
     { id: 'about', label: '关于 SnapPin' },
     { id: 'open-log', label: '打开运行日志' },
+    // macOS 专属：屏幕录制授权"勾着却无效"时的自救入口
+    // （清掉 TCC 记录，下次启动才会重新弹系统授权框）
+    ...(typeof navigator !== 'undefined' && /Mac/i.test(navigator.userAgent)
+      ? [{ id: 'reset-perm', label: '重置屏幕录制授权…' }]
+      : []),
     SEP('sep-2'),
     { id: 'quit', label: '退出' },
   ]

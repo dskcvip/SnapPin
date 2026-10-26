@@ -185,6 +185,37 @@ pub fn request_screen_capture_permission() -> bool {
     unsafe { CGRequestScreenCaptureAccess() }
 }
 
+/// 重置本应用的「屏幕录制」授权记录（macOS 官方 `tccutil`）。
+///
+/// 为什么需要：TCC 里那条记录可能"勾着但无效" —— 授权与代码签名绑定，
+/// 而 adhoc 签名的 cdhash 每次重新构建都会变。此时用户无论怎么点开关都不生效，
+/// 而且**系统不会再弹授权框**（因为有记录）。`tccutil reset ScreenCapture <id>`
+/// 是唯一能把这个 app 的记录清掉、让系统重新走一遍授权流程的手段。
+///
+/// 只重置自己的 bundle id，不影响其它应用。重置后需要**重启本应用**
+/// 才会重新触发系统授权框（系统限制）。
+#[cfg(target_os = "macos")]
+pub fn reset_screen_capture_permission(bundle_id: &str) -> Result<(), String> {
+    let out = std::process::Command::new("tccutil")
+        .args(["reset", "ScreenCapture", bundle_id])
+        .output()
+        .map_err(|e| format!("tccutil 启动失败：{e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "tccutil 退出码 {:?}：{}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn reset_screen_capture_permission(_bundle_id: &str) -> Result<(), String> {
+    Ok(())
+}
+
 #[cfg(target_os = "macos")]
 pub fn ensure_screen_capture_permission() -> bool {
     if has_screen_capture_permission() {

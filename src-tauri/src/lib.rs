@@ -216,6 +216,19 @@ pub fn run() {
             #[cfg(not(target_os = "macos"))]
             let mac_perm_ok = true;
 
+            // 启动自检：**当前运行的到底是哪个文件**。
+            //
+            // macOS 的 TCC 授权是绑定「bundle id + 代码签名 + 路径」的：
+            // 从 dmg 里直接运行（/Volumes/...）与从「应用程序」运行（/Applications/...）
+            // 会被系统当成两个不同的程序 —— 用户明明在设置里勾了，却依然无权限，
+            // 十有八九就是这个原因。以前日志里没有路径，完全没法判断。
+            crate::logln!(
+                "[snappin] exe: {}",
+                std::env::current_exe()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|e| format!("<unknown: {e}>"))
+            );
+
             // 启动自检：光标位置。
             //
             // macOS 上这条是判断"自绘菜单能不能弹"的最快依据 —— cursor_position()
@@ -553,6 +566,14 @@ fn mac_native_tray_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<taur
     let ball = MenuItem::with_id(app, "toggle-ball", "显示 / 隐藏悬浮球", true, None::<&str>)?;
     let settings = MenuItem::with_id(app, "settings", "设置…", true, None::<&str>)?;
     let perm = MenuItem::with_id(app, "open-perm", "屏幕录制权限…", true, None::<&str>)?;
+    // 授权"勾着但无效"时的自救入口：清掉 TCC 记录，下次启动才会重新弹系统授权框
+    let reset_perm = MenuItem::with_id(
+        app,
+        "reset-perm",
+        "重置屏幕录制授权…",
+        true,
+        None::<&str>,
+    )?;
     let log = MenuItem::with_id(app, "open-log", "打开运行日志", true, None::<&str>)?;
     let about = MenuItem::with_id(app, "about", "关于 SnapPin", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出 SnapPin", true, None::<&str>)?;
@@ -566,6 +587,7 @@ fn mac_native_tray_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<taur
             &pin,
             &ball,
             &perm,
+            &reset_perm,
             &s1,
             &log,
             &settings,
@@ -618,6 +640,8 @@ pub(crate) fn handle_menu_event(app: &AppHandle, id: &str) {
         }
         // 换包后授权失效时，用户唯一的自助恢复入口（macOS）
         "open-perm" => open_external(SCREEN_RECORDING_SETTINGS_URL),
+        // 清掉本应用的屏幕录制授权记录（"设置里勾着却始终无效"的唯一可靠解法）
+        "reset-perm" => crate::commands::reset_screen_permission_and_hint(app),
         "quit" => app.exit(0),
         _ => {}
     }
