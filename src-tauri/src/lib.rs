@@ -372,6 +372,7 @@ pub fn run() {
             commands::open_url,
             commands::decode_qr,
             commands::ocr_models_status,
+            commands::ocr_download_models,
             commands::ocr_recognize,
             commands::long_capture_start,
             commands::long_capture_stop,
