@@ -96,7 +96,13 @@ function appMenu(failed: string[]): MenuNode[] {
     // macOS 专属：屏幕录制授权"勾着却无效"时的自救入口
     // （清掉 TCC 记录，下次启动才会重新弹系统授权框）
     ...(typeof navigator !== 'undefined' && /Mac/i.test(navigator.userAgent)
-      ? [{ id: 'reset-perm', label: '重置屏幕录制授权…' }]
+      ? [
+          { id: 'reset-perm', label: '重置屏幕录制授权…' },
+          // 长截图自动滚动的前置权限：未授权时系统会**静默丢弃**滚动事件
+          // （页面不动、也不报错），所以给它一个显式入口 + 重置入口。
+          { id: 'open-access', label: '辅助功能权限…' },
+          { id: 'reset-access', label: '重置辅助功能授权…' },
+        ]
       : []),
     SEP('sep-2'),
     { id: 'quit', label: '退出' },
