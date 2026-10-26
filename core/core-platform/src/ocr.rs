@@ -34,14 +34,36 @@ pub const DET_FILE: &str = "det.onnx";
 pub const REC_FILE: &str = "rec.onnx";
 pub const DICT_FILE: &str = "ppocr_keys_v1.txt";
 
-/// 检测端输入的最长边（像素）。PP-OCRv4 mobile 官方推荐 736。
-pub const DET_LIMIT_SIDE: u32 = 736;
+/// 检测端**短边**的目标像素（PP-OCR 官方 `limit_side_len=736`，这里提到 960）。
+///
+/// 为什么不再用 736：实测 960x644 的对话截图里，代码块行距只有 3px，
+/// 736 下两行会被 DB 粘成一个框（输出成 `hains/stable-pwisms/binaxetest...`
+/// 这种乱码）；提到 960 后两行正确分开，全图 21 行全对。
+/// 代价：det 推理 2.5s → 3.2s（Release，960x644）。
+pub const DET_LIMIT_SIDE: u32 = 960;
+
+/// 检测端输入的长边上限：整屏截图（3360 宽）不能让 det 原样跑，否则耗时失控。
+pub const DET_MAX_SIDE: u32 = 2048;
 /// 检测端输入尺寸对齐倍数（官方预处理 `resize_img_type0` 向上取整到 32）。
 pub const DET_MULTIPLE: u32 = 32;
 /// 识别端归一化高度（PP-OCR 全系固定 48）。
 pub const REC_HEIGHT: u32 = 48;
-/// 识别端输入宽度上限（PP-OCR 官方 320）。
-pub const REC_MAX_WIDTH: u32 = 320;
+/// 识别端输入宽度的**上限**（不是固定宽度！）。
+///
+/// PP-OCR 官方示例写的 `rec_image_shape=3,48,320` 被很多实现当成了"必须 320"，
+/// 于是长行会被硬压到 320 —— 一行 40 个汉字（宽高比 ~40）横向挤 6 倍，
+/// 字变成面条，CTC 只能吐出零散几个字。
+///
+/// 实测（2026-10-26，1094x242 的文稿截图）：
+///   固定 320  → "背成头本义了中片" / "意义：是国人民斗争的伟大性利显示了中华民反外来的强意"
+///   动态宽度 → 整行正确
+///
+/// rec 模型的 onnx 是动态宽度（导出时 width 维是 ?），所以按内容给宽即可；
+/// 这里只留一个防止极端长行撑爆内存的上限（48x2560 单张约 1.5MB f32/通道）。
+pub const REC_MAX_WIDTH: u32 = 2560;
+
+/// rec 输入宽度必须补齐到的倍数（模型 1/8 下采样，官方 320 = 8*40）。
+pub const REC_WIDTH_MULTIPLE: u32 = 8;
 /// rec 模型输出类别数：blank(1) + 字典(6623) + space(1)。
 /// 字典文件行数变化时同步调整（`OcrEngine::load` 会校验）。
 pub const REC_NUM_CLASSES: usize = 6625;
@@ -113,7 +135,13 @@ impl OcrEngine {
 
     /// 检测阶段：letterbox → det 推理 → 后处理 → 框映射回原图坐标。
     fn detect(&self, img: &RgbaBuffer, bgr: bool) -> Result<Vec<DetBox>> {
-        let (nw, nh) = ocr::det_input_size(img.width, img.height, DET_LIMIT_SIDE, DET_MULTIPLE);
+        let (nw, nh) = ocr::det_input_size_capped(
+            img.width,
+            img.height,
+            DET_LIMIT_SIDE,
+            DET_MAX_SIDE,
+            DET_MULTIPLE,
+        );
         let dyn_img = to_dynamic_image(img);
         let resized = dyn_img.resize_exact(nw, nh, FilterType::Triangle);
         let input = pack_nchw(&resized, bgr);
@@ -174,25 +202,28 @@ impl OcrEngine {
             w: x1 - x0,
             h: y1 - y0,
         })?;
+        // 宽度**按内容给**（保比例），只受 REC_MAX_WIDTH 兜底，
+        // 再补齐到 8 的倍数（模型 1/8 下采样；官方 320 就是这么来的）。
         let rw = ocr::rec_input_size(crop.width, crop.height, REC_HEIGHT, REC_MAX_WIDTH);
+        let pad_w = rw.div_ceil(REC_WIDTH_MULTIPLE) * REC_WIDTH_MULTIPLE;
         let dyn_img = to_dynamic_image(&crop);
         let resized = dyn_img.resize_exact(rw, REC_HEIGHT, FilterType::Triangle);
-        // NCHW + 右侧补零到 320（PaddleOCR 在归一化之后补 0，即补「中灰」）
-        let plane = (REC_HEIGHT * REC_MAX_WIDTH) as usize;
+        // NCHW + 右侧补零（PaddleOCR 在归一化之后补 0，即补黑）
+        let plane = (REC_HEIGHT * pad_w) as usize;
         let mut input = vec![0f32; 3 * plane];
         let rgba = resized.to_rgba8();
         for y in 0..REC_HEIGHT as usize {
             for x in 0..rw as usize {
                 let p = rgba.get_pixel(x as u32, y as u32);
                 let (c0, c1, c2) = order_channels(p[0], p[1], p[2], bgr);
-                let i = y * REC_MAX_WIDTH as usize + x;
+                let i = y * pad_w as usize + x;
                 input[i] = normalize(c0);
                 input[plane + i] = normalize(c1);
                 input[2 * plane + i] = normalize(c2);
             }
         }
         let tensor = Tensor::<f32>::from_data(
-            &[1, 3, REC_HEIGHT as usize, REC_MAX_WIDTH as usize],
+            &[1, 3, REC_HEIGHT as usize, pad_w as usize],
             input,
         );
         let out = self
@@ -553,6 +584,34 @@ mod tests {
             let _ = engine.recognize_box(&img, b, MODEL_EXPECTS_BGR).unwrap();
         }
         println!("  rec x{}: {}ms", boxes.len(), t.elapsed().as_millis());
+    }
+
+    /// 开发期：对**指定图片文件**跑全链路 OCR，打印每行文字 + 框 + 置信度。
+    ///
+    /// `SNAPPIN_OCR_IMG=path/to.png cargo test -p snappin-core-platform ocr_image_file -- --ignored --nocapture`
+    ///
+    /// 存在的意义：调参（det 阈值 / rec 宽度）必须有可复现的固定输入，
+    /// 否则每次改完只能靠"换一张截图看看"，根本不知道是变好还是变坏。
+    #[test]
+    #[ignore = "开发期调参用，需要 SNAPPIN_OCR_IMG 指向一张图片"]
+    fn ocr_image_file() {
+        let Ok(path) = std::env::var("SNAPPIN_OCR_IMG") else {
+            println!("skip: SNAPPIN_OCR_IMG 未设置");
+            return;
+        };
+        let img = image::open(&path).expect("open image").to_rgba8();
+        let buf = RgbaBuffer::new(img.width(), img.height(), img.into_raw()).expect("rgba");
+        println!("image {path}: {}x{}", buf.width, buf.height);
+        let engine = OcrEngine::load(&models_dir()).expect("load engine");
+        let t0 = std::time::Instant::now();
+        let lines = engine.recognize(&buf).expect("recognize");
+        println!("===== {} lines in {}ms =====", lines.len(), t0.elapsed().as_millis());
+        for l in &lines {
+            println!(
+                "  [{:.2}] ({:.0},{:.0})-({:.0},{:.0}) {}",
+                l.score, l.box_.min_x, l.box_.min_y, l.box_.max_x, l.box_.max_y, l.text
+            );
+        }
     }
 
     /// 真机全链路验证：截主屏 → 全管线 OCR → 打印结果。

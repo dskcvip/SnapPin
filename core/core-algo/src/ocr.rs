@@ -390,6 +390,35 @@ pub fn det_input_size(width: u32, height: u32, limit: u32, multiple: u32) -> (u3
     (round_up(nw), round_up(nh))
 }
 
+/// 检测端输入尺寸（带**长边上限**）。
+///
+/// `det_input_size` 对"小图"按短边放大到 `limit`，但对大图没有上界 —— 整屏
+/// 3360x2100 的截图会原样喂进 det（2.1M→7M 像素），推理时间线性上涨。
+/// 这里补一个长边上限：超过就整体等比缩小，把耗时钳在可控范围。
+///
+/// 为什么上限取 2048 而不是更小：det 是"先缩小再找字"，缩得越狠小字越容易丢。
+/// 2048 长边下，26px 的文字仍有 ~16px，DB 能稳住；再小就开始漏。
+pub fn det_input_size_capped(
+    width: u32,
+    height: u32,
+    limit_side: u32,
+    max_side: u32,
+    multiple: u32,
+) -> (u32, u32) {
+    let (mut nw, mut nh) = det_input_size(width, height, limit_side, multiple);
+    let longest = nw.max(nh);
+    if longest > max_side.max(multiple) {
+        let k = max_side as f32 / longest as f32;
+        let round_up = |v: f32| -> u32 {
+            let m = multiple;
+            (((v.round() as u32) + m - 1) / m * m).max(m)
+        };
+        nw = round_up(nw as f32 * k);
+        nh = round_up(nh as f32 * k);
+    }
+    (nw, nh)
+}
+
 /// 识别端输入宽度规划：高固定 `height_fixed`，宽按比例且不超过 `max_width`。
 ///
 /// 与 PaddleOCR `resize_normize_img` 一致：超宽时**不保比例**直接压到
@@ -693,6 +722,21 @@ mod tests {
         assert_eq!(det_input_size(33, 33, 736, 32), (736, 736));
         // 800x600：短边 600<736 → ratio 1.2267 → nw=981→992, nh=736
         assert_eq!(det_input_size(800, 600, 736, 32), (992, 736));
+    }
+
+    #[test]
+    fn det_input_size_capped_bounds_long_side() {
+        // 小图放大后仍在长边上限内：与 det_input_size 完全一致
+        assert_eq!(det_input_size_capped(400, 300, 736, 2048, 32), (992, 736));
+        // 整屏 3360x2100：短边 ≥ 736 不放大，但长边 3360 > 2048 → 等比缩到 ~2048
+        let (w, h) = det_input_size_capped(3360, 2100, 736, 2048, 32);
+        assert_eq!(w, 2048, "长边应正好压到上限（32 的倍数）");
+        assert!((h as i32 - 1280).abs() <= 32, "高度应按比例跟随: {h}");
+        assert_eq!(w % 32, 0, "必须是 32 的倍数");
+        assert_eq!(h % 32, 0, "必须是 32 的倍数");
+        // 上限比 multiple 还小时不要让结果变成 0
+        let (w, h) = det_input_size_capped(4000, 100, 736, 8, 32);
+        assert!(w >= 32 && h >= 32, "退化输入也要给出合法尺寸: {w}x{h}");
     }
 
     #[test]
