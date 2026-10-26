@@ -84,7 +84,68 @@ pub fn cursor_position() -> Option<(i32, i32)> {
     Some((p.x, p.y))
 }
 
-#[cfg(not(windows))]
+/// macOS：Quartz 全局坐标（逻辑点，左上原点）→ **物理像素**。
+///
+/// 为什么必须自己乘 DPI：菜单窗定位走 `set_position(PhysicalPosition)`，
+/// Retina（sf=2）屏上直接传逻辑点会偏到四分之一处（实测 3360x2100 屏上
+/// 菜单出现在 1/4 位置）。Tauri 的 `cursor_position()` 在 macOS 上返回的是
+/// 未乘 scale 的 NSPoint，同样不能直接用。
+///
+/// 取光标所在显示器（而非主屏）的 scale：混合 DPI 多屏下按主屏算会错。
+#[cfg(target_os = "macos")]
+pub fn cursor_position() -> Option<(i32, i32)> {
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct CGPoint {
+        x: f64,
+        y: f64,
+    }
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGEventCreate(source: *const core::ffi::c_void) -> *const core::ffi::c_void;
+        fn CGEventGetLocation(event: *const core::ffi::c_void) -> CGPoint;
+        fn CFRelease(cf: *const core::ffi::c_void);
+        fn CGGetDisplaysWithPoint(
+            point: CGPoint,
+            max_displays: u32,
+            displays: *mut u32,
+            matching_count: *mut u32,
+        ) -> i32;
+        fn CGDisplayCopyDisplayMode(display: u32) -> *const core::ffi::c_void;
+        fn CGDisplayModeGetWidth(mode: *const core::ffi::c_void) -> usize;
+        fn CGDisplayModeGetPixelWidth(mode: *const core::ffi::c_void) -> usize;
+    }
+
+    // SAFETY: 下面只碰本地变量与 CoreGraphics 的查询类接口；CF 对象成对释放。
+    unsafe {
+        let event = CGEventCreate(core::ptr::null());
+        if event.is_null() {
+            return None;
+        }
+        let pt = CGEventGetLocation(event);
+        CFRelease(event);
+
+        // 找光标落在哪块屏（最多取 1 块就够）
+        let mut display: u32 = 0;
+        let mut count: u32 = 0;
+        let rc = CGGetDisplaysWithPoint(pt, 1, &mut display, &mut count);
+        let mut scale = 1.0f64;
+        if rc == 0 && count >= 1 {
+            let mode = CGDisplayCopyDisplayMode(display);
+            if !mode.is_null() {
+                let logical = CGDisplayModeGetWidth(mode);
+                let physical = CGDisplayModeGetPixelWidth(mode);
+                CFRelease(mode);
+                if logical > 0 && physical > 0 {
+                    scale = physical as f64 / logical as f64;
+                }
+            }
+        }
+        Some(((pt.x * scale).round() as i32, (pt.y * scale).round() as i32))
+    }
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
 pub fn cursor_position() -> Option<(i32, i32)> {
     None
 }

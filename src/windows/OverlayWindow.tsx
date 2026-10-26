@@ -655,9 +655,13 @@ export function OverlayWindow() {
     if (!g) return null
     g.clearRect(0, 0, 1, 1)
     g.imageSmoothingEnabled = false
-    // 优先用 ImageBitmap（读取合法）；位图未就绪时回退 <img>（可能读不出来，
-    // 但 try/catch 保证不炸事件处理链路）
-    g.drawImage(bitmap ?? img, px, py, 1, 1, 0, 0, 1, 1)
+    // 只用 ImageBitmap，**位图未就绪就直接返回 null，不要回退 <img>**：
+    // 这块 canvas 是复用的，asset 协议的 <img> 画进来会把画布**永久**标记为
+    // 跨域污染 —— 之后即使换 ImageBitmap 重画，getImageData 也永远抛
+    // SecurityError（macOS 真机实测：一次回退 → 整场截图的取色器全废，
+    // 日志表现就是反复 "sample pixel failed"）。
+    if (!bitmap) return null
+    g.drawImage(bitmap, px, py, 1, 1, 0, 0, 1, 1)
     let d: Uint8ClampedArray
     try {
       d = g.getImageData(0, 0, 1, 1).data

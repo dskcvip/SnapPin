@@ -66,15 +66,34 @@ jobs:
       - name: 打包 .app / .dmg
         # --features custom-protocol 必须显式带上，否则 WebviewUrl::App 会去连 devUrl，
         # 打出来的包启动即白屏。
+        #
+        # 分两次打包（先 app → 签名 → 再 dmg）是刻意的：dmg 里必须装**已签名**的 app。
         run: |
           case "${{ inputs.arch || 'universal' }}" in
             universal) TARGET=universal-apple-darwin ;;
             aarch64)   TARGET=aarch64-apple-darwin ;;
             x86_64)    TARGET=x86_64-apple-darwin ;;
           esac
-          npx tauri build --target "$TARGET" --features custom-protocol
-          echo "=== 产物 ==="
           # 注意：cargo workspace 的 target 在**仓库根**，不是 src-tauri/target
+          APP="target/$TARGET/release/bundle/macos/SnapPin.app"
+
+          # 第一次只出 .app（dmg 里要装已签名的 app）
+          npx tauri build --target "$TARGET" --features custom-protocol --bundles app
+
+          # adhoc 签名（--sign - = 本地弱签名，无需开发者证书）。
+          #
+          # **没有这一步，macOS 的「屏幕录制」授权基本不可能稳定生效**：
+          # TCC 按「bundle id + 代码签名」记录授权，完全未签名的 app 每次
+          # 被拷贝/重打包后签名都不同，系统设置里即使勾了也匹配不上，
+          # 表现就是"给了权限还提示没权限"（2026-10-26 真机实测，13.6.6）。
+          # adhoc 签名后签名稳定，用户勾一次 + 重启即可长期有效。
+          # （有 Apple Developer 证书时应改成真签名 + notarization。）
+          codesign --force --deep --sign - "$APP"
+          codesign --verify --verbose=2 "$APP"
+
+          # 第二次只出 dmg：不会重新编译，直接把已签名的 app 打进 dmg
+          npx tauri build --target "$TARGET" --features custom-protocol --bundles dmg
+          echo "=== 产物 ==="
           ls -1 "target/$TARGET/release/bundle/dmg/"*.dmg
 
       - name: 上传 dmg

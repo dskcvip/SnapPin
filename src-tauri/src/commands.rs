@@ -456,7 +456,7 @@ fn mac_capture_gate(app: &AppHandle) -> Result<(), String> {
         use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
         app.dialog()
             .message(
-                "SnapPin 没有「屏幕录制」权限，macOS 会把它截到的画面里其他应用的窗口全部过滤掉——只能看到桌面壁纸。\n\n① 打开「系统设置 → 隐私与安全性 → 屏幕录制」，勾选 SnapPin；\n② 如果列表里已经有 SnapPin 且是勾选状态，请先取消勾选、再重新勾选（升级到新版本后程序签名会变，旧授权会失效）；\n③ 然后退出 SnapPin 再重新打开（macOS 要求重启后才生效）。",
+                "SnapPin 没有「屏幕录制」权限，macOS 会把它截到的画面里其他应用的窗口全部过滤掉——只能看到桌面壁纸。\n\n① 把 SnapPin 拖到「应用程序」文件夹后再运行（直接从 dmg 里跑，系统记录的授权路径对不上）；\n② 打开「系统设置 → 隐私与安全性 → 屏幕录制」，勾选 SnapPin；\n③ 如果列表里已经有 SnapPin 且是勾选状态，请先取消勾选、再重新勾选（升级版本后程序签名会变，旧授权会失效）；\n④ 然后退出 SnapPin 再重新打开（macOS 要求重启后才生效）。",
             )
             .title("需要「屏幕录制」权限")
             .kind(MessageDialogKind::Warning)
