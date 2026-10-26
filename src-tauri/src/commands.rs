@@ -1026,6 +1026,16 @@ fn resolve_models_dir(app: &AppHandle) -> PathBuf {
     if let Some(dir) = std::env::var_os("SNAPPIN_MODELS_DIR") {
         return PathBuf::from(dir);
     }
+    // 1) **随安装包分发的模型**（0.1.7 起）：装完即可用 OCR，无需联网。
+    //    优先级最高——包里有就不用下载，避免用户卡在"模型缺失"上。
+    //    macOS 落在 SnapPin.app/Contents/Resources/models/ocr，
+    //    Windows 落在安装目录的 models\ocr（见 tauri.conf.json 的 bundle.resources）。
+    if let Ok(res) = app.path().resource_dir() {
+        let bundled = res.join("models").join("ocr");
+        if snappin_core_platform::ocr::models_present(&bundled) {
+            return bundled;
+        }
+    }
     #[cfg(debug_assertions)]
     {
         let repo = Path::new(env!("CARGO_MANIFEST_DIR"))

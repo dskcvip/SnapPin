@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "productName": "SnapPin",
   "mainBinaryName": "SnapPin",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "identifier": "com.snappin.dev",
   "build": {
     "frontendDist": "../dist",
@@ -17,7 +17,10 @@
       "csp": null,
       "assetProtocol": {
         "enable": true,
-        "scope": ["$TEMP/snappin/**", "$LOCALDATA/**"]
+        "scope": [
+          "$TEMP/snappin/**",
+          "$LOCALDATA/**"
+        ]
       }
     }
   },
@@ -34,6 +37,11 @@
     "macOS": {
       "minimumSystemVersion": "11.0",
       "signingIdentity": "-"
+    },
+    "resources": {
+      "../models/ocr/det.onnx": "models/ocr/det.onnx",
+      "../models/ocr/rec.onnx": "models/ocr/rec.onnx",
+      "../models/ocr/ppocr_keys_v1.txt": "models/ocr/ppocr_keys_v1.txt"
     }
   }
 }

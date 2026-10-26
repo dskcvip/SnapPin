@@ -47,13 +47,18 @@ https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v2.0.7/paddle/PP-OCRv4
 运行时模型目录解析优先级（见 `src-tauri/src/commands.rs::resolve_models_dir`）：
 
 1. **`SNAPPIN_MODELS_DIR` 环境变量** —— 手动覆盖，指向包含三件套的目录；
-2. **debug 构建** —— 自动使用仓库内的 `models/ocr/`（即本目录，开发零配置）；
-3. **release 构建** —— `%APPDATA%/com.snappin.dev/models/ocr/`（Windows）/
+2. **安装包内置**（0.1.7 起）—— `bundle.resources` 把本目录三件套打进了安装包：
+   macOS 在 `SnapPin.app/Contents/Resources/models/ocr/`，
+   Windows 在安装目录 `models\ocr\`。**装完即可用 OCR，无需联网下载。**
+3. **debug 构建** —— 自动使用仓库内的 `models/ocr/`（即本目录，开发零配置）；
+4. **兜底下载目录** —— `%APPDATA%/com.snappin.dev/models/ocr/`（Windows）/
    `~/Library/Application Support/com.snappin.dev/models/ocr/`（macOS）。
+   仅当安装包资源缺失（非标准部署/手工替换）时才会用到。
 
-也就是说：**开发者 clone 后 debug 直接跑**；普通用户安装 release 包后，
-首次使用 OCR 时若检测到模型缺失，工具条 OCR 按钮会带红点提示，
-按 `scripts/fetch_models.py` 下载即可落到固定目录。
+> 历史：0.1.6 及更早**不把模型打进包**，靠"点 OCR → 自动下载 15.6MB"解决。
+> 0.1.7 改回随包分发——安装包从 ~16MB 涨到 ~31MB，换来"装完即用"，
+> 也免掉镜像不通/公司网络受限导致 OCR 不可用的坑。
+> `ocr_download_models` 命令保留为兜底，逻辑不变（三镜像 + SHA256 校验）。
 
 ## 重新获取 / 修复
 
