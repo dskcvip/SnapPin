@@ -997,6 +997,25 @@ pub struct OcrModelsPayload {
     pub dir: String,
 }
 
+/// 下载 OCR 模型三件套到固定目录（首次用 OCR 时按需触发）。
+///
+/// 15.6MB，走阻塞线程，避免卡住主线程/UI。已存在且 SHA256 校验通过的
+/// 文件会跳过，所以重复调用是幂等的（点到一半断网也能续上）。
+#[tauri::command]
+pub async fn ocr_download_models(app: AppHandle) -> Result<OcrModelsPayload, String> {
+    let dir = resolve_models_dir(&app);
+    let dir_bg = dir.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        snappin_core_platform::ocr::download_models(&dir_bg, |line| crate::logln!("{line}"))
+    })
+    .await
+    .map_err(|e| format!("模型下载任务失败：{e}"))??;
+    Ok(OcrModelsPayload {
+        available: snappin_core_platform::ocr::models_present(&dir),
+        dir: dir.to_string_lossy().to_string(),
+    })
+}
+
 /// 解析 OCR 模型目录。优先级：
 ///
 /// 1. `SNAPPIN_MODELS_DIR` 环境变量（显式覆盖，测试/特殊部署用）；
@@ -2313,26 +2332,43 @@ pub async fn long_capture_start(
     // monitor_id "m0" → xcap::Monitor::all()[0]（id 即采集下标，见 capture_shot）
     let idx = monitor_index(&monitor_id)?;
 
-    // 逻辑像素选区 → 物理像素（与 confirm_selection 完全相同的口径）
-    let phys_rect = {
+    // 选区坐标 → 采集坐标系。
+    //
+    // **两个平台的单位不同，不能一刀切乘 sf**：
+    // - Windows：xcap 走 BitBlt，`Monitor.x()/y()`、`capture_region`、光标定位
+    //   全是**物理像素** → 必须乘 sf；
+    // - macOS：xcap 走 CGDisplayCreateImageForRect，`Monitor.x()/y()`、
+    //   `capture_region`、`CGWarpMouseCursorPosition` 全是**逻辑点** → 不能乘。
+    //
+    // 乘错的后果（2026-10-26 真机）：直接把逻辑值翻倍当物理传进去，
+    //   `Region (0, 50, 3360, 1850) is outside monitor bounds (0, 0, 1680, 1050)`
+    //   —— 长截图在 Retina 屏上 100% 启动失败。
+    //
+    // 为什么必须整段统一：驱动循环里 `scroll_point = monitor 原点 + 选区中心`、
+    // 以及光标残影修复的 `cx = px - rect.x`，都默认 rect 与光标同单位。
+    // 只有两种单位各自内部自洽，混用就会滚到屏幕外。
+    let cap_rect = {
         let monitors = state.monitors.lock().unwrap();
         let m = monitors
             .iter()
             .find(|m| m.id == monitor_id)
             .ok_or_else(|| "no active capture session".to_string())?;
-        let sf = m.scale_factor as f64;
+        #[cfg(target_os = "macos")]
+        let k = 1.0_f64;
+        #[cfg(not(target_os = "macos"))]
+        let k = m.scale_factor as f64;
         AlgoRect {
-            x: (rect.x * sf).round() as i32,
-            y: (rect.y * sf).round() as i32,
-            w: (rect.w * sf).round().max(1.0) as u32,
-            h: (rect.h * sf).round().max(1.0) as u32,
+            x: (rect.x * k).round() as i32,
+            y: (rect.y * k).round() as i32,
+            w: (rect.w * k).round().max(1.0) as u32,
+            h: (rect.h * k).round().max(1.0) as u32,
         }
     };
     let scroll_lines = scroll_lines.unwrap_or(3).clamp(1, 20);
 
     let app2 = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        if let Err(e) = begin_long_session(&app2, idx, phys_rect, scroll_lines) {
+        if let Err(e) = begin_long_session(&app2, idx, cap_rect, scroll_lines) {
             eprintln!("[snappin] long capture start failed: {e}");
             emit_long(&app2, "error", 0, 0, 0.0, "", format!("长截图启动失败：{e}"));
         }

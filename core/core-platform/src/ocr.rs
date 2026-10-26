@@ -242,6 +242,159 @@ pub fn models_present(dir: &Path) -> bool {
     })
 }
 
+// ---------------------------------------------------------------- 模型下载
+//
+// 模型不进安装包（体积 + 许可考量），首次用 OCR 时需要下载 15.6MB。
+// 原来的流程是"报错告诉用户把三个文件放到某个路径"——对普通用户等于不可用。
+//
+// 镜像顺序按**国内可达性**排：Gitee（本仓库）→ ModelScope（上游）→ GitHub raw。
+// 每个镜像都校验 SHA256，避免某些镜像返回 HTML 错误页被当成 onnx 存下来
+// （那种文件不报下载错，但推理时才炸，更难查）。
+
+/// 一个模型文件：文件名 + 字节数 + 期望 SHA256 + 候选镜像（按优先级）。
+pub struct ModelSpec {
+    pub name: &'static str,
+    pub size: u64,
+    pub sha256: &'static str,
+    pub urls: &'static [&'static str],
+}
+
+/// 三件套及镜像清单（与 models/README.md 的校验值一致）。
+pub const MODEL_SPECS: &[ModelSpec] = &[
+    ModelSpec {
+        name: DET_FILE,
+        size: 4_745_517,
+        sha256: "d2a7720d45a54257208b1e13e36a8479894cb74155a5efe29462512d42f49da9",
+        urls: &[
+            "https://gitee.com/dskcvip/snappin/raw/main/models/ocr/det.onnx",
+            "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.5.0/onnx/PP-OCRv4/det/ch_PP-OCRv4_det_infer.onnx",
+            "https://raw.githubusercontent.com/dskcvip/SnapPin/main/models/ocr/det.onnx",
+        ],
+    },
+    ModelSpec {
+        name: REC_FILE,
+        size: 10_857_958,
+        sha256: "48fc40f24f6d2a207a2b1091d3437eb3cc3eb6b676dc3ef9c37384005483683b",
+        urls: &[
+            "https://gitee.com/dskcvip/snappin/raw/main/models/ocr/rec.onnx",
+            "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.5.0/onnx/PP-OCRv4/rec/ch_PP-OCRv4_rec_infer.onnx",
+            "https://raw.githubusercontent.com/dskcvip/SnapPin/main/models/ocr/rec.onnx",
+        ],
+    },
+    ModelSpec {
+        name: DICT_FILE,
+        size: 26_249,
+        sha256: "28b2362ad4ab2dc38769aa72feb535e3a9ddb3fd2a7585a05920e6393b1dc7f7",
+        urls: &[
+            "https://gitee.com/dskcvip/snappin/raw/main/models/ocr/ppocr_keys_v1.txt",
+            "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v2.0.7/paddle/PP-OCRv4/rec/ch_PP-OCRv4_rec_infer/ppocr_keys_v1.txt",
+            "https://raw.githubusercontent.com/dskcvip/SnapPin/main/models/ocr/ppocr_keys_v1.txt",
+        ],
+    },
+];
+
+fn file_sha256(path: &Path) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).map_err(|e| format!("打开 {path:?} 失败：{e}"))?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = f.read(&mut buf).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
+}
+
+/// 下载单个文件到 target（先写 .part 再校验再改名，避免半截文件被当成模型）。
+fn download_one(url: &str, target: &Path, spec: &ModelSpec) -> Result<(), String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(300))
+        .build()
+        .map_err(|e| format!("创建 HTTP 客户端失败：{e}"))?;
+    let mut resp = client.get(url).send().map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    let tmp = target.with_extension("part");
+    {
+        let mut f = std::fs::File::create(&tmp).map_err(|e| format!("创建临时文件失败：{e}"))?;
+        std::io::copy(&mut resp, &mut f).map_err(|e| format!("写文件失败：{e}"))?;
+    }
+    match file_sha256(&tmp) {
+        Ok(got) if got == spec.sha256 => {}
+        Ok(got) => {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(format!(
+                "SHA256 不符（期望 {}…，实际 {}…）",
+                &spec.sha256[..12],
+                &got[..12.min(got.len())]
+            ));
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+    }
+    std::fs::rename(&tmp, target).map_err(|e| format!("改名失败：{e}"))?;
+    Ok(())
+}
+
+/// 下载三件套到 `dir`（已存在且校验通过的跳过）。返回实际下载的文件数。
+///
+/// `log` 由调用方提供（写进运行日志），便于用户贴日志排查镜像问题。
+pub fn download_models(dir: &Path, mut log: impl FnMut(&str)) -> Result<usize, String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("创建模型目录 {dir:?} 失败：{e}"))?;
+    let mut downloaded = 0usize;
+    for spec in MODEL_SPECS {
+        let target = dir.join(spec.name);
+        if target.exists() {
+            match file_sha256(&target) {
+                Ok(h) if h == spec.sha256 => {
+                    log(&format!("[models] {} 已存在且校验通过，跳过", spec.name));
+                    continue;
+                }
+                _ => log(&format!("[models] {} 校验不通过，重新下载", spec.name)),
+            }
+        }
+        let mut last_err = String::new();
+        let mut done = false;
+        for url in spec.urls {
+            log(&format!("[models] 下载 {} ← {url}", spec.name));
+            match download_one(url, &target, spec) {
+                Ok(()) => {
+                    log(&format!(
+                        "[models] {} 完成（{:.1} MB）",
+                        spec.name,
+                        spec.size as f64 / 1024.0 / 1024.0
+                    ));
+                    done = true;
+                    downloaded += 1;
+                    break;
+                }
+                Err(e) => {
+                    last_err = format!("{url} → {e}");
+                    log(&format!("[models] 镜像失败：{last_err}"));
+                }
+            }
+        }
+        if !done {
+            return Err(format!(
+                "{} 下载失败（所有镜像都不通）。\n最后错误：{last_err}\n\n可以手动下载三个文件放到：{dir:?}\n直链见仓库 models/README.md",
+                spec.name
+            ));
+        }
+    }
+    Ok(downloaded)
+}
+
 /// 通道序：PP-OCR 模型按 BGR 训练（cv2 读图），我们的缓冲是 RGBA。
 fn order_channels(r: u8, g: u8, b: u8, bgr: bool) -> (u8, u8, u8) {
     if bgr {

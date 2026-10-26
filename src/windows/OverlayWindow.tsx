@@ -23,6 +23,7 @@ import {
   longCaptureStop,
   openUrl,
   ocrModelsStatus,
+  ocrDownloadModels,
   ocrRecognize,
   ocrShow,
   overlayContext,
@@ -254,6 +255,8 @@ export function OverlayWindow() {
   const [ocrError, setOcrError] = useState<string | null>(null)
   /** OCR 模型是否就绪（null = 还没查到）。false 时按钮提示去下载模型。 */
   const [ocrModelsOk, setOcrModelsOk] = useState<boolean | null>(null)
+  /** 正在下载 OCR 模型（15.6MB）：期间按钮禁用，避免重复触发 */
+  const [modelsBusy, setModelsBusy] = useState(false)
   /** 长截图（M5）：off=未开始 / running=滚动拼接中 / result=结果面板 */
   const [longMode, setLongMode] = useState<'off' | 'running' | 'result'>('off')
   const [longProgress, setLongProgress] = useState<LongProgress | null>(null)
@@ -746,7 +749,34 @@ export function OverlayWindow() {
       if (anchor) showHint('请先框选要识别的区域', anchor)
       return
     }
-    if (ocrBusy) return
+    if (ocrBusy || modelsBusy) return
+    // 模型缺失：直接把"下载"做了，而不是让用户自己去找三个 onnx 放到某个路径。
+    // （原来只报一段带目录的错，对普通用户等于不可用。）
+    if (ocrModelsOk === false) {
+      setModelsBusy(true)
+      setOcrError(null)
+      if (anchor) showHint('首次使用：正在下载 OCR 模型（约 15.6MB）…', anchor, '', 0)
+      try {
+        const st = await ocrDownloadModels()
+        setOcrModelsOk(st.available)
+        if (anchor) {
+          showHint(
+            st.available ? '模型已就绪，请再点一次识别' : `模型仍缺失：${st.dir}`,
+            anchor,
+            '',
+            6000,
+          )
+        }
+        if (!st.available) setOcrError(`OCR 模型仍缺失：${st.dir}`)
+      } catch (e) {
+        uiLog(`ocr model download failed: ${String(e)}`)
+        setOcrError(String(e))
+        showHint(String(e), anchor ?? null, '', 8000)
+      } finally {
+        setModelsBusy(false)
+      }
+      return
+    }
     setOcrBusy(true)
     setOcrError(null)
     // 反馈：识别是秒级操作，浮层必须给个"正在干活"的提示，
@@ -1427,9 +1457,11 @@ export function OverlayWindow() {
               <button
                 className={`sbtn ${ocrBusy || ocrError ? 'active' : ''}`}
                 title={
-                  ocrModelsOk === false
-                    ? '文字识别（模型缺失：点我查看下载说明）'
-                    : '文字识别（识别当前选区内的文字，支持中文）'
+                  modelsBusy
+                    ? '正在下载 OCR 模型（约 15.6MB）…'
+                    : ocrModelsOk === false
+                      ? '文字识别（首次使用会自动下载模型，约 15.6MB）'
+                      : '文字识别（识别当前选区内的文字，支持中文）'
                 }
                 onClick={(e) => void runOcr(e.currentTarget)}
               >

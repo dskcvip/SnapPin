@@ -32,6 +32,7 @@
 | `menu_state` | – | `MenuState` | 菜单初始状态（是否打开、快捷键是否注册失败） |
 | `menu_action` | `id` | `void` | 菜单项点击：先关菜单再分发。**贴图菜单**改为向目标贴图窗发 `pin-menu-action` 事件 |
 | `drag_window` | – | `void` | 对调用方窗口启动原生拖拽 |
+| `ocr_download_models` | – | `OcrModels` | 下载 OCR 三件套（15.6MB，Gitee→ModelScope→GitHub 三镜像 + SHA256 校验，幂等） |
 | `pin_list` | – | `PinInfo[]` | 列出所有贴图（label / src / 尺寸 / 分组），供贴图管理面板 |
 | `pin_focus` | `label` | `void` | 把某张贴图置前（管理面板点缩略图）；窗口不存在则报错 |
 | `open_pin_manager` | – | `void` | 打开贴图管理面板。**必须投主线程**（菜单事件里同步建窗会死锁） |

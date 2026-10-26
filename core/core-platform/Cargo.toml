@@ -20,3 +20,5 @@ rten-tensor = "0.27.0"
 # 在线翻译（OpenAI 兼容协议）；blocking 版本由调用方放进阻塞线程
 reqwest = { version = "0.12", features = ["blocking", "json"] }
 serde_json = { workspace = true }
+# 模型下载后校验 SHA256（防止镜像返回错误页/半截文件被当成模型）
+sha2 = "0.10"

@@ -290,6 +290,10 @@ export const ocrRecognize = (
 export const ocrModelsStatus = (): Promise<OcrModelsStatus> =>
   invoke('ocr_models_status')
 
+/** 下载 OCR 模型三件套（15.6MB，幂等：已校验通过的文件会跳过） */
+export const ocrDownloadModels = (): Promise<{ available: boolean; dir: string }> =>
+  invoke('ocr_download_models')
+
 // ---------- 长截图（M5） ----------
 
 /** 长截图进度事件（Rust 侧 `emit("long-capture-progress", payload)`）。 */
