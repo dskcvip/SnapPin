@@ -216,6 +216,17 @@ pub fn run() {
             #[cfg(not(target_os = "macos"))]
             let mac_perm_ok = true;
 
+            // 启动自检：光标位置。
+            //
+            // macOS 上这条是判断"自绘菜单能不能弹"的最快依据 —— cursor_position()
+            // 曾经在非 Windows 平台是个 `-> None` 空壳，结果托盘左键点了没反应，
+            // 日志只反复报 "cursor position unavailable"，看不出是"代码根本没实现"。
+            // 现在每次启动打一行：None = 取不到（菜单必弹不出来），Some = 正常。
+            crate::logln!(
+                "[snappin] cursor probe: {:?}",
+                snappin_core_platform::cursor_position()
+            );
+
             let handle = app.handle();
 
             // 关掉 Tauri 自动创建的默认主窗口（延后 300ms：setup 执行时它还没建）。

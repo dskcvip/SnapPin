@@ -86,8 +86,9 @@ jobs:
           # TCC 按「bundle id + 代码签名」记录授权，完全未签名的 app 每次
           # 被拷贝/重打包后签名都不同，系统设置里即使勾了也匹配不上，
           # 表现就是"给了权限还提示没权限"（2026-10-26 真机实测，13.6.6）。
-          # adhoc 签名后签名稳定，用户勾一次 + 重启即可长期有效。
-          # （有 Apple Developer 证书时应改成真签名 + notarization。）
+          # 注意 adhoc 的边界：cdhash 随二进制变化，**每次重新构建都会变**，
+          # 所以每升级一版用户都要重新授权一次（删旧条目 → 重新添加 → 勾选 → 重启）。
+          # 想做到跨版本免重授权，只能买 Apple Developer 证书做真签名 + notarization。
           codesign --force --deep --sign - "$APP"
           codesign --verify --verbose=2 "$APP"
 

@@ -132,8 +132,15 @@ macOS 10.15 起，任何程序读屏幕像素都要授权。
 1. **当时 CI 打的是完全没签名的包**（只在本地做过 adhoc，CI 侧漏了）。
    完全未签名的 app，TCC 的授权记录几乎不可能稳定生效。
    → CI 已改为 `--bundles app` → `codesign --force --deep --sign -` →
-   `--bundles dmg`，保证 dmg 里装的 app 带稳定签名。**这是不买开发者证书
-   也能让授权长期有效的唯一办法。**
+   `--bundles dmg`，保证 dmg 里装的 app 带稳定签名。
+
+   **但要说清楚 adhoc 签名的边界**：它让**同一份构建**的授权稳定下来
+   （不再因为从 dmg 拷到 Applications、或被系统重新封装而失效），
+   可 `--sign -` 的 cdhash 取决于二进制内容，**每次重新构建都会变**。
+   所以：**每升级一个版本，用户必须重新授权一次**（删掉设置里的旧条目 →
+   重新添加 → 勾选 → 重启应用）。这不是 bug，是免费分发的固有代价；
+   想做到"一次授权、跨版本有效"，只能买 Apple Developer 证书（$99/年）
+   做真签名 + notarization。
 2. 用户同时装着 0.1.0 与 0.1.3 两个版本，授权记录可能记在旧包上。
 3. 权限链路本身是通的：`mac_capture_gate` 会先 preflight、再
    `CGRequestScreenCaptureAccess()`（弹系统框），都失败才弹自定义提示。
