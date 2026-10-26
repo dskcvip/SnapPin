@@ -240,6 +240,13 @@ pub fn run() {
                 snappin_core_platform::cursor_position()
             );
 
+            // 启动自检：辅助功能（长截图自动滚动的前置权限）。
+            // 与 preflight 一样，这两行是排查"功能没反应"的最快依据。
+            crate::logln!(
+                "[snappin] 辅助功能权限 = {}",
+                snappin_core_platform::has_accessibility_permission()
+            );
+
             let handle = app.handle();
 
             // 关掉 Tauri 自动创建的默认主窗口（延后 300ms：setup 执行时它还没建）。
@@ -575,6 +582,16 @@ fn mac_native_tray_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<taur
         true,
         None::<&str>,
     )?;
+    // 长截图自动滚动的前置权限（macOS）。与"屏幕录制"并列，因为两者都会让
+    // 功能"看起来坏了却没报错"。
+    let access = MenuItem::with_id(app, "open-access", "辅助功能权限…", true, None::<&str>)?;
+    let reset_access = MenuItem::with_id(
+        app,
+        "reset-access",
+        "重置辅助功能授权…",
+        true,
+        None::<&str>,
+    )?;
     let log = MenuItem::with_id(app, "open-log", "打开运行日志", true, None::<&str>)?;
     let about = MenuItem::with_id(app, "about", "关于 SnapPin", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出 SnapPin", true, None::<&str>)?;
@@ -589,6 +606,8 @@ fn mac_native_tray_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<taur
             &ball,
             &perm,
             &reset_perm,
+            &access,
+            &reset_access,
             &s1,
             &log,
             &settings,
@@ -643,6 +662,9 @@ pub(crate) fn handle_menu_event(app: &AppHandle, id: &str) {
         "open-perm" => open_external(SCREEN_RECORDING_SETTINGS_URL),
         // 清掉本应用的屏幕录制授权记录（"设置里勾着却始终无效"的唯一可靠解法）
         "reset-perm" => crate::commands::reset_screen_permission_and_hint(app),
+        // 长截图自动滚动所需（macOS「辅助功能」）
+        "open-access" => open_external(ACCESSIBILITY_SETTINGS_URL),
+        "reset-access" => crate::commands::reset_accessibility_and_hint(app),
         "quit" => app.exit(0),
         _ => {}
     }
@@ -654,6 +676,13 @@ pub const ABOUT_URL: &str = "https://gitee.com/dskcvip/snappin";
 /// macOS「隐私与安全性 → 屏幕录制」面板的深链（`open` 可直接识别）。
 pub const SCREEN_RECORDING_SETTINGS_URL: &str =
     "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture";
+
+/// macOS「隐私与安全性 → 辅助功能」面板的深链。
+///
+/// 长截图的自动滚动靠 `CGEventPost`，没有这个授权时系统会**静默丢弃**滚动
+/// 事件（页面不动、也不报错），所以它是长截图的硬前置。
+pub const ACCESSIBILITY_SETTINGS_URL: &str =
+    "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility";
 
 /// 用系统默认浏览器打开外部链接。
 ///

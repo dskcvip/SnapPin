@@ -231,6 +231,124 @@ pub fn ensure_screen_capture_permission() -> bool {
     true
 }
 
+/// 是否已获得「辅助功能」（Accessibility）授权。
+///
+/// 长截图的自动滚动靠 `CGEventPost` 注入滚轮事件，而 macOS 要求进程必须在
+/// 「隐私与安全性 → 辅助功能」里被勾选，否则事件**被系统静默丢弃** ——
+/// 不会报错，只会表现成"滚了但页面不动"。
+///
+/// 2026-10-27 真机日志即此：长截图首帧采到了 1850px，之后 0 步就报
+/// "需要辅助功能权限"。所以这个权限和屏幕录制一样是**硬前置**。
+#[cfg(target_os = "macos")]
+pub fn has_accessibility_permission() -> bool {
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        fn AXIsProcessTrusted() -> bool;
+    }
+    // SAFETY: 无参纯查询接口。
+    unsafe { AXIsProcessTrusted() }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn has_accessibility_permission() -> bool {
+    true
+}
+
+/// 弹系统「辅助功能」授权框（macOS 会把本应用加入列表并高亮）。
+///
+/// 与屏幕录制不同，这个系统框**不会**让应用立即可用：用户必须自己去
+/// 系统设置里勾选（macOS 的既定流程）。所以调用后仍要引导用户去设置页。
+#[cfg(target_os = "macos")]
+pub fn request_accessibility_permission() -> bool {
+    use core::ffi::c_void;
+    #[link(name = "ApplicationServices", kind = "framework")]
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn AXIsProcessTrustedWithOptions(options: *const c_void) -> bool;
+        fn CFDictionaryCreate(
+            allocator: *const c_void,
+            keys: *const *const c_void,
+            values: *const *const c_void,
+            num_values: isize,
+            key_callbacks: *const c_void,
+            value_callbacks: *const c_void,
+        ) -> *const c_void;
+        fn CFStringCreateWithCString(
+            allocator: *const c_void,
+            c_str: *const u8,
+            encoding: u32,
+        ) -> *const c_void;
+        static kCFBooleanTrue: *const c_void;
+        fn CFRelease(cf: *const c_void);
+    }
+    const K_CF_STRING_ENCODING_UTF8: u32 = 0x08000100;
+    // SAFETY: 只构造一个键值对字典并立即释放；指针都来自 CoreFoundation 分配，
+    // 生命周期覆盖整个调用。
+    unsafe {
+        let key = CFStringCreateWithCString(
+            core::ptr::null(),
+            b"AXTrustedCheckOptionPrompt\0".as_ptr(),
+            K_CF_STRING_ENCODING_UTF8,
+        );
+        if key.is_null() {
+            return false;
+        }
+        // kCFBooleanTrue 是 CoreFoundation 的静态常量，直接取指向它的指针
+        let value = kCFBooleanTrue;
+        let keys = [key as *const c_void];
+        let values = [value];
+        let dict = CFDictionaryCreate(
+            core::ptr::null(),
+            keys.as_ptr(),
+            values.as_ptr(),
+            1,
+            core::ptr::null(),
+            core::ptr::null(),
+        );
+        let trusted = if dict.is_null() {
+            false
+        } else {
+            AXIsProcessTrustedWithOptions(dict)
+        };
+        if !dict.is_null() {
+            CFRelease(dict);
+        }
+        CFRelease(key);
+        trusted
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn request_accessibility_permission() -> bool {
+    true
+}
+
+/// 重置本应用的「辅助功能」授权记录（`tccutil reset Accessibility`）。
+///
+/// 与屏幕录制同源的坑：adhoc 签名每次构建 cdhash 都变，旧条目会变成
+/// "勾着但无效"的僵尸记录，用户怎么点都没用。此时只能先删记录再重新授权。
+#[cfg(target_os = "macos")]
+pub fn reset_accessibility_permission(bundle_id: &str) -> Result<(), String> {
+    let out = std::process::Command::new("tccutil")
+        .args(["reset", "Accessibility", bundle_id])
+        .output()
+        .map_err(|e| format!("tccutil 启动失败：{e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "tccutil 退出码 {:?}：{}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn reset_accessibility_permission(_bundle_id: &str) -> Result<(), String> {
+    Ok(())
+}
+
 #[cfg(not(target_os = "macos"))]
 pub fn has_screen_capture_permission() -> bool {
     true

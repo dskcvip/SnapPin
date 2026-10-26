@@ -468,6 +468,81 @@ pub(crate) fn reset_screen_permission_and_hint(app: &AppHandle) {
     }
 }
 
+/// 打开「隐私与安全性 → 辅助功能」面板（macOS）。
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn open_accessibility_settings() {
+    crate::open_external(crate::ACCESSIBILITY_SETTINGS_URL);
+}
+
+/// 长截图因缺「辅助功能」权限失败时给的引导对话框（只弹一次/进程）。
+///
+/// 为什么单独做：这个权限**必须手动勾选**，系统框不会直接给。用户在结果面板里
+/// 看到一行红字往往不知道该点哪儿，所以给一个能直接跳到设置页的按钮。
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn accessibility_hint(app: &AppHandle) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static SHOWN: AtomicBool = AtomicBool::new(false);
+    if SHOWN.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+    // 同时触发一次系统授权框：macOS 会因此把本应用加进「辅助功能」列表，
+    // 用户不必自己去「+」里翻文件。
+    let _ = snappin_core_platform::request_accessibility_permission();
+    let app_cb = app.clone();
+    app.dialog()
+        .message(
+            "长截图的自动滚动需要「辅助功能」权限，macOS 对未授权的滚动事件是**静默丢弃**的\
+             ——不报错，只是页面不动。\n\n             ① 在打开的「隐私与安全性 → 辅助功能」里勾选 SnapPin；\n             ② 如果列表里已经有 SnapPin 且是勾选状态，请先点「−」删掉，再点「+」\
+             重新添加 /Applications/SnapPin.app（每升级一版签名都会变，旧条目会失效）；\n             ③ 然后退出 SnapPin 重新打开。\n\n             如果做完了还是不行，菜单栏图标右键 →「重置辅助功能授权…」再重来一遍。",
+        )
+        .title("长截图需要「辅助功能」权限")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "打开系统设置".to_string(),
+            "稍后".to_string(),
+        ))
+        .show(move |open| {
+            if open {
+                crate::commands::open_accessibility_settings();
+            }
+            let _ = &app_cb;
+        });
+}
+
+/// 重置「辅助功能」授权记录并提示重新授权（macOS）。
+pub(crate) fn reset_accessibility_and_hint(app: &AppHandle) {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+    let id = app.config().identifier.clone();
+    let app_cb = app.clone();
+    match snappin_core_platform::reset_accessibility_permission(&id) {
+        Ok(()) => {
+            crate::logln!("[snappin] tccutil reset Accessibility {id} ok");
+            app_cb
+                .dialog()
+                .message(format!(
+                    "已清除「{id}」的辅助功能授权记录。\n\n现在请：\n① 完全退出 SnapPin；\n② 重新打开后按提示在「隐私与安全性 → 辅助功能」里重新勾选 SnapPin；\n③ 再退出重开一次。"
+                ))
+                .title("已重置，请重新授权")
+                .kind(MessageDialogKind::Info)
+                .buttons(MessageDialogButtons::Ok)
+                .show(|_| {});
+        }
+        Err(e) => {
+            crate::logln!("[snappin] tccutil reset Accessibility failed: {e}");
+            app_cb
+                .dialog()
+                .message(format!(
+                    "自动重置失败：{e}\n\n请在「终端」里手动执行，然后重启 SnapPin：\n\ntccutil reset Accessibility {id}"
+                ))
+                .title("重置失败")
+                .kind(MessageDialogKind::Error)
+                .buttons(MessageDialogButtons::Ok)
+                .show(|_| {});
+        }
+    }
+}
+
 fn mac_capture_gate(app: &AppHandle) -> Result<(), String> {
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -2371,6 +2446,22 @@ pub async fn long_capture_start(
     // 防重入（驱动循环持锁期间这里会立刻失败）
     if state.long.lock().unwrap().is_some() {
         return Err("long capture already in progress".to_string());
+    }
+    // macOS 前置：自动滚动靠 CGEventPost，必须先在「辅助功能」里授权。
+    //
+    // 2026-10-27 真机日志：长截图首帧采到 1850px，之后 0 步报"需要辅助功能
+    // 权限"。系统对未授权的 CGEventPost 是**静默丢弃**，如果不在启动前拦住，
+    // 用户看到的是"滚了但页面不动"的灵异现象。
+    #[cfg(target_os = "macos")]
+    {
+        if !snappin_core_platform::has_accessibility_permission() {
+            crate::logln!("[snappin] long capture blocked: 无「辅助功能」权限");
+            crate::commands::accessibility_hint(&app);
+            return Err(
+                "长截图需要「辅助功能」权限（自动滚动用）：系统设置 → 隐私与安全性 → 辅助功能 → 勾选 SnapPin，然后重启应用"
+                    .to_string(),
+            );
+        }
     }
     // monitor_id "m0" → xcap::Monitor::all()[0]（id 即采集下标，见 capture_shot）
     let idx = monitor_index(&monitor_id)?;
