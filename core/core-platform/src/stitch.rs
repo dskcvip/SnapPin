@@ -79,6 +79,15 @@ pub struct LongCapture {
     /// 会话期间系统光标是否被本会话隐藏（决定采集走单帧还是双帧治愈，
     /// 以及 Drop 时要不要恢复显示）。
     cursor_hidden: bool,
+    /// 帧相对选区的像素倍率（**各平台不同**）。
+    ///
+    /// - Windows：`capture_region` 收物理像素、返回物理像素 → 1
+    /// - macOS：`capture_region` 收**逻辑点**、返回**物理像素**
+    ///   → Retina 上是 2（例：传 1680x925，返回 3360x1850）
+    ///
+    /// 这不是可以忽略的细节：双帧治愈里 `cx = 光标x - rect.x` 是拿逻辑
+    /// 选区算的，直接当帧内坐标用会差整整一个倍率（光标残影留在别处）。
+    frame_scale: f32,
 }
 
 impl LongCapture {
@@ -119,7 +128,8 @@ impl LongCapture {
             grab_once(monitor.get(), &rect, &hide_ui, &show_ui)
         } else {
             // 隐藏失败（极少数平台/远程桌面）：退回双帧治愈，保证图里不进光标
-            grab_with_heal(monitor.get(), &rect, scroll_point, &hide_ui, &show_ui)
+            // 倍率未知时按 1 处理（治疗框位置偏一点，总比不出图强）
+            grab_with_heal(monitor.get(), &rect, 1.0, scroll_point, &hide_ui, &show_ui)
         } {
             Ok(f) => f,
             Err(e) => {
@@ -130,13 +140,22 @@ impl LongCapture {
                 return Err(e);
             }
         };
-        if first.width != rect.w || first.height != rect.h {
+        // 帧尺寸 = 选区 × 平台倍率（macOS Retina 上是 2）。
+        //
+        // 原来这里要求「完全相等」，结果 macOS 上必然失败：
+        //   selection 1680x925 outside monitor bounds (got 3360x1850)
+        // 3360 = 1680*2、1850 = 925*2 —— 不是越界，是**帧分辨率就是物理像素**。
+        // 判据改成「两个方向倍率一致 + 不小于 1」，这样既能容纳平台差异，
+        // 又能继续挡住真正越界（被系统裁掉一块时两个方向的倍率会对不上）。
+        let sx = first.width as f32 / rect.w as f32;
+        let sy = first.height as f32 / rect.h as f32;
+        if (sx - sy).abs() > 0.02 || sx < 0.99 {
             if cursor_hidden {
                 show_cursor();
             }
             return Err(format!(
-                "selection {}x{} outside monitor bounds (got {}x{})",
-                rect.w, rect.h, first.width, first.height
+                "selection {}x{} outside monitor bounds (got {}x{}, scale {:.2}x{:.2})",
+                rect.w, rect.h, first.width, first.height, sx, sy
             ));
         }
         let stitcher = match Stitcher::new(&first, opts) {
@@ -158,6 +177,7 @@ impl LongCapture {
             show_ui,
             stop,
             cursor_hidden,
+            frame_scale: sx,
         })
     }
 
@@ -267,6 +287,7 @@ impl LongCapture {
             grab_with_heal(
                 self.monitor.get(),
                 &self.rect,
+                self.frame_scale,
                 self.scroll_point,
                 &self.hide_ui,
                 &self.show_ui,
@@ -316,15 +337,17 @@ fn grab_once(
 fn grab_with_heal(
     monitor: &xcap::Monitor,
     rect: &Rect,
+    frame_scale: f32,
     scroll_point: (i32, i32),
     hide_ui: &Option<UiCallback>,
     show_ui: &Option<UiCallback>,
 ) -> Result<RgbaBuffer, String> {
     let mut a = grab_once(monitor, rect, hide_ui, show_ui)?;
     let (px, py) = scroll_point;
-    // 帧内坐标：光标热点相对选区左上角
-    let cx = px - rect.x;
-    let cy = py - rect.y;
+    // 帧内坐标：光标热点相对选区左上角，再乘平台倍率
+    // （rect 是选区坐标系，帧是物理像素；macOS 上两者差 2 倍）
+    let cx = ((px - rect.x) as f32 * frame_scale).round() as i32;
+    let cy = ((py - rect.y) as f32 * frame_scale).round() as i32;
     // 移开光标采第二帧（页面静止时与 a 内容一致）
     set_cursor_pos(px + CURSOR_NUDGE.0, py + CURSOR_NUDGE.1);
     let b = grab_once(monitor, rect, hide_ui, show_ui)?;

@@ -287,7 +287,21 @@
   line-height: 1.75;
   white-space: pre-wrap;
   word-break: break-word;
+  /* 超长英文单词 / URL / 代码不能被当成"不可断"，否则整栏横向撑开、
+     视觉上就是"一行到底"（用户 2026-10-26 反馈：译文一直显示在一行）。 */
+  overflow-wrap: anywhere;
+  /* 正文列宽上限：窗口被拉宽时不让一行排到一百多字。
+     46em ≈ 46 个汉字（13px 字号），是长文阅读比较舒服的行宽；
+     窗口窄于一屏时这条不生效，不影响原来的双栏布局。 */
+  max-width: 46em;
   cursor: text;
+}
+
+/* 译文/原文里如果出现真正的长串（文件名、URL），也照样折行 */
+.pane-body,
+.pane-body * {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .pane-spinner {

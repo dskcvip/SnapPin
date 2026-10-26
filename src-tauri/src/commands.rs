@@ -469,12 +469,10 @@ pub(crate) fn reset_screen_permission_and_hint(app: &AppHandle) {
 }
 
 fn mac_capture_gate(app: &AppHandle) -> Result<(), String> {
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     // 本进程是否已经请求过系统授权框（系统只弹一次，重复调用没有意义）
     static REQUESTED: AtomicBool = AtomicBool::new(false);
-    // 上次弹自定义提示的 Unix 秒（0 = 还没弹过）
-    static LAST_ALERT: AtomicU64 = AtomicU64::new(0);
 
     if snappin_core_platform::has_screen_capture_permission() {
         return Ok(());
@@ -486,48 +484,80 @@ fn mac_capture_gate(app: &AppHandle) -> Result<(), String> {
         return Ok(());
     }
 
-    // 已经提示过就**放行**（只拦第一枪）。
+    // 走到这里说明 preflight 说没权限，但**它并不总是真话**。
     //
-    // 为什么：preflight 存在误报的可能（尤其 adhoc 签名/签名刚变过的包），
-    // 一旦误报，用户就被永远挡在门外 —— 明明给了权限，功能却完全不可用，
-    // 而且没有任何自救路径（2026-10-26 真机就是这状态）。
-    // 首次已经用对话框把前因后果讲清楚了；用户执意再试，就让他试：
-    // 真没权限时截出来只有壁纸，肉眼立刻能分辨，比"打不开"信息量更大。
-    if LAST_ALERT.load(Ordering::SeqCst) != 0 {
-        crate::logln!(
-            "[snappin] capture allowed despite preflight=false（已提示过，按用户执意继续）"
-        );
+    // 2026-10-26 真机（macOS 13.6.6 + adhoc 签名）实测：preflight 恒为 false，
+    // 而截图内容完全正常（能 OCR 出别的窗口里的文字）。说明这个 API 在
+    // "签名变过/授权记录与当前二进制不完全匹配"时会误报。
+    //
+    // 因此门禁**从不阻断**：误报时阻断会让用户完全不可用且无自救路径。
+    // 真没权限时截出来只有壁纸，肉眼立刻能分辨 —— 信息量比"打不开"更大。
+    // 提示只弹一次（靠下面这个标记），而且只要用户成功截过一次就不再弹。
+    if preflight_false_observed(app) {
+        crate::logln!("[snappin] capture allowed (preflight=false，此前已确认能正常截图)");
         return Ok(());
     }
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    if now.saturating_sub(LAST_ALERT.load(Ordering::SeqCst)) >= 5 {
-        LAST_ALERT.store(now, Ordering::SeqCst);
-        crate::logln!("[snappin] capture blocked: 无「屏幕录制」权限");
-        use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
-        let app_for_cb = app.clone();
-        app.dialog()
-            .message(
-                "SnapPin 没有「屏幕录制」权限，macOS 会把它截到的画面里其他应用的窗口全部过滤掉——只能看到桌面壁纸。\n\n**先把 SnapPin 彻底退出**（菜单栏图标右键 → 退出），然后按下面顺序来：\n\n① **确认从哪里运行**：一定是「应用程序」文件夹里的那份。如果 dmg 还挂着（访达左边栏有 SnapPin 卷），先点它右边的「⏏」推出 —— 从 dmg 里直接打开会被系统当成另一个程序，设置里勾了也不算数。\n② 打开「系统设置 → 隐私与安全性 → 屏幕录制」，**点左下角「−」把列表里所有 SnapPin 条目删掉**（不是取消勾选，是删掉。升级一次版本签名就变一次，旧条目永远匹配不上当前这份）。\n③ 回到「应用程序」，双击 SnapPin 启动。此时系统应该**主动弹出**「SnapPin 想要录制屏幕」的对话框 —— 在系统框里点「打开系统设置」并打开开关。（如果没弹框，说明系统里还残留记录，重复步骤②再启动。）\n④ 系统会提示需要重新打开应用，**退出 SnapPin 再启动一次**。\n\n判定成功的标志：菜单栏图标右键 →「打开运行日志」，里面出现 `屏幕录制权限 preflight = true`。\n\n如果做完还是 false，在终端执行一次（去掉下载隔离属性，再走一遍步骤②③）： `xattr -dr com.apple.quarantine /Applications/SnapPin.app`",
-            )
-            .title("需要「屏幕录制」权限")
-            .kind(MessageDialogKind::Warning)
-            .buttons(MessageDialogButtons::OkCancelCustom(
-                "重置授权并重试".to_string(),
-                "知道了".to_string(),
-            ))
-            .show(move |reset| {
-                if reset {
-                    // dialog 的回调要求 'static：借用 &AppHandle 会逃逸，必须 clone
-                    crate::commands::reset_screen_permission_and_hint(&app_for_cb);
-                }
-            });
+    crate::logln!("[snappin] capture allowed with preflight=false（仅提示，不阻断）");
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+    let app_for_cb = app.clone();
+    app.dialog()
+        .message(
+            "系统报告 SnapPin 没有「屏幕录制」权限。\n\n             如果你截出来的图只有桌面壁纸、看不到任何窗口，就是真没权限：\n             ① 菜单栏图标右键 →「重置屏幕录制授权…」→ 按提示退出重启；\n             ② 系统弹出「SnapPin 想要录制屏幕」时点允许，再重启一次。\n\n             如果截图内容正常（能看到窗口），说明这只是系统的误报，忽略即可 ——              本次之后不会再提示。",
+        )
+        .title("屏幕录制权限检查")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "重置授权".to_string(),
+            "继续截图".to_string(),
+        ))
+        .show(move |reset| {
+            if reset {
+                // dialog 的回调要求 'static：借用 &AppHandle 会逃逸，必须 clone
+                crate::commands::reset_screen_permission_and_hint(&app_for_cb);
+            }
+        });
+    Ok(())
+}
+
+/// "preflight 误报"的标记文件：只要用户在本机成功截过一次图，就写下它。
+///
+/// 目的是**只烦一次**。macOS 上 preflight 一旦误报就是每次启动都误报，
+/// 若每次都弹提示，用户会被一个假警报反复打扰；而只弹一次又怕真有问题的
+/// 用户看不到说明 —— 用"是否成功截过图"来区分这两类情况最省事。
+#[cfg(target_os = "macos")]
+fn preflight_marker(app: &AppHandle) -> Option<std::path::PathBuf> {
+    app.path()
+        .app_data_dir()
+        .ok()
+        .map(|d| d.join(".preflight-false-but-capture-works"))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn preflight_marker(_app: &AppHandle) -> Option<std::path::PathBuf> {
+    None
+}
+
+fn preflight_false_observed(app: &AppHandle) -> bool {
+    preflight_marker(app).map(|p| p.exists()).unwrap_or(false)
+}
+
+/// 成功截到图后调用：如果 preflight 仍在误报，落一个标记，之后不再提示。
+pub(crate) fn note_capture_succeeded(app: &AppHandle) {
+    #[cfg(target_os = "macos")]
+    {
+        if snappin_core_platform::has_screen_capture_permission() {
+            return;
+        }
+        if let Some(p) = preflight_marker(app) {
+            if let Some(dir) = p.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let _ = std::fs::write(&p, b"1");
+        }
     }
-    Err("需要「屏幕录制」权限：系统设置 → 隐私与安全性 → 屏幕录制 → 勾选 SnapPin 后重启应用"
-        .to_string())
+    #[cfg(not(target_os = "macos"))]
+    let _ = app;
 }
 
 pub fn do_capture(app: &AppHandle, state: &AppState, src: &str) -> Result<CapturePayload, String> {
@@ -587,6 +617,9 @@ pub fn do_capture(app: &AppHandle, state: &AppState, src: &str) -> Result<Captur
         shots.len(),
         t0.elapsed().as_millis()
     );
+    // 成功截到图 = 权限实际可用。若 preflight 仍在误报，落一个标记文件，
+    // 之后启动就不再弹那条"没有屏幕录制权限"的提示（详见 mac_capture_gate）。
+    crate::commands::note_capture_succeeded(app);
     // 采集期间用户已按取消（前端此时还没有会话代号）：在显示浮层前放弃，
     // 避免"Escl 了却又弹出浮层"。
     if state.cancel_pending.swap(false, Ordering::SeqCst) {
