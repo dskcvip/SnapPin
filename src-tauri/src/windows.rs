@@ -24,6 +24,8 @@ pub const TRANS_LABEL: &str = "trans";
 pub const SETTINGS_LABEL: &str = "settings";
 /// 贴图管理面板（列出所有贴图的缩略图，跨窗口操作）
 pub const PIN_MANAGER_LABEL: &str = "pinmanager";
+/// 长截图结果窗（拼接完成后接管展示与保存/复制/贴图）
+pub const LONG_RESULT_LABEL: &str = "longresult";
 
 /// 注入到所有 webview 的守卫脚本（document-start，早于页面脚本执行）。
 ///
@@ -701,6 +703,7 @@ fn doc_html(label: &str) -> Option<&'static str> {
         TRANS_LABEL => Some("trans.html"),
         SETTINGS_LABEL => Some("settings.html"),
         PIN_MANAGER_LABEL => Some("pinmanager.html"),
+        LONG_RESULT_LABEL => Some("longresult.html"),
         _ => None,
     }
 }
@@ -808,6 +811,41 @@ pub fn show_main_window(app: &AppHandle) -> Result<(), String> {
     show_doc_window(app, SETTINGS_LABEL, "SnapPin 设置", 780.0, 640.0)
 }
 
+/// 长截图结果窗（单例）：拼接完成后**退出截图模式**，结果在这里展示与处置。
+///
+/// 为什么不复用浮层里的结果面板：那个面板挂在全屏浮层窗口上，浮层不关就永远是
+/// "还在截图模式"（桌面点不动、Esc 才能退）。用户明确要求"结果展示出来 + 退出
+/// 截图模式"，所以改成独立窗口：浮层关掉，结果窗留着。
+pub fn show_long_result(app: &AppHandle) -> Result<(), String> {
+    show_doc_window(app, LONG_RESULT_LABEL, "SnapPin 长截图", 900.0, 720.0)?;
+    if let Some(win) = app.get_webview_window(LONG_RESULT_LABEL) {
+        let _ = win.set_always_on_top(true);
+        let _ = win.set_focus();
+        // 用户点窗口的 × 直接关掉时，会话必须跟着丢弃 ——
+        // 否则下次长截图会撞上 "long capture already in progress"。
+        let app_cb = app.clone();
+        win.on_window_event(move |ev| {
+            if matches!(ev, tauri::WindowEvent::CloseRequested { .. }) {
+                let state = app_cb.state::<crate::state::AppState>();
+                // 先清掉"保留会话"标记，确保这里是真的丢弃
+                state.long_keep.store(false, std::sync::atomic::Ordering::SeqCst);
+                crate::commands::discard_long_session(&app_cb, &state, "long-result-closed");
+            }
+        });
+    }
+    Ok(())
+}
+
+/// 关闭长截图结果窗（保存/复制/贴图完成或用户关闭时调用）。
+pub fn close_long_result(app: &AppHandle) {
+    let app_cb = app.clone();
+    run_on_main(app, move |_app| {
+        if let Some(w) = app_cb.get_webview_window(LONG_RESULT_LABEL) {
+            let _ = w.close();
+        }
+    });
+}
+
 /// 贴图管理面板（单例）：所有贴图的缩略图 + 置前 / 关闭 / 改分组。
 ///
 /// **必须置顶**：贴图窗口本身是 always-on-top 的，管理面板若按普通窗口显示
@@ -844,6 +882,7 @@ mod tests {
         TRANS_LABEL,
         SETTINGS_LABEL,
         PIN_MANAGER_LABEL,
+        LONG_RESULT_LABEL,
     ] {
             let html = doc_html(label)
                 .unwrap_or_else(|| panic!("label {label} 没有登记 HTML 入口（见 doc_html）"));
@@ -864,6 +903,7 @@ mod tests {
         doc_html(TRANS_LABEL),
         doc_html(SETTINGS_LABEL),
         doc_html(PIN_MANAGER_LABEL),
+        doc_html(LONG_RESULT_LABEL),
     ];
         let mut seen = std::collections::HashSet::new();
         for h in all.into_iter().flatten() {

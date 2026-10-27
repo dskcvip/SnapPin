@@ -468,6 +468,91 @@ pub(crate) fn reset_screen_permission_and_hint(app: &AppHandle) {
     }
 }
 
+/// 一次检查两项 macOS 权限，并给出"一个入口搞定"的修复对话框。
+///
+/// 为什么合并：原来菜单里是四条（屏幕录制权限 / 重置屏幕录制授权 /
+/// 辅助功能权限 / 重置辅助功能授权），用户反馈"反复点很麻烦"。
+/// 现在只留一条「权限检查…」：先告诉你哪项缺，再让你选"去设置"或"重置授权"。
+pub(crate) fn check_and_fix_permissions(app: &AppHandle) {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+
+    let scr = snappin_core_platform::has_screen_capture_permission();
+    let acc = snappin_core_platform::has_accessibility_permission();
+    crate::logln!("[snappin] perm check: 屏幕录制={scr} 辅助功能={acc}");
+
+    let mark = |ok: bool| if ok { "✓ 已授权" } else { "✗ 未授权" };
+    let msg = format!(
+        "屏幕录制：{}\n（截图/OCR 用；缺了只能截到桌面壁纸）\n\n\
+         辅助功能：{}\n（长截图自动滚动用；缺了页面完全不动且不报错）\n\n\
+         ⚠️ 每升级一个版本，adhoc 签名的 cdhash 都会变，旧授权会变成\
+         \"勾着但无效\"的僵尸记录 —— 这时要用下面的「重置授权」清一遍再重新勾选。",
+        mark(scr),
+        mark(acc),
+    );
+
+    if scr && acc {
+        app.dialog()
+            .message(msg)
+            .title("权限检查：全部就绪")
+            .kind(MessageDialogKind::Info)
+            .buttons(MessageDialogButtons::Ok)
+            .show(|_| {});
+        return;
+    }
+
+    let app_cb = app.clone();
+    app.dialog()
+        .message(msg)
+        .title("权限检查")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "重置授权".to_string(),
+            "去系统设置".to_string(),
+        ))
+        .show(move |reset| {
+            if reset {
+                crate::commands::reset_all_permissions(&app_cb);
+            } else if !scr {
+                crate::open_external(crate::SCREEN_RECORDING_SETTINGS_URL);
+            } else {
+                crate::open_external(crate::ACCESSIBILITY_SETTINGS_URL);
+            }
+        });
+}
+
+/// 一次性重置两项授权记录（屏幕录制 + 辅助功能），然后提示重新授权。
+pub(crate) fn reset_all_permissions(app: &AppHandle) {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+    let id = app.config().identifier.clone();
+    let r1 = snappin_core_platform::reset_screen_capture_permission(&id);
+    let r2 = snappin_core_platform::reset_accessibility_permission(&id);
+    crate::logln!("[snappin] reset perms: screen={r1:?} access={r2:?}");
+
+    let detail = match (&r1, &r2) {
+        (Ok(()), Ok(())) => "两项授权记录都已清除。".to_string(),
+        _ => format!(
+            "部分清理失败（屏幕录制：{}；辅助功能：{}）。\n\
+             可在「终端」手动执行：\n\n\
+             tccutil reset ScreenCapture {id}\ntccutil reset Accessibility {id}",
+            r1.as_ref().err().map(|s| s.as_str()).unwrap_or("ok"),
+            r2.as_ref().err().map(|s| s.as_str()).unwrap_or("ok"),
+        ),
+    };
+
+    let app_cb = app.clone();
+    app_cb
+        .dialog()
+        .message(format!(
+            "{detail}\n\n接下来：\n① 完全退出 SnapPin；\n② 重新打开 —— 系统会重新弹授权框，\
+             按提示允许；\n③ 若「辅助功能」没有自动勾上，去系统设置手动勾选 SnapPin；\n\
+             ④ 系统提示需要重启时，再退出重开一次。"
+        ))
+        .title("已重置权限")
+        .kind(MessageDialogKind::Info)
+        .buttons(MessageDialogButtons::Ok)
+        .show(|_| {});
+}
+
 /// 打开「隐私与安全性 → 辅助功能」面板（macOS）。
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn open_accessibility_settings() {
@@ -508,39 +593,6 @@ pub(crate) fn accessibility_hint(app: &AppHandle) {
             }
             let _ = &app_cb;
         });
-}
-
-/// 重置「辅助功能」授权记录并提示重新授权（macOS）。
-pub(crate) fn reset_accessibility_and_hint(app: &AppHandle) {
-    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
-    let id = app.config().identifier.clone();
-    let app_cb = app.clone();
-    match snappin_core_platform::reset_accessibility_permission(&id) {
-        Ok(()) => {
-            crate::logln!("[snappin] tccutil reset Accessibility {id} ok");
-            app_cb
-                .dialog()
-                .message(format!(
-                    "已清除「{id}」的辅助功能授权记录。\n\n现在请：\n① 完全退出 SnapPin；\n② 重新打开后按提示在「隐私与安全性 → 辅助功能」里重新勾选 SnapPin；\n③ 再退出重开一次。"
-                ))
-                .title("已重置，请重新授权")
-                .kind(MessageDialogKind::Info)
-                .buttons(MessageDialogButtons::Ok)
-                .show(|_| {});
-        }
-        Err(e) => {
-            crate::logln!("[snappin] tccutil reset Accessibility failed: {e}");
-            app_cb
-                .dialog()
-                .message(format!(
-                    "自动重置失败：{e}\n\n请在「终端」里手动执行，然后重启 SnapPin：\n\ntccutil reset Accessibility {id}"
-                ))
-                .title("重置失败")
-                .kind(MessageDialogKind::Error)
-                .buttons(MessageDialogButtons::Ok)
-                .show(|_| {});
-        }
-    }
 }
 
 fn mac_capture_gate(app: &AppHandle) -> Result<(), String> {
@@ -2354,6 +2406,12 @@ async fn save_dialog(
 /// 否则下次长截图会撞上 "already in progress"）。
 /// 驱动循环（若还在跑）下一步发现会话没了会自行退出，不做收尾。
 pub fn discard_long_session(app: &AppHandle, state: &AppState, why: &str) {
+    // 结果窗已经接手（拼接完成 → 退出截图模式）时不要丢弃会话，
+    // 否则结果窗的保存/复制/贴图全部报 "session not found"。
+    if state.long_keep.swap(false, Ordering::SeqCst) {
+        eprintln!("[snappin] keep long capture for result window (why={why})");
+        return;
+    }
     let session = { state.long.lock().unwrap().take() };
     let Some(session) = session else {
         return;
@@ -2531,24 +2589,23 @@ fn begin_long_session(
     let overlay_label = format!("{}{}", windows::OVERLAY_PREFIX, idx);
     let overlay_hwnd = overlay_window_hwnd(app, &overlay_label);
 
-    // 采集排除：Windows 优先 WDA（浮层照常显示但不进采集帧）；
-    // 失败（旧系统 / 非 Windows）退化为采集前后隐藏浮层。
     let excluded = overlay_hwnd != 0
         && snappin_core_platform::stitch::set_hwnd_capture_excluded(overlay_hwnd, true);
-    let (hide_ui, show_ui) = if excluded {
-        (None, None)
-    } else {
-        eprintln!(
-            "[snappin] WDA capture-exclude unavailable (hwnd={overlay_hwnd}), \
-             falling back to hide/show overlay around each grab"
-        );
-        overlay_hide_show(app, idx)
-    };
+
+    // ★ 整个拼接期间**不显示浮层**，因此也不需要"抓帧前后隐藏/显示"的回调。
+    //
+    // 这里原来在 WDA 不可用时（macOS 永远走这条）装配了 hide_ui/show_ui 兜底：
+    // 抓帧前藏、抓帧后立刻显示回来。问题在于紧接着下面又整体隐藏了浮层，
+    // 于是 show_ui 每次都把浮层**重新显示**出来 —— 结果是整段会话里一个全屏
+    // WebView 一直盖在网页上方。macOS 上滚轮事件被这个窗口吃掉，
+    // 页面一步都不滚：真机日志表现为 `long done: 页面不再滚动 (1850px, 5 steps)`，
+    // 高度恒等于选区高度、视频里网页完全没动。
+    //
+    // 现在改为：拼接期间浮层全程隐藏（抓帧自然干净，也无需排除），
+    // 结束时再 restore_long_overlay 显示结果面板。
+    let (hide_ui, show_ui): (Option<UiCallback>, Option<UiCallback>) = (None, None);
     // 光标穿透：滚轮与点击都要落到下层的目标窗口
     windows::set_window_ignore_cursor_events(app, &overlay_label, true);
-    // 浮层在拼接期间整体隐藏：它们此时既不响应鼠标、也不进采集帧，
-    // 留在屏幕上只是一块内容塌缩的半透明方块（主副屏各一个，用户明确反馈
-    // 是"多两个没用的窗口"）。进度改由独立预览窗显示。
     windows::hide_all_overlays(app);
 
     // 停止标志复位（上次异常退出可能留着 true），克隆进会话
@@ -2580,6 +2637,7 @@ fn begin_long_session(
         overlay_idx: idx,
         overlay_hwnd,
         used_fallback: !excluded,
+        preview: None,
         thumb,
     });
     state.long_active.store(true, Ordering::SeqCst);
@@ -2610,6 +2668,95 @@ pub fn long_capture_stop(state: State<'_, AppState>) -> Result<(), String> {
 /// 取出会话 → 还原浮层 → 落盘最终长图 → 执行动作 → 结束截图会话。
 /// 驱动循环应已在 done 事件前退出；若仍在滚动（异常路径），
 /// 拿锁后它会自行发现会话被取走而退出。
+/// 长截图结果窗的展示载荷。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LongResultPayload {
+    /// 全分辨率结果的临时 PNG 路径
+    pub path: String,
+    pub width: u32,
+    pub height: u32,
+    pub steps: u32,
+}
+
+/// 拼接完成 → 把会话交给结果窗，并**退出截图模式**。
+///
+/// 前端在收到 `done` 事件后调用：先是这里（生成全图、置位"保留会话"标记、
+/// 打开结果窗），再调 `exitCapture` 收掉浮层。顺序不能反：浮层一关就会
+/// `end_capture_session` → `discard_long_session`，所以标记必须在此之前置位。
+#[tauri::command]
+pub async fn long_result_open(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    // 1) 生成（或复用）全分辨率 PNG
+    let path = {
+        let mut guard = state.long.lock().unwrap();
+        let session = guard.as_mut().ok_or_else(|| "no long session".to_string())?;
+        match &session.preview {
+            Some(p) => p.clone(),
+            None => {
+                let canvas = session.capture.canvas();
+                let path = snappin_core_platform::new_temp_png_path();
+                if let Some(dir) = path.parent() {
+                    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+                }
+                snappin_core_platform::save_png_fast(canvas, &path).map_err(|e| e.to_string())?;
+                session.preview = Some(path.clone());
+                // 驱动循环已经结束，这里顺手把停止标志复位，避免影响下一次
+                path
+            }
+        }
+    };
+    crate::logln!("[snappin] long result → {}", path.display());
+
+    // 2) 置位"保留会话"：紧随其后的 exitCapture 会走 discard_long_session
+    state.long_keep.store(true, Ordering::SeqCst);
+
+    // 3) 开结果窗（必须主线程，与其它 doc 窗一致）
+    let app2 = app.clone();
+    tauri::async_runtime::spawn_blocking(move || windows::show_long_result(&app2))
+        .await
+        .map_err(|e| format!("open result window failed: {e}"))??;
+    Ok(())
+}
+
+/// 结果窗挂载时取展示信息（图片路径 + 尺寸 + 步数）。
+#[tauri::command]
+pub async fn long_result_info(state: State<'_, AppState>) -> Result<LongResultPayload, String> {
+    let guard = state.long.lock().unwrap();
+    let session = guard.as_ref().ok_or_else(|| "no long session".to_string())?;
+    let path = session
+        .preview
+        .as_ref()
+        .ok_or_else(|| "long result image not ready".to_string())?;
+    let canvas = session.capture.canvas();
+    Ok(LongResultPayload {
+        path: path.to_string_lossy().to_string(),
+        width: canvas.width,
+        height: canvas.height,
+        steps: session.capture.steps(),
+    })
+}
+
+/// 关掉结果窗并丢弃会话（用户点「完成」或直接关闭窗口）。
+#[tauri::command]
+pub async fn long_result_close(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    state.long_stop.store(true, Ordering::SeqCst);
+    state.long_active.store(false, Ordering::SeqCst);
+    // 这里要真正丢弃（覆盖可能残留的保留标记）
+    state.long_keep.store(false, Ordering::SeqCst);
+    let dropped = state.long.lock().unwrap().take();
+    match dropped {
+        Some(session) => {
+            // 直接丢弃即可：LongCapture 的 Drop 会恢复系统光标、还原浮层状态
+            drop(session);
+            crate::logln!("[snappin] long result closed, session dropped");
+        }
+        // commit 已经先把会话取走了，这里没有可丢的东西（正常路径）
+        None => crate::logln!("[snappin] long result closed (session already consumed)"),
+    }
+    windows::close_long_result(&app);
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn long_capture_commit(
     app: AppHandle,
@@ -2620,8 +2767,15 @@ pub async fn long_capture_commit(
     state.long_stop.store(true, Ordering::SeqCst);
     let session = { state.long.lock().unwrap().take() };
     let Some(session) = session else {
+        crate::logln!("[snappin] long commit({action}) failed: session not found");
         return Err("long capture session not found".to_string());
     };
+    crate::logln!(
+        "[snappin] long commit({action}) start: {}x{}, {} steps",
+        session.capture.canvas().width,
+        session.capture.canvas().height,
+        session.capture.steps()
+    );
     let canvas = session.capture.into_canvas();
     restore_long_overlay(
         &app,
@@ -2938,27 +3092,6 @@ fn overlay_window_hwnd(app: &AppHandle, label: &str) -> isize {
 #[cfg(not(windows))]
 fn overlay_window_hwnd(_app: &AppHandle, _label: &str) -> isize {
     0
-}
-
-/// 构造"采集前后隐藏/显示浮层"的回调对（WDA 不可用时的兜底）。
-/// 主线程同步等待（macOS 建窗约束同 create_pin_window）。
-fn overlay_hide_show(app: &AppHandle, idx: usize) -> (Option<UiCallback>, Option<UiCallback>) {
-    let label = format!("{}{}", windows::OVERLAY_PREFIX, idx);
-    // 回调是 'static 的（跨线程/跨阶段执行），必须各自持有一份 AppHandle 与 label，
-    // 不能借用入参 `app`（release 下此函数被内联路径要求 'static，debug 未触发该约束）。
-    let (app_hide, label_hide): (AppHandle, String) = (AppHandle::clone(app), label.clone());
-    let hide: UiCallback = Box::new(move || {
-        if let Err(e) = overlay_set_visible(&app_hide, &label_hide, false) {
-            eprintln!("[snappin] hide overlay before grab failed: {e}");
-        }
-    });
-    let (app_show, label_show): (AppHandle, String) = (AppHandle::clone(app), label);
-    let show: UiCallback = Box::new(move || {
-        if let Err(e) = overlay_set_visible(&app_show, &label_show, true) {
-            eprintln!("[snappin] show overlay after grab failed: {e}");
-        }
-    });
-    (Some(hide), Some(show))
 }
 
 /// 在主线程显示/隐藏浮层（同步等待结果）。

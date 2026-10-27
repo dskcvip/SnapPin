@@ -1,0 +1,154 @@
+/* ==========================================================================
+   长截图结果窗（独立窗口）
+   —— 与浮层里的结果面板是两回事：这个是普通窗口，浮层已关（截图模式已退出）。
+   ========================================================================== */
+
+.lr-root {
+  display: grid;
+  grid-template-rows: auto auto 1fr auto;
+  height: 100vh;
+  background: #fff;
+  color: #1f2329;
+  font-size: 13px;
+}
+
+.lr-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid #eceef1;
+}
+
+.lr-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.lr-chip {
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: #f0f1f3;
+  font-size: 11px;
+  font-weight: 400;
+  color: #6b7280;
+}
+
+.lr-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.lr-btn {
+  height: 28px;
+  padding: 0 12px;
+  border-radius: 7px;
+  border: 1px solid #e4e6ea;
+  background: #fff;
+  color: #1f2329;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+.lr-btn:hover:not(:disabled) {
+  background: #f5f6f8;
+}
+
+.lr-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.lr-btn.ghost {
+  border-color: transparent;
+  background: #f0f1f3;
+  color: #4b5563;
+}
+
+.lr-btn.primary {
+  border-color: #1f2329;
+  background: #1f2329;
+  color: #fff;
+}
+
+.lr-btn.primary:hover:not(:disabled) {
+  background: #2c3038;
+}
+
+.lr-error {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  background: #fef2f2;
+  color: #b91c1c;
+  font-size: 12px;
+  border-bottom: 1px solid #fee2e2;
+}
+
+.lr-error span {
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+
+/* 图片舞台：占满中间剩余空间，自己滚动 */
+.lr-stage {
+  min-height: 0;
+  overflow: auto;
+  padding: 10px;
+  background: #f7f8fa;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+}
+
+/* 适应窗口：宽度贴合容器、高度按比例（超长图仍靠滚动） */
+.lr-stage.is-fit .lr-img {
+  width: 100%;
+  height: auto;
+  max-width: 100%;
+}
+
+/* 原始大小：不做任何缩放，按 PNG 自身像素绘制 */
+.lr-stage.is-actual .lr-img {
+  width: auto;
+  height: auto;
+  max-width: none;
+  max-height: none;
+  margin: 0 auto;
+  image-rendering: -webkit-optimize-contrast;
+}
+
+.lr-img {
+  display: block;
+  background: #fff;
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  border-radius: 6px;
+  box-shadow: 0 2px 10px rgba(15, 23, 42, 0.06);
+}
+
+.lr-empty {
+  margin: auto;
+  color: #9aa3b2;
+  font-size: 12px;
+}
+
+.lr-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border-top: 1px solid #eceef1;
+}
+
+.lr-hint {
+  color: #8a919f;
+  font-size: 12px;
+}

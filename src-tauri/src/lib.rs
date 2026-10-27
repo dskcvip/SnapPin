@@ -383,6 +383,9 @@ pub fn run() {
             commands::ocr_recognize,
             commands::long_capture_start,
             commands::long_capture_stop,
+            commands::long_result_open,
+            commands::long_result_info,
+            commands::long_result_close,
             commands::long_capture_commit,
             commands::pin_from_clipboard,
             commands::pin_context,
@@ -573,25 +576,10 @@ fn mac_native_tray_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<taur
     let pin = MenuItem::with_id(app, "pin-clipboard", "剪贴板贴图", true, None::<&str>)?;
     let ball = MenuItem::with_id(app, "toggle-ball", "显示 / 隐藏悬浮球", true, None::<&str>)?;
     let settings = MenuItem::with_id(app, "settings", "设置…", true, None::<&str>)?;
-    let perm = MenuItem::with_id(app, "open-perm", "屏幕录制权限…", true, None::<&str>)?;
-    // 授权"勾着但无效"时的自救入口：清掉 TCC 记录，下次启动才会重新弹系统授权框
-    let reset_perm = MenuItem::with_id(
-        app,
-        "reset-perm",
-        "重置屏幕录制授权…",
-        true,
-        None::<&str>,
-    )?;
-    // 长截图自动滚动的前置权限（macOS）。与"屏幕录制"并列，因为两者都会让
-    // 功能"看起来坏了却没报错"。
-    let access = MenuItem::with_id(app, "open-access", "辅助功能权限…", true, None::<&str>)?;
-    let reset_access = MenuItem::with_id(
-        app,
-        "reset-access",
-        "重置辅助功能授权…",
-        true,
-        None::<&str>,
-    )?;
+    // 权限入口**只留一条**：原来分成四条（屏幕录制/重置屏幕录制/辅助功能/
+    // 重置辅助功能），用户反馈"反复点很麻烦"。现在一条「权限检查…」里同时
+    // 报告两项状态，并给出"去系统设置"或"重置授权"两个动作。
+    let perm = MenuItem::with_id(app, "perm-check", "权限检查…", true, None::<&str>)?;
     let log = MenuItem::with_id(app, "open-log", "打开运行日志", true, None::<&str>)?;
     let about = MenuItem::with_id(app, "about", "关于 SnapPin", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出 SnapPin", true, None::<&str>)?;
@@ -605,9 +593,6 @@ fn mac_native_tray_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<taur
             &pin,
             &ball,
             &perm,
-            &reset_perm,
-            &access,
-            &reset_access,
             &s1,
             &log,
             &settings,
@@ -659,12 +644,8 @@ pub(crate) fn handle_menu_event(app: &AppHandle, id: &str) {
             });
         }
         // 换包后授权失效时，用户唯一的自助恢复入口（macOS）
-        "open-perm" => open_external(SCREEN_RECORDING_SETTINGS_URL),
-        // 清掉本应用的屏幕录制授权记录（"设置里勾着却始终无效"的唯一可靠解法）
-        "reset-perm" => crate::commands::reset_screen_permission_and_hint(app),
-        // 长截图自动滚动所需（macOS「辅助功能」）
-        "open-access" => open_external(ACCESSIBILITY_SETTINGS_URL),
-        "reset-access" => crate::commands::reset_accessibility_and_hint(app),
+        // 屏幕录制 + 辅助功能一起检查（macOS：两项都是硬前置，缺一项就"看着像坏了"）
+        "perm-check" => crate::commands::check_and_fix_permissions(app),
         "quit" => app.exit(0),
         _ => {}
     }

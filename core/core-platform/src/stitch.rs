@@ -232,7 +232,7 @@ impl LongCapture {
     /// 光标在 `new()` 时已一次性送到滚动点并隐藏，本函数**不再碰光标**：
     /// 旧实现每步 `SetCursorPos` 一次、每帧瞬移两次，是"屏幕不停闪"的主因。
     pub fn step(&mut self, lines: i32) -> Result<StepOutcome, String> {
-        scroll_wheel(lines)?;
+        scroll_wheel(lines, self.scroll_point)?;
         let frame = match self.grab_stable()? {
             Some(f) => f,
             None => return Ok(StepOutcome::Stopped),
@@ -500,8 +500,16 @@ pub fn set_cursor_pos(x: i32, y: i32) {
 }
 
 /// 发送滚轮（向下滚动 `lines` 格）。光标此时应已位于滚动点。
-pub fn scroll_wheel(lines: i32) -> Result<(), String> {
+/// 注入滚轮事件。
+///
+/// `at` 是滚动目标点（显示器原点 + 选区中心的绝对坐标，与光标坐标系一致）。
+/// Windows 用"当前光标位置"即可（调用方已提前把光标送过去），`at` 只被
+/// macOS 用来显式设置合成事件的发生点 —— 否则事件默认落在 (0,0)，
+/// 系统会把滚轮投给屏幕左上角的窗口而不是目标页面。
+pub fn scroll_wheel(lines: i32, at: (i32, i32)) -> Result<(), String> {
     let lines = lines.max(1);
+    #[cfg(not(target_os = "macos"))]
+    let _ = at;
     #[cfg(windows)]
     {
         const MOUSEEVENTF_WHEEL: u32 = 0x0800;
@@ -520,6 +528,12 @@ pub fn scroll_wheel(lines: i32) -> Result<(), String> {
     {
         const K_CG_SCROLL_EVENT_UNIT_LINE: u32 = 1;
         const K_CG_HID_EVENT_TAP: u32 = 0; // CGEventTapLocation 枚举首项
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        struct CGPoint {
+            x: f64,
+            y: f64,
+        }
         extern "C" {
             fn AXIsProcessTrusted() -> bool;
             fn CGEventCreateScrollWheelEvent(
@@ -529,6 +543,7 @@ pub fn scroll_wheel(lines: i32) -> Result<(), String> {
                 wheel1: i32,
             ) -> *const std::ffi::c_void;
             fn CGEventPost(tap: u32, event: *const std::ffi::c_void);
+            fn CGEventSetLocation(event: *const std::ffi::c_void, location: CGPoint);
             fn CFRelease(cf: *const std::ffi::c_void);
         }
         // 未授权辅助功能时 CGEventPost 会被系统静默丢弃——必须显式报错，
@@ -549,6 +564,16 @@ pub fn scroll_wheel(lines: i32) -> Result<(), String> {
             if event.is_null() {
                 return Err("CGEventCreateScrollWheelEvent failed".to_string());
             }
+            // **必须显式设置事件位置**：合成滚轮事件的默认位置是 (0,0)，
+            // 系统按该位置做窗口命中测试 —— 滚的是屏幕左上角那个窗口，
+            // 而不是光标下的页面（表现为"滚了但页面不动"，和没权限一模一样）。
+            CGEventSetLocation(
+                event,
+                CGPoint {
+                    x: at.0 as f64,
+                    y: at.1 as f64,
+                },
+            );
             CGEventPost(K_CG_HID_EVENT_TAP, event);
             CFRelease(event);
         }

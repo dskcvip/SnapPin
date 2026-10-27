@@ -21,6 +21,7 @@ import {
   longCaptureCommit,
   longCaptureStart,
   longCaptureStop,
+  longResultOpen,
   openUrl,
   ocrModelsStatus,
   ocrDownloadModels,
@@ -886,9 +887,25 @@ export function OverlayWindow() {
     listen<LongProgress>('long-capture-progress', (ev) => {
       const p = ev.payload
       setLongProgress(p)
-      if (p.phase === 'done' || p.phase === 'error') {
+      if (p.phase === 'done') {
+        uiLog(`long done: ${p.message} (${p.height}px, ${p.steps} steps)`)
+        // 拼接完成 → 结果交给独立结果窗，并**退出截图模式**。
+        // 顺序不能反：long_result_open 会先置位"保留会话"，之后再关浮层，
+        // 否则 exitCapture 会把长截图会话一起丢掉（结果窗按钮全部失效）。
+        void (async () => {
+          try {
+            await longResultOpen()
+          } catch (e) {
+            uiLog(`long result window failed: ${String(e)}`)
+          }
+          void exitCapture()
+        })()
+        return
+      }
+      if (p.phase === 'error') {
+        // 出错时留在浮层面板里显示原因（用户要能看到失败信息）
         setLongMode('result')
-        uiLog(`long ${p.phase}: ${p.message} (${p.height}px, ${p.steps} steps)`)
+        uiLog(`long error: ${p.message} (${p.height}px, ${p.steps} steps)`)
       }
     })
       .then((fn) => {
@@ -1312,6 +1329,33 @@ export function OverlayWindow() {
 
       {/* 选区阶段首次提示（每个应用会话一次，3.2s 自消） */}
       {selHint && !rect && longMode === 'off' && <div className="sel-hint">{selHint}</div>}
+
+      {/* 压暗遮罩：**四块实心层**，不用 `box-shadow: 0 0 0 9999px`。
+          后者每拖动一像素都要重绘一块 9999px 的巨大阴影 —— 在 Retina 全屏
+          WebView 里是最典型的卡顿源（macOS 上尤其明显）。四块实心层只改
+          left/top/width/height，合成器直接搬运，不重绘阴影。 */}
+      {active && (
+        <div className={`mask${rect ? ' is-final' : ''}`} aria-hidden="true">
+          <i style={{ left: 0, top: 0, width: '100%', height: Math.max(0, active.y) }} />
+          <i style={{ left: 0, top: active.y + active.h, right: 0, bottom: 0 }} />
+          <i
+            style={{
+              left: 0,
+              top: active.y,
+              width: Math.max(0, active.x),
+              height: active.h,
+            }}
+          />
+          <i
+            style={{
+              left: active.x + active.w,
+              top: active.y,
+              right: 0,
+              height: active.h,
+            }}
+          />
+        </div>
+      )}
 
       {active && (
         <div
