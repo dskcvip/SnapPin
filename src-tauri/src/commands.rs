@@ -2970,6 +2970,17 @@ fn run_long_driver(app: &AppHandle) {
             }
         };
         let (step, thumb) = stepped;
+        // 每步落一行：macOS 上"滚不动"到底是事件没送到还是页面没响应，
+        // 光看 done 的汇总看不出来（2026-10-27 0.1.12 真机：三次长截图都是
+        // 1850px = 选区高度，一步都没拼上）。
+        crate::logln!(
+            "[snappin] long step {}: kind={:?} score={:.3} height={}px light={}",
+            step.steps,
+            step.kind,
+            step.score,
+            step.height,
+            no_match >= LONG_NO_MATCH_RETRY
+        );
         last_score = step.score;
         last_steps = step.steps;
         match step.kind {
