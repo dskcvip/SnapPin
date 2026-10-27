@@ -258,9 +258,42 @@ pub fn has_accessibility_permission() -> bool {
 ///
 /// 与屏幕录制不同，这个系统框**不会**让应用立即可用：用户必须自己去
 /// 系统设置里勾选（macOS 的既定流程）。所以调用后仍要引导用户去设置页。
+///
+/// **2026-10-27：已从热路径摘掉，当前没有调用方。** 0.1.10 真机日志里，
+/// 「点长截图 → 闪退」恰好死在紧接这条调用之后的 `accessibility_hint` 里，
+/// 而这条调用是整个被拦路径上**唯一没被验证过**的原生调用（同一台机器上
+/// `AXIsProcessTrusted()` 在 5 次启动里都正常返回、`tccutil`/`open` 子进程
+/// 也正常），所以先摘掉它排出嫌疑；等拿到 .ips 崩溃报告再决定是否恢复。
+///
+/// 顺带修掉一个**静默失效**的老 bug：原实现给 `CFDictionaryCreate` 传了
+/// NULL 的 key/value callbacks —— 那样字典按**指针身份**比较 key，
+/// `AXIsProcessTrustedWithOptions` 内部用 `CFSTR("AXTrustedCheckOptionPrompt")`
+/// 查表永远查不到，等于"带 prompt 的请求"退化成"纯查询"，系统框从来没弹过。
+/// 现在改成真正的 `kCFTypeDictionaryKeyCallBacks` / `...ValueCallBacks`。
 #[cfg(target_os = "macos")]
 pub fn request_accessibility_permission() -> bool {
     use core::ffi::c_void;
+
+    /// CFDictionaryKeyCallBacks（CFDictionary.h）：6 个字段，全是函数指针
+    #[repr(C)]
+    struct KeyCallBacks {
+        version: isize,
+        retain: *const c_void,
+        release: *const c_void,
+        copy_description: *const c_void,
+        equal: *const c_void,
+        hash: *const c_void,
+    }
+    /// CFDictionaryValueCallBacks：5 个字段（没有 hash）
+    #[repr(C)]
+    struct ValueCallBacks {
+        version: isize,
+        retain: *const c_void,
+        release: *const c_void,
+        copy_description: *const c_void,
+        equal: *const c_void,
+    }
+
     #[link(name = "ApplicationServices", kind = "framework")]
     #[link(name = "CoreFoundation", kind = "framework")]
     extern "C" {
@@ -279,6 +312,8 @@ pub fn request_accessibility_permission() -> bool {
             encoding: u32,
         ) -> *const c_void;
         static kCFBooleanTrue: *const c_void;
+        static kCFTypeDictionaryKeyCallBacks: KeyCallBacks;
+        static kCFTypeDictionaryValueCallBacks: ValueCallBacks;
         fn CFRelease(cf: *const c_void);
     }
     const K_CF_STRING_ENCODING_UTF8: u32 = 0x08000100;
@@ -293,17 +328,16 @@ pub fn request_accessibility_permission() -> bool {
         if key.is_null() {
             return false;
         }
-        // kCFBooleanTrue 是 CoreFoundation 的静态常量，直接取指向它的指针
         let value = kCFBooleanTrue;
-        let keys = [key as *const c_void];
+        let keys = [key];
         let values = [value];
         let dict = CFDictionaryCreate(
             core::ptr::null(),
             keys.as_ptr(),
             values.as_ptr(),
             1,
-            core::ptr::null(),
-            core::ptr::null(),
+            &kCFTypeDictionaryKeyCallBacks as *const KeyCallBacks as *const c_void,
+            &kCFTypeDictionaryValueCallBacks as *const ValueCallBacks as *const c_void,
         );
         let trusted = if dict.is_null() {
             false

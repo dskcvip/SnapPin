@@ -559,25 +559,24 @@ pub(crate) fn open_accessibility_settings() {
     crate::open_external(crate::ACCESSIBILITY_SETTINGS_URL);
 }
 
-/// 长截图缺「辅助功能」权限时的准备动作（**不弹对话框**）。
+/// 长截图缺「辅助功能」权限时的准备动作（**不弹对话框、不调授权 FFI**）。
 ///
 /// 为什么不再弹模态框：0.1.10 真机表现是"点长截图 → 弹一个说明框 → 用户点
 /// 打开设置 → 关掉框"，多一次点击且关框后浮层仍停在"正在启动…"。现在改为
 /// 直接把系统设置拉到前台，由浮层里的"等授权"卡片给出按钮与进度。
 ///
-/// 两件事：
-/// ① 触一次 `AXIsProcessTrustedWithOptions(prompt:true)` —— macOS 会因此把本
-///    应用加进「辅助功能」列表，用户不必自己「+」里翻文件；每个进程只做一次
-///    （否则每次点长截图都弹系统框）。
-/// ② 打开「隐私与安全性 → 辅助功能」面板。
+/// **为什么不再调 `request_accessibility_permission()`**：0.1.10 真机日志里
+/// 两次"点长截图 → 闪退"都恰好死在这条日志（`long capture blocked`）之后，
+/// 而紧随其后的第一个原生调用就是它。同机已证安全的有：`AXIsProcessTrusted()`
+/// （5 次启动都正常）、`tccutil` 与 `open` 子进程（日志里有成功记录）。
+/// 所以从热路径摘掉，只留"打开设置面板"这一条最朴素的动作，等 .ips 定位。
+///
+/// 每一步都打日志：万一还闪退，日志能精确停在哪个动作上。
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn prepare_accessibility_grant(_app: &AppHandle) {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    static PROMPTED: AtomicBool = AtomicBool::new(false);
-    if !PROMPTED.swap(true, Ordering::SeqCst) {
-        let _ = snappin_core_platform::request_accessibility_permission();
-    }
+    crate::logln!("[snappin] blocked: 1/2 打开辅助功能设置面板");
     crate::commands::open_accessibility_settings();
+    crate::logln!("[snappin] blocked: 2/2 设置面板已请求（若列表里没有 SnapPin，需点 + 添加）");
 }
 
 /// 长截图"等授权"卡片用：辅助功能是否已授予（前端 ~800ms 轮询一次）。
@@ -601,14 +600,15 @@ pub fn accessibility_settings_open() {
 /// 记录 —— 用户在系统设置里反复点开关都没用，`AXIsProcessTrusted()` 恒 false。
 /// `tccutil reset Accessibility` 是唯一能清掉它的手段。
 ///
-/// 清完立刻再请求一次：macOS 会把应用**重新加回列表**，用户只需勾一下，
-/// 不必自己去「+」里翻 /Applications。
+/// 清完只把设置面板拉起来（**不再调 prompt FFI**，见
+/// `prepare_accessibility_grant` 的说明）：列表里重建条目要靠用户点「+」，
+/// 卡片文案已经写明这一步。
 #[tauri::command]
 pub fn accessibility_reset(app: AppHandle) -> Result<(), String> {
     let id = app.config().identifier.clone();
     crate::logln!("[snappin] reset accessibility only: id={id}");
     snappin_core_platform::reset_accessibility_permission(&id)?;
-    let _ = snappin_core_platform::request_accessibility_permission();
+    crate::logln!("[snappin] reset accessibility: done, opening pane");
     crate::open_external(crate::ACCESSIBILITY_SETTINGS_URL);
     Ok(())
 }
@@ -2495,7 +2495,26 @@ pub struct LongProgressPayload {
     pub message: String,
 }
 
-/// 开始长截图：复用当前截图会话的浮层，把选区交给驱动循环自动滚动拼接。
+/// 把某个显示器的浮层置顶/取消置顶（macOS 等授权流程用）。
+///
+/// **必须投主线程**：这是 NSWindow 的 level 变更，AppKit 不容许在任意线程上
+/// 改窗口属性（异步命令跑在工作线程上，直接调有崩进程的风险）。这里用非阻塞
+/// 的 `run_on_main_thread`，不占住命令线程。
+#[cfg(target_os = "macos")]
+fn set_overlay_topmost(app: &AppHandle, idx: usize, on_top: bool) {
+    let label = format!("{}{}", windows::OVERLAY_PREFIX, idx);
+    let app_cb = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(w) = app_cb.get_webview_window(&label) {
+            let r = w.set_always_on_top(on_top);
+            crate::logln!("[snappin] overlay {label}: always_on_top={on_top} -> {r:?}");
+        } else {
+            crate::logln!("[snappin] overlay {label}: 窗口不存在，跳过置顶变更");
+        }
+    });
+}
+
+/// 长截图：复用当前截图会话的浮层，把选区交给驱动循环自动滚动拼接。
 ///
 /// 流程（重活在 `begin_long_session`，放在阻塞线程里做）：
 /// 1. 校验会话代号 / 防重入 / 逻辑→物理选区换算
@@ -2547,16 +2566,13 @@ pub async fn long_capture_start(
     // UI 切到"等授权"卡片并轮询 `accessibility_granted`，勾上就自动开跑。
     #[cfg(target_os = "macos")]
     {
-        let overlay = app.get_webview_window(&format!("{}{}", windows::OVERLAY_PREFIX, idx));
         if !snappin_core_platform::has_accessibility_permission() {
             crate::logln!("[snappin] long capture blocked: 无「辅助功能」权限");
             // ★ 先把浮层从"永远置顶"降下来。浮层是全屏置顶的不透明冻结图，
             //   系统设置窗口会被它整块挡住 —— 用户点了「打开系统设置」却什么都
             //   看不到，这正是"给了权限还是提示没权限"的观感来源。降级后系统
             //   设置浮在前面，用户能真正去勾选；授权成功后这里再抬回去。
-            if let Some(win) = &overlay {
-                let _ = win.set_always_on_top(false);
-            }
+            set_overlay_topmost(&app, idx, false);
             crate::commands::prepare_accessibility_grant(&app);
             emit_long(
                 &app,
@@ -2568,12 +2584,18 @@ pub async fn long_capture_start(
                 "需要「辅助功能」权限才能自动滚动。已打开系统设置的「辅助功能」，\
                  勾选 SnapPin 后这里会自动开始（立即生效，不用重启）",
             );
+            crate::logln!("[snappin] blocked: need-accessibility emitted, waiting");
+            // 存活心跳：如果下一份日志里没有这一行，就说明进程在"被拦下"这条路
+            // 上 3 秒内就死了（不是用户点按钮之后死的），能直接把范围缩到上面
+            // 那几行之间。
+            std::thread::spawn(|| {
+                std::thread::sleep(std::time::Duration::from_secs(3));
+                crate::logln!("[snappin] blocked: alive 3s after block (no crash here)");
+            });
             return Ok(());
         }
         // 已授权（可能是上一轮被降级后用户勾完再来）：重新置顶，恢复截图浮层
-        if let Some(win) = &overlay {
-            let _ = win.set_always_on_top(true);
-        }
+        set_overlay_topmost(&app, idx, true);
     }
     // 选区坐标 → 采集坐标系。
     //

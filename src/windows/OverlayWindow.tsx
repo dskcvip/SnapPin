@@ -1834,9 +1834,11 @@ export function OverlayWindow() {
                 </button>
               </div>
               <div className="long-msg-row">
-                长截图的自动滚动需要这项权限。已在系统设置打开「辅助功能」，勾选 SnapPin
-                后这里会<strong>自动开始</strong>，不需要重启。若列表里已有 SnapPin
-                且显示已勾选，请先点「−」删掉再重新添加（换版本后旧条目会失效）。
+                长截图的自动滚动需要这项权限。已打开系统设置 → 隐私与安全性 →
+                辅助功能：列表里<strong>没有</strong> SnapPin 就点「+」，选「应用程序」里的
+                SnapPin；<strong>有且已勾选</strong>却仍无效，说明是换版本后的失效条目，
+                点「−」删掉再「+」重加（或用下面「重置授权」）。
+                勾上后这里会<strong>自动开始</strong>，不需要重启应用。
               </div>
               <div className="long-actions">
                 <button
