@@ -594,8 +594,11 @@ pub fn scroll_wheel(lines: i32, at: (i32, i32)) -> Result<(), String> {
             CGEventSetIntegerValueField(event, F_POINT_DELTA_AXIS1, px as i64);
             CGEventSetDoubleValueField(event, F_FIXED_PT_DELTA_AXIS1, px as f64);
             CGEventSetIntegerValueField(event, F_DELTA_AXIS1, -lines as i64);
-            // 真实滚轮是"离散"事件（触摸板才是 continuous）：
-            CGEventSetIntegerValueField(event, F_IS_CONTINUOUS, 0);
+            // **标成"精确增量"（continuous）**：0.1.12 只填 line delta 时浏览器
+            // 一步都没滚，说明它走的是 precise 分支（读 point delta）而不是
+            // wheel ticks 分支。标 1 之后浏览器按 point delta 的像素值直接滚，
+            // 这也是各种合成滚动工具对 Chrome 的标准写法。
+            CGEventSetIntegerValueField(event, F_IS_CONTINUOUS, 1);
             // **必须显式设置事件位置**：合成滚轮事件的默认位置是 (0,0)，
             // 系统按该位置做窗口命中测试 —— 滚的是屏幕左上角那个窗口，
             // 而不是光标下的页面（表现为"滚了但页面不动"，和没权限一模一样）。
