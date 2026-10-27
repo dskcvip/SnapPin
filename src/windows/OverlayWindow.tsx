@@ -12,6 +12,9 @@ import {
   type SetStateAction,
 } from 'react'
 import {
+  accessibilityGranted,
+  accessibilityReset,
+  accessibilitySettingsOpen,
   cancelCapture,
   closeSelf,
   confirmSelection,
@@ -258,12 +261,17 @@ export function OverlayWindow() {
   const [ocrModelsOk, setOcrModelsOk] = useState<boolean | null>(null)
   /** 正在下载 OCR 模型（15.6MB）：期间按钮禁用，避免重复触发 */
   const [modelsBusy, setModelsBusy] = useState(false)
-  /** 长截图（M5）：off=未开始 / running=滚动拼接中 / result=结果面板 */
-  const [longMode, setLongMode] = useState<'off' | 'running' | 'result'>('off')
+  /**
+   * 长截图（M5）：off=未开始 / running=滚动拼接中 / result=结果面板 /
+   * blocked=缺「辅助功能」权限，等用户勾选（勾上自动开跑，见下方轮询）
+   */
+  const [longMode, setLongMode] = useState<'off' | 'running' | 'result' | 'blocked'>('off')
   const [longProgress, setLongProgress] = useState<LongProgress | null>(null)
   /** 结果面板动作执行中（null = 空闲；保存对话框期间保持禁用） */
   const [longCommit, setLongCommit] = useState<ShotAction | null>(null)
   const [longActError, setLongActError] = useState<string | null>(null)
+  /** 每次收到 need-accessibility 递增：让轮询 effect 在"手动重试仍失败"时重启 */
+  const [longWaitNonce, setLongWaitNonce] = useState(0)
   /** 1×1 取色 Scratch 画布（模块级复用会与其它预览画布抢状态，故随组件） */
   const pickCanvasRef = useRef<HTMLCanvasElement | null>(null)
   /** 冻结图的 ImageBitmap（Rust 读字节 → Blob → 解码）。
@@ -902,6 +910,14 @@ export function OverlayWindow() {
         })()
         return
       }
+      if (p.phase === 'need-accessibility') {
+        // macOS 缺「辅助功能」：Rust 已把系统设置拉到前台。切到"等授权"卡片，
+        // 由下面的轮询在用户勾选后自动重跑（该权限即时生效，不用重启应用）。
+        uiLog(`long blocked: ${p.message}`)
+        setLongMode('blocked')
+        setLongWaitNonce((n) => n + 1)
+        return
+      }
       if (p.phase === 'error') {
         // 出错时留在浮层面板里显示原因（用户要能看到失败信息）
         setLongMode('result')
@@ -917,6 +933,44 @@ export function OverlayWindow() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  /**
+   * 「等辅助功能授权」轮询（macOS）。
+   *
+   * 为什么轮询而不是让用户重新点一次长截图：0.1.10 真机日志里，用户去系统设置
+   * 勾完还得回到浮层再点一次，中间很容易误以为"点了没反应"。这个权限是即时
+   * 生效的（不像屏幕录制要重启），所以 800ms 轮一次，勾上就自己开跑。
+   * 超时（90s）后保留卡片与手动按钮，不自动放弃。
+   */
+  useEffect(() => {
+    if (longMode !== 'blocked') return
+    let stopped = false
+    let tries = 0
+    let timer: number | undefined
+    const tick = async () => {
+      if (stopped) return
+      tries += 1
+      try {
+        if (await accessibilityGranted()) {
+          if (stopped) return
+          uiLog('long: 辅助功能已授权，自动继续长截图')
+          // 不先置 off：startLong 的重入判断只挡 'running'
+          void startLong()
+          return
+        }
+      } catch (e) {
+        uiLog(`accessibility poll failed: ${String(e)}`)
+      }
+      if (tries >= 112) return // ~90s
+      timer = window.setTimeout(tick, 800)
+    }
+    timer = window.setTimeout(tick, 400)
+    return () => {
+      stopped = true
+      if (timer !== undefined) window.clearTimeout(timer)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [longMode, longWaitNonce])
 
   /** 二级菜单贴着当前工具按钮：取按钮矩形的水平中心与底边 */
   /**
@@ -1096,6 +1150,9 @@ export function OverlayWindow() {
 
   const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
     if (e.button !== 0 || !ctx) return
+    // 等「辅助功能」授权期间浮层已取消置顶（系统设置盖在上面），用户在上面
+    // 点来点去很容易误把已有选区清掉 —— 这一状态下不响应框选。
+    if (longMode === 'blocked') return
     // 本屏开始画 → 让其它屏清掉它们的选区（双屏只能有一个选区/一条工具条）
     clearOtherSelections()
     // 按住时先把当前吸附窗口记进 dragRef：松手没移动 = 单击选整窗，
@@ -1225,7 +1282,7 @@ export function OverlayWindow() {
       // （用户症状：中间一块灰框、整个桌面点不动）。用 -mode 后缀把两者分开。
       className={`overlay-root${longMode === 'running' ? ' long-running' : ''}${
         longMode === 'result' ? ' long-result-mode' : ''
-      }`}
+      }${longMode === 'blocked' ? ' long-wait-mode' : ''}`}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
@@ -1758,6 +1815,57 @@ export function OverlayWindow() {
                     : '准备中'}{' '}
                   · 按 Esc 停止
                 </span>
+              </div>
+            </div>
+          )}
+
+          {/* 等「辅助功能」授权（macOS）：Rust 已把浮层取消置顶并打开系统设置，
+              用户勾选后轮询自动继续。卡片给出三个出口：打开设置 / 立即重试 / 退出。 */}
+          {longMode === 'blocked' && (
+            <div className="long-result long-wait" onPointerDown={(e) => e.stopPropagation()}>
+              <div className="long-head">
+                <span>需要「辅助功能」权限</span>
+                <button
+                  className="long-close"
+                  title="退出截图 (Esc)"
+                  onClick={() => void exitCapture()}
+                >
+                  ×
+                </button>
+              </div>
+              <div className="long-msg-row">
+                长截图的自动滚动需要这项权限。已在系统设置打开「辅助功能」，勾选 SnapPin
+                后这里会<strong>自动开始</strong>，不需要重启。若列表里已有 SnapPin
+                且显示已勾选，请先点「−」删掉再重新添加（换版本后旧条目会失效）。
+              </div>
+              <div className="long-actions">
+                <button
+                  className="long-btn"
+                  onClick={() => void accessibilitySettingsOpen().catch(() => {})}
+                >
+                  打开系统设置
+                </button>
+                <button
+                  className="long-btn"
+                  title="列表里已有 SnapPin 且已勾选却仍无效时用这个：清掉旧授权记录再重新勾选"
+                  onClick={() => {
+                    uiLog('long: reset accessibility grant')
+                    void accessibilityReset().catch((e) =>
+                      uiLog(`accessibility reset failed: ${String(e)}`),
+                    )
+                  }}
+                >
+                  重置授权
+                </button>
+                <button
+                  className="long-btn"
+                  onClick={() => {
+                    uiLog('long: manual recheck accessibility')
+                    void startLong()
+                  }}
+                >
+                  我已授权，重试
+                </button>
               </div>
             </div>
           )}

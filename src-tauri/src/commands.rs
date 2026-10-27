@@ -559,40 +559,58 @@ pub(crate) fn open_accessibility_settings() {
     crate::open_external(crate::ACCESSIBILITY_SETTINGS_URL);
 }
 
-/// 长截图因缺「辅助功能」权限失败时给的引导对话框（只弹一次/进程）。
+/// 长截图缺「辅助功能」权限时的准备动作（**不弹对话框**）。
 ///
-/// 为什么单独做：这个权限**必须手动勾选**，系统框不会直接给。用户在结果面板里
-/// 看到一行红字往往不知道该点哪儿，所以给一个能直接跳到设置页的按钮。
+/// 为什么不再弹模态框：0.1.10 真机表现是"点长截图 → 弹一个说明框 → 用户点
+/// 打开设置 → 关掉框"，多一次点击且关框后浮层仍停在"正在启动…"。现在改为
+/// 直接把系统设置拉到前台，由浮层里的"等授权"卡片给出按钮与进度。
+///
+/// 两件事：
+/// ① 触一次 `AXIsProcessTrustedWithOptions(prompt:true)` —— macOS 会因此把本
+///    应用加进「辅助功能」列表，用户不必自己「+」里翻文件；每个进程只做一次
+///    （否则每次点长截图都弹系统框）。
+/// ② 打开「隐私与安全性 → 辅助功能」面板。
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub(crate) fn accessibility_hint(app: &AppHandle) {
+pub(crate) fn prepare_accessibility_grant(_app: &AppHandle) {
     use std::sync::atomic::{AtomicBool, Ordering};
-    static SHOWN: AtomicBool = AtomicBool::new(false);
-    if SHOWN.swap(true, Ordering::SeqCst) {
-        return;
+    static PROMPTED: AtomicBool = AtomicBool::new(false);
+    if !PROMPTED.swap(true, Ordering::SeqCst) {
+        let _ = snappin_core_platform::request_accessibility_permission();
     }
-    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
-    // 同时触发一次系统授权框：macOS 会因此把本应用加进「辅助功能」列表，
-    // 用户不必自己去「+」里翻文件。
+    crate::commands::open_accessibility_settings();
+}
+
+/// 长截图"等授权"卡片用：辅助功能是否已授予（前端 ~800ms 轮询一次）。
+///
+/// macOS 的辅助功能授权是**即时生效**的（不像屏幕录制要重启进程），
+/// 所以轮询到 true 就能立刻重跑长截图。
+#[tauri::command]
+pub fn accessibility_granted() -> bool {
+    snappin_core_platform::has_accessibility_permission()
+}
+
+/// 打开「隐私与安全性 → 辅助功能」面板（等授权卡片上的按钮）。
+#[tauri::command]
+pub fn accessibility_settings_open() {
+    crate::open_external(crate::ACCESSIBILITY_SETTINGS_URL);
+}
+
+/// 清掉本应用的「辅助功能」授权记录（等授权卡片上的「重置授权」按钮）。
+///
+/// 场景：adhoc 签名每版 cdhash 都变，升级后旧条目会变成"勾着但无效"的僵尸
+/// 记录 —— 用户在系统设置里反复点开关都没用，`AXIsProcessTrusted()` 恒 false。
+/// `tccutil reset Accessibility` 是唯一能清掉它的手段。
+///
+/// 清完立刻再请求一次：macOS 会把应用**重新加回列表**，用户只需勾一下，
+/// 不必自己去「+」里翻 /Applications。
+#[tauri::command]
+pub fn accessibility_reset(app: AppHandle) -> Result<(), String> {
+    let id = app.config().identifier.clone();
+    crate::logln!("[snappin] reset accessibility only: id={id}");
+    snappin_core_platform::reset_accessibility_permission(&id)?;
     let _ = snappin_core_platform::request_accessibility_permission();
-    let app_cb = app.clone();
-    app.dialog()
-        .message(
-            "长截图的自动滚动需要「辅助功能」权限，macOS 对未授权的滚动事件是**静默丢弃**的\
-             ——不报错，只是页面不动。\n\n             ① 在打开的「隐私与安全性 → 辅助功能」里勾选 SnapPin；\n             ② 如果列表里已经有 SnapPin 且是勾选状态，请先点「−」删掉，再点「+」\
-             重新添加 /Applications/SnapPin.app（每升级一版签名都会变，旧条目会失效）；\n             ③ 然后退出 SnapPin 重新打开。\n\n             如果做完了还是不行，菜单栏图标右键 →「重置辅助功能授权…」再重来一遍。",
-        )
-        .title("长截图需要「辅助功能」权限")
-        .kind(MessageDialogKind::Warning)
-        .buttons(MessageDialogButtons::OkCancelCustom(
-            "打开系统设置".to_string(),
-            "稍后".to_string(),
-        ))
-        .show(move |open| {
-            if open {
-                crate::commands::open_accessibility_settings();
-            }
-            let _ = &app_cb;
-        });
+    crate::open_external(crate::ACCESSIBILITY_SETTINGS_URL);
+    Ok(())
 }
 
 fn mac_capture_gate(app: &AppHandle) -> Result<(), String> {
@@ -2502,28 +2520,61 @@ pub async fn long_capture_start(
         }
     }
     // 防重入（驱动循环持锁期间这里会立刻失败）
-    if state.long.lock().unwrap().is_some() {
-        return Err("long capture already in progress".to_string());
+    //
+    // 例外：会话槽位有值但 `long_active=false` 只可能是**上一轮泄漏**
+    // （建会话成功后、置 active 之前被打断）。不清理的话此后每次长截图都报
+    // "already in progress"，用户只能重启应用。这里直接丢弃重建。
+    {
+        let mut guard = state.long.lock().unwrap();
+        if guard.is_some() {
+            if state.long_active.load(Ordering::SeqCst) {
+                return Err("long capture already in progress".to_string());
+            }
+            crate::logln!("[snappin] long: 丢弃上一轮泄漏的会话（long_active=false）");
+            *guard = None;
+        }
     }
+    // monitor_id "m0" → xcap::Monitor::all()[0]（id 即采集下标，见 capture_shot）
+    let idx = monitor_index(&monitor_id)?;
     // macOS 前置：自动滚动靠 CGEventPost，必须先在「辅助功能」里授权。
     //
     // 2026-10-27 真机日志：长截图首帧采到 1850px，之后 0 步报"需要辅助功能
     // 权限"。系统对未授权的 CGEventPost 是**静默丢弃**，如果不在启动前拦住，
     // 用户看到的是"滚了但页面不动"的灵异现象。
+    //
+    // 0.1.10 真机日志：这里原来 `return Err(...)`，而 Err 只落到前端 console，
+    // 浮层会永远停在"正在启动…"。现在改成发一条 `need-accessibility` 进度事件：
+    // UI 切到"等授权"卡片并轮询 `accessibility_granted`，勾上就自动开跑。
     #[cfg(target_os = "macos")]
     {
+        let overlay = app.get_webview_window(&format!("{}{}", windows::OVERLAY_PREFIX, idx));
         if !snappin_core_platform::has_accessibility_permission() {
             crate::logln!("[snappin] long capture blocked: 无「辅助功能」权限");
-            crate::commands::accessibility_hint(&app);
-            return Err(
-                "长截图需要「辅助功能」权限（自动滚动用）：系统设置 → 隐私与安全性 → 辅助功能 → 勾选 SnapPin，然后重启应用"
-                    .to_string(),
+            // ★ 先把浮层从"永远置顶"降下来。浮层是全屏置顶的不透明冻结图，
+            //   系统设置窗口会被它整块挡住 —— 用户点了「打开系统设置」却什么都
+            //   看不到，这正是"给了权限还是提示没权限"的观感来源。降级后系统
+            //   设置浮在前面，用户能真正去勾选；授权成功后这里再抬回去。
+            if let Some(win) = &overlay {
+                let _ = win.set_always_on_top(false);
+            }
+            crate::commands::prepare_accessibility_grant(&app);
+            emit_long(
+                &app,
+                "need-accessibility",
+                0,
+                0,
+                0.0,
+                "",
+                "需要「辅助功能」权限才能自动滚动。已打开系统设置的「辅助功能」，\
+                 勾选 SnapPin 后这里会自动开始（立即生效，不用重启）",
             );
+            return Ok(());
+        }
+        // 已授权（可能是上一轮被降级后用户勾完再来）：重新置顶，恢复截图浮层
+        if let Some(win) = &overlay {
+            let _ = win.set_always_on_top(true);
         }
     }
-    // monitor_id "m0" → xcap::Monitor::all()[0]（id 即采集下标，见 capture_shot）
-    let idx = monitor_index(&monitor_id)?;
-
     // 选区坐标 → 采集坐标系。
     //
     // **两个平台的单位不同，不能一刀切乘 sf**：

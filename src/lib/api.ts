@@ -298,8 +298,11 @@ export const ocrDownloadModels = (): Promise<{ available: boolean; dir: string }
 
 /** 长截图进度事件（Rust 侧 `emit("long-capture-progress", payload)`）。 */
 export interface LongProgress {
-  /** "scrolling" 滚动拼接中 | "done" 正常结束 | "error" 出错 */
-  phase: 'scrolling' | 'done' | 'error'
+  /**
+   * "scrolling" 滚动拼接中 | "done" 正常结束 | "error" 出错 |
+   * "need-accessibility" 缺 macOS「辅助功能」权限（等授权，勾上自动开跑）
+   */
+  phase: 'scrolling' | 'done' | 'error' | 'need-accessibility'
   /** 当前累积高度（物理像素） */
   height: number
   /** 累计步数 */
@@ -327,6 +330,20 @@ export const longCaptureStart = (
 
 /** 停止长截图滚动（Esc / 前端停止按钮）：驱动循环收尾后发 done 事件。 */
 export const longCaptureStop = (): Promise<void> => invoke('long_capture_stop')
+
+/** macOS「辅助功能」授权是否已生效（等授权卡片轮询用；其它平台恒 true）。 */
+export const accessibilityGranted = (): Promise<boolean> => invoke('accessibility_granted')
+
+/** 打开「隐私与安全性 → 辅助功能」面板。 */
+export const accessibilitySettingsOpen = (): Promise<void> =>
+  invoke('accessibility_settings_open')
+
+/**
+ * 清掉本应用的「辅助功能」授权记录并重新请求一次。
+ * 换版本后旧条目会变成"勾着但无效"的僵尸记录（adhoc 签名 cdhash 变了），
+ * 只有重置这一条路能让系统重新认人。
+ */
+export const accessibilityReset = (): Promise<void> => invoke('accessibility_reset')
 
 /**
  * 长截图收尾出口：copy=复制到剪贴板 / pin=贴图 / save=保存。

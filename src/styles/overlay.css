@@ -969,8 +969,10 @@
 
 .overlay-root.long-running .shot-bar,
 .overlay-root.long-result-mode .shot-bar,
+.overlay-root.long-wait-mode .shot-bar,
 .overlay-root.long-running .annotate-wrap,
-.overlay-root.long-result-mode .annotate-wrap {
+.overlay-root.long-result-mode .annotate-wrap,
+.overlay-root.long-wait-mode .annotate-wrap {
   display: none;
 }
 

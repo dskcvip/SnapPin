@@ -36,6 +36,8 @@
 | `long_result_open` | – | `void` | 拼接完成后开结果窗（生成全图 + 置位"保留会话"，随后前端 exitCapture） |
 | `long_result_info` | – | `LongResultInfo` | 结果窗取图片路径 / 宽高 / 步数 |
 | `long_result_close` | – | `void` | 关闭结果窗并丢弃长截图会话 |
+| `accessibility_granted` | – | `boolean` | macOS「辅助功能」是否已授权（长截图"等授权"卡片 800ms 轮询；其它平台恒 `true`）。该权限**即时生效**，勾上即可继续，不需要重启应用 |
+| `accessibility_settings_open` | – | `void` | 打开「隐私与安全性 → 辅助功能」面板 |
 | `pin_list` | – | `PinInfo[]` | 列出所有贴图（label / src / 尺寸 / 分组），供贴图管理面板 |
 | `pin_focus` | `label` | `void` | 把某张贴图置前（管理面板点缩略图）；窗口不存在则报错 |
 | `open_pin_manager` | – | `void` | 打开贴图管理面板。**必须投主线程**（菜单事件里同步建窗会死锁） |
@@ -186,7 +188,7 @@ interface PinFlags {
 | `menu-open` | `{ kind: "app" \| "pin", pinLabel: string \| null }` | 菜单窗收到"请测量并显示"（发往 `ball-menu` 窗口） |
 | `pin-set-opacity` | `{ value: number }` | 菜单滑块实时值 → 目标贴图窗（发往 pin 窗口） |
 | `pin-menu-action` | `{ id: string }` | 贴图菜单项点击 → 目标贴图窗执行（id 见 PinWindow 动作表） |
-| `long-capture-progress` | `LongProgress` | 长截图驱动循环每步进度（缩略图 + 段数 + 状态） |
+| `long-capture-progress` | `LongProgress` | 长截图驱动循环每步进度（缩略图 + 段数 + 状态）。`phase` 取值 `scrolling` / `done` / `error` / **`need-accessibility`**（macOS 缺辅助功能：浮层切"等授权"卡片并轮询 `accessibility_granted`，勾上自动重跑；此时 Rust 已把浮层 `always_on_top(false)`，否则系统设置窗口会被全屏浮层挡住） |
 
 规划中：
 
