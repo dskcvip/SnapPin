@@ -499,8 +499,9 @@ pub fn set_cursor_pos(x: i32, y: i32) {
     }
 }
 
-/// 发送滚轮（向下滚动 `lines` 格）。光标此时应已位于滚动点。
-/// 注入滚轮事件。
+/// 注入滚轮事件（向下滚动 `lines` 格）。
+///
+/// 调用前光标应已位于滚动点（`new()` 里一次性送过去并隐藏）。
 ///
 /// `at` 是滚动目标点（显示器原点 + 选区中心的绝对坐标，与光标坐标系一致）。
 /// Windows 用"当前光标位置"即可（调用方已提前把光标送过去），`at` 只被
@@ -526,8 +527,28 @@ pub fn scroll_wheel(lines: i32, at: (i32, i32)) -> Result<(), String> {
     }
     #[cfg(target_os = "macos")]
     {
-        const K_CG_SCROLL_EVENT_UNIT_LINE: u32 = 1;
+        // **单位用像素，不用"行"**。
+        //
+        // 0.1.12 真机（macOS 13.6.6 / Chrome）第一次真正跑到自动滚动：辅助功能
+        // 权限已 true、事件也 post 出去了，但页面一步都不动 —— 三次长截图都是
+        // `已到底部，共 1850 px`（= 选区高度，一屏都没拼上）。
+        //
+        // 原因是 Chromium / WebKit 计算滚动量看的是 **NSEvent.scrollingDeltaY**
+        // （对应 CGEvent 的 point delta 字段），而
+        // `CGEventCreateScrollWheelEvent(kCGScrollEventUnitLine, ...)` 只填了
+        // **line delta**。对真实鼠标两者都会填，所以系统自带 App 看起来能用；
+        // 合成事件只填 line delta 时，浏览器视作 0 像素滚动 —— 与"没权限"的
+        // 表现一模一样，极易误判。这里改成 pixel 单位，并把 line / point /
+        // fixed-point 三个 delta 字段都显式写一遍，尽量贴近真实滚轮事件。
+        const K_CG_SCROLL_EVENT_UNIT_PIXEL: u32 = 0;
         const K_CG_HID_EVENT_TAP: u32 = 0; // CGEventTapLocation 枚举首项
+        // 一格滚轮 ≈ 40px（macOS 常见的"一行"像素当量）
+        const PX_PER_LINE: i32 = 40;
+        // CGEventField 的字段号（CGEventTypes.h）
+        const F_DELTA_AXIS1: u32 = 11;
+        const F_FIXED_PT_DELTA_AXIS1: u32 = 93;
+        const F_POINT_DELTA_AXIS1: u32 = 96;
+        const F_IS_CONTINUOUS: u32 = 88;
         #[repr(C)]
         #[derive(Clone, Copy)]
         struct CGPoint {
@@ -544,6 +565,8 @@ pub fn scroll_wheel(lines: i32, at: (i32, i32)) -> Result<(), String> {
             ) -> *const std::ffi::c_void;
             fn CGEventPost(tap: u32, event: *const std::ffi::c_void);
             fn CGEventSetLocation(event: *const std::ffi::c_void, location: CGPoint);
+            fn CGEventSetIntegerValueField(event: *const std::ffi::c_void, field: u32, value: i64);
+            fn CGEventSetDoubleValueField(event: *const std::ffi::c_void, field: u32, value: f64);
             fn CFRelease(cf: *const std::ffi::c_void);
         }
         // 未授权辅助功能时 CGEventPost 会被系统静默丢弃——必须显式报错，
@@ -554,16 +577,25 @@ pub fn scroll_wheel(lines: i32, at: (i32, i32)) -> Result<(), String> {
                     .to_string(),
             );
         }
+        // 负值 = 向后（向下）滚
+        let px = -lines * PX_PER_LINE;
         unsafe {
             let event = CGEventCreateScrollWheelEvent(
                 std::ptr::null(),
-                K_CG_SCROLL_EVENT_UNIT_LINE,
+                K_CG_SCROLL_EVENT_UNIT_PIXEL,
                 1,
-                -lines,
+                px,
             );
             if event.is_null() {
                 return Err("CGEventCreateScrollWheelEvent failed".to_string());
             }
+            // 三个 delta 字段都写：不同 App 读的字段不一样（WebKit 读
+            // scrollingDeltaY / Chromium 读 point delta，老 App 读 line delta）
+            CGEventSetIntegerValueField(event, F_POINT_DELTA_AXIS1, px as i64);
+            CGEventSetDoubleValueField(event, F_FIXED_PT_DELTA_AXIS1, px as f64);
+            CGEventSetIntegerValueField(event, F_DELTA_AXIS1, -lines as i64);
+            // 真实滚轮是"离散"事件（触摸板才是 continuous）：
+            CGEventSetIntegerValueField(event, F_IS_CONTINUOUS, 0);
             // **必须显式设置事件位置**：合成滚轮事件的默认位置是 (0,0)，
             // 系统按该位置做窗口命中测试 —— 滚的是屏幕左上角那个窗口，
             // 而不是光标下的页面（表现为"滚了但页面不动"，和没权限一模一样）。
