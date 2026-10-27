@@ -336,6 +336,29 @@ export const longCaptureCommit = (
   action: ShotAction,
 ): Promise<{ path: string }> => invoke('long_capture_commit', { action })
 
+/** 长截图结果窗的展示载荷 */
+export interface LongResultInfo {
+  /** 全分辨率结果 PNG 的本地路径（imgSrc 转换后加载） */
+  path: string
+  width: number
+  height: number
+  steps: number
+}
+
+/**
+ * 拼接完成 → 交给结果窗展示，并退出截图模式。
+ *
+ * 顺序要求：先调这个（它会把"保留会话"标记置位），**再**关浮层；
+ * 反过来的话浮层关闭会顺手把长截图会话丢弃，结果窗的按钮就全废了。
+ */
+export const longResultOpen = (): Promise<void> => invoke('long_result_open')
+
+/** 结果窗挂载时取图片路径与尺寸 */
+export const longResultInfo = (): Promise<LongResultInfo> => invoke('long_result_info')
+
+/** 关闭结果窗并丢弃长截图会话 */
+export const longResultClose = (): Promise<void> => invoke('long_result_close')
+
 /**
  * 悬浮球右键菜单：在光标处打开**自绘菜单窗**。
  *

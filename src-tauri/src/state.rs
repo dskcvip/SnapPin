@@ -37,6 +37,9 @@ pub struct LongSession {
     pub used_fallback: bool,
     /// 缩略图临时路径（驱动循环每步覆盖写，前端状态条预览用）
     pub thumb: PathBuf,
+    /// 全分辨率结果的临时 PNG（结果窗要按原始像素显示，缩略图放大必糊）。
+    /// **按需生成并缓存**：只在结果窗第一次打开时写一次。
+    pub preview: Option<PathBuf>,
 }
 
 /// 自绘菜单的种类：决定菜单内容与点击后的动作路由。
@@ -153,6 +156,12 @@ pub struct AppState {    /// 当前配置（磁盘 config.json 的内存镜像�
     /// 长截图是否进行中（不取锁的快照，供全局热键处理器查询——
     /// 主线程不能阻塞在驱动循环持的 `long` 锁上）。
     pub long_active: AtomicBool,
+    /// 收尾时**保留**长截图会话（一次性）。
+    ///
+    /// 拼接完成 → 结果窗接管（要能保存/复制/贴图）→ 此时必须退出截图模式，
+    /// 而退出会走 `end_capture_session` → `discard_long_session` 把会话丢掉，
+    /// 结果窗的按钮就全废了。所以在退出前置位这个标记，让那次丢弃跳过。
+    pub long_keep: AtomicBool,
     /// 自绘菜单锚点（见 MenuAnchor）。`None` = 菜单已关闭。
     pub menu_anchor: Mutex<Option<MenuAnchor>>,
     /// 贴图界面开关快照（label → flags）。贴图右键菜单据此画勾。
@@ -208,6 +217,7 @@ impl AppState {
             long: Mutex::new(None),
             long_stop: Arc::new(AtomicBool::new(false)),
             long_active: AtomicBool::new(false),
+            long_keep: AtomicBool::new(false),
             menu_anchor: Mutex::new(None),
             pin_flags: Mutex::new(HashMap::new()),
             hotkeys: Mutex::new((
