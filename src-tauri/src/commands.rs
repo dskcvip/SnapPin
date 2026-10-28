@@ -735,6 +735,7 @@ pub fn do_capture(app: &AppHandle, state: &AppState, src: &str) -> Result<Captur
         // 表现为冻结图上有一块很淡的圆角方块残影（用户报"截图会把图标也截出来"）。
         std::thread::sleep(Duration::from_millis(300));
     }
+    let after_ball = std::time::Instant::now();
 
     // 2. 并行预创建隐藏浮层（与采集重叠；失败无妨，第 4 步会兜底创建）
     let precreate_app = app.clone();
@@ -743,10 +744,14 @@ pub fn do_capture(app: &AppHandle, state: &AppState, src: &str) -> Result<Captur
     });
 
     // 3. 采集（并行 + fast 压缩，双屏约 0.9s）
+    let capture_start = std::time::Instant::now();
     let capture = snappin_core_platform::capture_all_monitors();
+    let capture_ms = capture_start.elapsed().as_millis();
 
     // 等预创建线程结束（采集已完成或接近完成）
+    let join_start = std::time::Instant::now();
     let _ = precreate.join();
+    let join_ms = join_start.elapsed().as_millis();
 
     let shots = match capture {
         Ok(s) => s,
@@ -779,7 +784,16 @@ pub fn do_capture(app: &AppHandle, state: &AppState, src: &str) -> Result<Captur
     }
 
     // 4. 显示浮层（主线程；几何用 xcap 精确值校正）
+    let show_start = std::time::Instant::now();
     windows::show_overlays(app, &shots);
+    crate::logln!(
+        "[perf] capture session={session_id} ball={}ms capture={}ms overlay_wait={}ms overlay_show={}ms total={}ms",
+        after_ball.duration_since(t0).as_millis(),
+        capture_ms,
+        join_ms,
+        show_start.elapsed().as_millis(),
+        t0.elapsed().as_millis()
+    );
     eprintln!(
         "[snappin] session {session_id} ready, {}ms total",
         t0.elapsed().as_millis()
@@ -2679,6 +2693,8 @@ fn begin_long_session(
     // 光标穿透：滚轮与点击都要落到下层的目标窗口
     windows::set_window_ignore_cursor_events(app, &overlay_label, true);
     windows::hide_all_overlays(app);
+    #[cfg(target_os = "macos")]
+    std::thread::sleep(std::time::Duration::from_millis(120));
 
     // 停止标志复位（上次异常退出可能留着 true），克隆进会话
     let stop = state.long_stop.clone();
@@ -3047,7 +3063,7 @@ fn run_long_driver(app: &AppHandle) {
                     "画面变化中，调整滚动…",
                 );
                 if no_match >= LONG_NO_MATCH_GIVE_UP {
-                    reason = "no-match";
+                    error = Some("画面已变化，但找不到可靠的拼接重叠区域".to_string());
                     break 'outer;
                 }
             }
@@ -3104,7 +3120,6 @@ fn run_long_driver(app: &AppHandle) {
             "done",
             match reason {
                 "stopped" => "已停止".to_string(),
-                "no-match" => "页面不再滚动，已收尾".to_string(),
                 "bottom" => format!("已到底部，共 {height} px"),
                 _ => format!("已完成，共 {height} px"),
             },

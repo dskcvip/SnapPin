@@ -152,6 +152,15 @@ export const uiLog = (msg: string): void => {
   invoke('ui_log', { msg }).catch(() => {})
 }
 
+const timedInvoke = async <T>(command: string, args?: Record<string, unknown>): Promise<T> => {
+  const start = performance.now()
+  try {
+    return await invoke<T>(command, args)
+  } finally {
+    uiLog(`[perf] ipc ${command} ${Math.round(performance.now() - start)}ms`)
+  }
+}
+
 /**
  * 快捷键录制期间挂起/恢复全局热键。
  *
@@ -180,7 +189,7 @@ export const pinSetDisplaySize = (
   height: number,
 ): Promise<void> => invoke('pin_set_display_size', { label, width, height })
 
-export const startCapture = (): Promise<CapturePayload> => invoke('start_capture')
+export const startCapture = (): Promise<CapturePayload> => timedInvoke('start_capture')
 
 export const overlayContext = (): Promise<OverlayContext> => invoke('overlay_context')
 
@@ -196,7 +205,7 @@ export const confirmSelection = (
   shapes?: unknown[],
   sessionId?: number,
 ): Promise<{ path: string }> =>
-  invoke('confirm_selection', { monitorId, rect, action, shapes, sessionId })
+  timedInvoke('confirm_selection', { monitorId, rect, action, shapes, sessionId })
 
 /**
  * 取消截图。
@@ -326,7 +335,7 @@ export const longCaptureStart = (
   scrollLines?: number,
   sessionId?: number,
 ): Promise<void> =>
-  invoke('long_capture_start', { monitorId, rect, scrollLines, sessionId })
+  timedInvoke('long_capture_start', { monitorId, rect, scrollLines, sessionId })
 
 /** 停止长截图滚动（Esc / 前端停止按钮）：驱动循环收尾后发 done 事件。 */
 export const longCaptureStop = (): Promise<void> => invoke('long_capture_stop')
@@ -351,7 +360,7 @@ export const accessibilityReset = (): Promise<void> => invoke('accessibility_res
  */
 export const longCaptureCommit = (
   action: ShotAction,
-): Promise<{ path: string }> => invoke('long_capture_commit', { action })
+): Promise<{ path: string }> => timedInvoke('long_capture_commit', { action })
 
 /** 长截图结果窗的展示载荷 */
 export interface LongResultInfo {
@@ -368,7 +377,7 @@ export interface LongResultInfo {
  * 顺序要求：先调这个（它会把"保留会话"标记置位），**再**关浮层；
  * 反过来的话浮层关闭会顺手把长截图会话丢弃，结果窗的按钮就全废了。
  */
-export const longResultOpen = (): Promise<void> => invoke('long_result_open')
+export const longResultOpen = (): Promise<void> => timedInvoke('long_result_open')
 
 /** 结果窗挂载时取图片路径与尺寸 */
 export const longResultInfo = (): Promise<LongResultInfo> => invoke('long_result_info')
@@ -383,7 +392,7 @@ export const longResultClose = (): Promise<void> => invoke('long_result_close')
  * 右侧不能放快捷键提示），见 src-tauri/src/menuwin.rs。
  * （WebView2 默认浏览器右键菜单已被 webview 初始化脚本抑制。）
  */
-export const ballMenu = (): Promise<void> => invoke('ball_menu')
+export const ballMenu = (): Promise<void> => timedInvoke('ball_menu')
 
 /** 菜单窗量出面板尺寸后回报；Rust 据此定位并显示窗口。 */
 export const menuFit = (width: number, height: number): Promise<void> =>
@@ -396,7 +405,7 @@ export const menuClose = (): Promise<void> => invoke('menu_close')
 export const menuState = (): Promise<MenuState> => invoke('menu_state')
 
 /** 点击菜单项：Rust 先关菜单，再按 id 分发动作。 */
-export const menuAction = (id: string): Promise<void> => invoke('menu_action', { id })
+export const menuAction = (id: string): Promise<void> => timedInvoke('menu_action', { id })
 
 /**
  * 贴图窗状态快照（界面开关 + 图像处理参数）。
@@ -462,7 +471,7 @@ export const onPinSetOpacity = (cb: (value: number) => void): Promise<UnlistenFn
 /** 关闭调用方窗口自身（浮层"完全退出截图模式"的自关兜底）。 */
 export const closeSelf = (): Promise<void> => getCurrentWindow().close()
 
-export const pinFromClipboard = (): Promise<string> => invoke('pin_from_clipboard')
+export const pinFromClipboard = (): Promise<string> => timedInvoke('pin_from_clipboard')
 
 /** 读取图片原始字节（PNG）→ ArrayBuffer。
  *  取色/放大镜要读像素，而 asset 协议的 <img> 读像素会被判跨域污染；

@@ -101,7 +101,7 @@ impl LongCapture {
     pub fn new(
         monitor: xcap::Monitor,
         rect: Rect,
-        opts: StitchOptions,
+        mut opts: StitchOptions,
         // 起始滚动量（物理像素）；之后由 `step_auto` 按拼接结果自适应
         init_px: i32,
         hide_ui: Option<UiCallback>,
@@ -162,6 +162,9 @@ impl LongCapture {
                 rect.w, rect.h, first.width, first.height, sx, sy
             ));
         }
+        // Retina 上 rect.h 是逻辑点，first.height 是物理像素。重叠窗口必须
+        // 容纳几乎整帧，否则正常的小幅滚动永远落在搜索范围之外。
+        opts.max_overlap = opts.max_overlap.max(first.height.saturating_add(16));
         let stitcher = match Stitcher::new(&first, opts) {
             Ok(s) => s,
             Err(e) => {
@@ -255,6 +258,7 @@ impl LongCapture {
     /// 光标在 `new()` 时已一次性送到滚动点并隐藏，本函数**不再碰光标**：
     /// 旧实现每步 `SetCursorPos` 一次、每帧瞬移两次，是"屏幕不停闪"的主因。
     pub fn step_auto(&mut self) -> Result<StepOutcome, String> {
+        let step_start = Instant::now();
         let px = self.next_px;
         scroll_wheel_px(px, self.scroll_point)?;
         // CGEventPost 异步投递；立刻取帧会把尚未开始滚动的页面误判为到底。
@@ -264,7 +268,20 @@ impl LongCapture {
             Some(f) => f,
             None => return Ok(StepOutcome::Stopped),
         };
+        let ready_ms = step_start.elapsed().as_millis();
+        let stitch_start = Instant::now();
         let step = self.stitcher.push(&frame).map_err(|e| e.to_string())?;
+        eprintln!(
+            "[perf] long step={} scroll_px={} ready={}ms stitch={}ms total={}ms frame={}x{} kind={:?}",
+            step.steps,
+            px,
+            ready_ms,
+            stitch_start.elapsed().as_millis(),
+            step_start.elapsed().as_millis(),
+            frame.width,
+            frame.height,
+            step.kind
+        );
         // 自适应：只在上一次失败的方向上调整，成功就稳住
         self.next_px = match step.kind {
             StitchStepKind::Appended => self.next_px,
@@ -283,17 +300,31 @@ impl LongCapture {
 
     /// 滚动后等待画面静止，返回稳定的帧；`stop` 被置位则返回 `None`。
     fn grab_stable(&self) -> Result<Option<RgbaBuffer>, String> {
+        let settle_start = Instant::now();
+        let capture_start = Instant::now();
         let mut frame = self.grab_cursorless()?;
+        let mut capture_ms = capture_start.elapsed().as_millis();
+        let mut polls = 1u32;
         let deadline = Instant::now() + Duration::from_millis(MAX_SETTLE_MS);
         loop {
             if self.is_stopped() {
                 return Ok(None);
             }
             std::thread::sleep(Duration::from_millis(SETTLE_POLL_MS));
+            let capture_start = Instant::now();
             let next = self.grab_cursorless()?;
+            capture_ms += capture_start.elapsed().as_millis();
+            polls += 1;
             let diff = frame_mean_abs_diff(&frame, &next).unwrap_or(255.0);
             frame = next;
             if diff < STABLE_DIFF || Instant::now() >= deadline {
+                eprintln!(
+                    "[perf] long settle={}ms capture={}ms polls={} final_diff={:.2}",
+                    settle_start.elapsed().as_millis(),
+                    capture_ms,
+                    polls,
+                    diff
+                );
                 return Ok(Some(frame));
             }
         }

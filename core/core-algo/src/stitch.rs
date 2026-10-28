@@ -5,10 +5,11 @@
 //! 尾部有多少行重复，就追加多少行新内容。
 //!
 //! # 算法：两阶段匹配（速度 + 精度的折中）
-//! 1. **行哈希粗定位**：每行降采样成 64 位 FNV-1a 哈希，在全候选范围
-//!    （`min_overlap..=max_overlap`）上算平均 Hamming 距离，取 top-3 候选。
-//!    纯整数运算，600 行候选范围约 20 万次异或，亚毫秒级。
-//! 2. **全分辨率 SAD 精修**：对 top-3 候选逐像素算平均绝对差，取最小。
+//! 1. **分段亮度粗定位**：每行分成 8 段，各取平均亮度装入 64 位特征，
+//!    在全候选范围上算平均亮度差，保留多个候选。局部动画只影响
+//!    所在段，不会让整行哈希失效。
+//! 2. **全分辨率 SAD 精修**：对候选逐像素计算各横向区域的平均绝对差，
+//!    按行内多数区域和重叠行的多数投票。
 //!    平均差超过 `match_threshold` 判定"没有可靠重叠"（页面内容被替换 /
 //!    横向漂移），调用方应丢弃该帧而不是硬拼。
 //!
@@ -107,7 +108,7 @@ pub struct StitchStep {
     /// 阶段 1 在**全候选范围**（含 `min_overlap` 以下）找到的最优行偏移，
     /// 0 表示没有任何候选。真实滚动量小于 `min_overlap` 时这里能看到它。
     pub best_shift: u32,
-    /// 上面那个候选的平均 Hamming 距离（0..1，越小越像）
+    /// 上面那个候选的分段亮度差（0..1，越小越像）
     pub best_mean: f32,
 }
 
@@ -390,8 +391,8 @@ impl Stitcher {
     /// 0.1.14 起**全范围搜索 + 抗局部差异**：
     /// 1. 候选上界从"帧高−8"放开到 `min(帧高−1, 累积图高, 哈希窗口长)`。
     ///    真机上合成滚轮事件可能只滚 1~7 行（重叠 = 帧高−k），老上界直接判死；
-    /// 2. 匹配判据从"整段平均"改成"**行级多数表决**"：哈希要求 ≥50% 的行几乎
-    ///    完全相同、SAD 要求 ≥50% 的行平均差 < 8。这样**吸顶导航栏 / 加载中的
+    /// 2. 匹配判据从"整段平均"改成"**行级多数表决**"：SAD 要求至少半数
+    ///    重叠行的多数横向区域接近。这样**吸顶导航栏 / 加载中的
     ///    图 / 光标残影**这些只影响少数行的差异不会再掀翻整次匹配 ——
     ///    0.1.13 真机三次 NoMatch 的最可能成因就是 Apple 官网的吸顶栏。
     fn find_overlap(&self, frame: &RgbaBuffer, frame_hashes: &[u64]) -> Option<(u32, f32)> {
@@ -404,17 +405,16 @@ impl Stitcher {
             return None;
         }
 
-        // 阶段 1a：行哈希平均 Hamming，在 [min_overlap, s_max] 取 top-3 最小
-        let mut top: [(f32, u32); 3] = [(f32::MAX, 0); 3];
+        // 阶段 1a：分段行特征平均亮度差，保留多个候选给像素级复核。
+        let mut top: [(f32, u32); 8] = [(f32::MAX, 0); 8];
         for s in s_lo..=s_max {
             let mean = self.shift_mean(frame_hashes, s);
-            if mean < top[2].0 {
-                top[2] = (mean, s);
-                if top[1].0 > top[2].0 {
-                    top.swap(1, 2);
-                }
-                if top[0].0 > top[1].0 {
-                    top.swap(0, 1);
+            if mean < top[7].0 {
+                top[7] = (mean, s);
+                for i in (1..8).rev() {
+                    if top[i - 1].0 > top[i].0 {
+                        top.swap(i - 1, i);
+                    }
                 }
             }
         }
@@ -431,7 +431,7 @@ impl Stitcher {
         // 阶段 2：行级多数表决复核全部候选
         // best = (行一致率, 这些行的平均 SAD, shift)
         let mut best: Option<(f32, f32, u32)> = None;
-        let mut consider = |s: u32, best: &mut Option<(f32, f32, u32)>| {
+        let consider = |s: u32, best: &mut Option<(f32, f32, u32)>| {
             if s == 0 {
                 return;
             }
@@ -453,7 +453,7 @@ impl Stitcher {
         best.map(|(frac, _, s)| (s, frac.clamp(0.0, 1.0)))
     }
 
-    /// 在**全可行范围**（1..=min(帧高−1, 哈希窗口长)）上扫行哈希平均汉明距离，
+    /// 在**全可行范围**（1..=min(帧高−1, 哈希窗口长)）上扫分段亮度差，
     /// 返回 (最优 shift, 平均距离)。诊断用，也驱动 `best_shift/best_mean` 日志。
     fn scan_best_shift(&self, frame_hashes: &[u64]) -> (u32, f32) {
         let s_max = (frame_hashes.len() as u32 - 1).min(self.tail_hashes.len() as u32);
@@ -467,24 +467,30 @@ impl Stitcher {
         (best.1, best.0)
     }
 
-    /// shift = s 时的行哈希平均汉明距离（0..1）。
+    /// shift = s 时的分段亮度平均差（0..1）。每行取最接近的六段，
+    /// 避免固定侧栏或局部动画淹没正文的滚动信号。
     #[inline]
     fn shift_mean(&self, frame_hashes: &[u64], s: u32) -> f32 {
         let base = self.tail_hashes.len() - s as usize;
-        let mut d = 0u32;
+        let mut d = 0u64;
         for (fh_i, th_i) in frame_hashes[..s as usize]
             .iter()
             .zip(&self.tail_hashes[base..base + s as usize])
         {
-            d += (fh_i ^ th_i).count_ones();
+            let mut tile_diff = [0u8; 8];
+            for (tile, diff) in tile_diff.iter_mut().enumerate() {
+                *diff = ((fh_i >> (tile * 8)) as u8).abs_diff((th_i >> (tile * 8)) as u8);
+            }
+            tile_diff.sort_unstable();
+            d += tile_diff[..6].iter().map(|&v| v as u64).sum::<u64>();
         }
-        d as f32 / (s as f32 * 64.0)
+        d as f32 / (s as f32 * 6.0 * 255.0)
     }
 }
 
 // ---------------------------------------------------------------- 纯函数
 
-/// 放宽匹配下界时，行哈希"近乎完美"的阈值（平均汉明距离，0..1）。
+/// 放宽匹配下界时，分段亮度"近乎完美"的阈值（平均差，0..1）。
 const PERFECT_MEAN: f32 = 0.02;
 /// 放宽匹配下界时，最少可信重叠行数（少于这个即使哈希完美也当噪声）。
 const MIN_TRUST_OVERLAP: u32 = 24;
@@ -494,14 +500,15 @@ const MATCH_ROW_FRAC: f32 = 0.5;
 /// 行级多数表决复核（替代原来的整段平均 SAD）。
 ///
 /// 返回 `(一致行比例, 这些一致行的平均 SAD)`：
-/// - 比例 = 每行平均绝对差 < `ROW_SAD_OK` 的行数 / 总行数；
-/// - 平均 SAD 只对"一致行"求，避免少数坏行（吸顶栏/加载图/光标）把均值抬飞。
+/// - 一行至少 3/4 横向区域的平均差 < `ROW_SAD_OK`，才算一致行；
+/// - 平均 SAD 只对一致区域求，避免局部动画把整行判坏。
 ///
 /// 为什么不用整段均值：一个 44 行的吸顶导航栏在 1730 行重叠里只占 2.5%，
 /// 但它的平均差可能上百，整段均值直接越过 `match_threshold` → 明明对齐了
 /// 却判 NoMatch（0.1.13 真机症状）。
 fn region_row_vote(canvas: &RgbaBuffer, frame: &RgbaBuffer, shift: u32) -> (f32, f32) {
     const ROW_SAD_OK: u32 = 8;
+    const TILES: usize = 8;
     let w = canvas.width as usize;
     let ch = canvas.height as usize;
     let s = shift as usize;
@@ -510,16 +517,30 @@ fn region_row_vote(canvas: &RgbaBuffer, frame: &RgbaBuffer, shift: u32) -> (f32,
     for i in 0..s {
         let a_row = &canvas.data[(ch - s + i) * w * 4..(ch - s + i + 1) * w * 4];
         let b_row = &frame.data[i * w * 4..(i + 1) * w * 4];
-        let (a_chunks, _) = a_row.as_chunks::<4>();
-        let (b_chunks, _) = b_row.as_chunks::<4>();
-        let mut row_sum = 0u64;
-        for (pa, pb) in a_chunks.iter().zip(b_chunks.iter()) {
-            row_sum += luma(pa).abs_diff(luma(pb)) as u64;
+        let mut available_tiles = 0;
+        let mut matching_tiles = 0;
+        let mut matching_sum = 0u32;
+        for tile in 0..TILES {
+            let x0 = tile * w / TILES;
+            let x1 = (tile + 1) * w / TILES;
+            if x0 == x1 {
+                continue;
+            }
+            available_tiles += 1;
+            let mut tile_sum = 0u64;
+            for x in x0..x1 {
+                let p = x * 4;
+                tile_sum += luma(&a_row[p..p + 4]).abs_diff(luma(&b_row[p..p + 4])) as u64;
+            }
+            let tile_mean = (tile_sum / (x1 - x0) as u64) as u32;
+            if tile_mean < ROW_SAD_OK {
+                matching_tiles += 1;
+                matching_sum += tile_mean;
+            }
         }
-        let row_mean = row_sum as u32 / w as u32;
-        if row_mean < ROW_SAD_OK {
+        if matching_tiles > 0 && matching_tiles * 4 >= available_tiles * 3 {
             ok_rows += 1;
-            ok_sum += row_mean as u64;
+            ok_sum += (matching_sum / matching_tiles) as u64;
         }
     }
     let frac = ok_rows as f32 / s as f32;
@@ -555,21 +576,29 @@ pub fn frame_mean_abs_diff(a: &RgbaBuffer, b: &RgbaBuffer) -> Option<f32> {
     Some(sum as f32 / n)
 }
 
-/// 每行的 64 位 FNV-1a 哈希（降采样：每 `step` 列取一个灰度值）。
+/// 每行 8 个横向分段的亮度特征；局部变化只影响所在字节。
 /// 返回长度 = height 的向量。
 pub fn row_hashes(img: &RgbaBuffer, step: u32) -> Vec<u64> {
     let step = step.max(1) as usize;
     let w = img.width as usize;
     let mut out = Vec::with_capacity(img.height as usize);
     for row in img.data.chunks_exact(w * 4) {
-        let mut h: u64 = 0xcbf2_9ce4_8422_2325; // FNV offset basis
-        let mut x = 0;
-        while x < w {
-            let p = &row[x * 4..x * 4 + 3];
-            let g = ((p[0] as u32 * 77 + p[1] as u32 * 150 + p[2] as u32 * 29) >> 8) as u8;
-            h ^= g as u64;
-            h = h.wrapping_mul(0x0000_0100_0000_01b3); // FNV prime
-            x += step;
+        let mut h = 0u64;
+        for tile in 0..8 {
+            let x0 = tile * w / 8;
+            let x1 = (tile + 1) * w / 8;
+            let mut sum = 0u32;
+            let mut count = 0u32;
+            for x in (x0..x1).step_by(step) {
+                sum += luma(&row[x * 4..x * 4 + 4]);
+                count += 1;
+            }
+            if count == 0 {
+                let x = x0.min(w - 1);
+                sum = luma(&row[x * 4..x * 4 + 4]);
+                count = 1;
+            }
+            h |= (sum as u64 / count as u64) << (tile * 8);
         }
         out.push(h);
     }
@@ -621,6 +650,50 @@ mod tests {
         assert_eq!(step.appended, 400);
         assert_eq!(st.height(), 1000);
         assert_eq!(st.canvas(), &crop_rows(&page, 0, 1000));
+    }
+
+    #[test]
+    fn stitches_when_a_sidebar_changes_in_every_row() {
+        let page = web_page(1200, 320);
+        let first = crop_rows(&page, 0, 600);
+        let mut next = crop_rows(&page, 150, 750);
+        for row in next.data.chunks_exact_mut(320 * 4) {
+            for pixel in row[240 * 4..].chunks_exact_mut(4) {
+                pixel[0] = 255 - pixel[0];
+                pixel[1] = 255 - pixel[1];
+                pixel[2] = 255 - pixel[2];
+            }
+        }
+        for row in next.data[..40 * 320 * 4].chunks_exact_mut(320 * 4) {
+            row.fill(240);
+        }
+        let mut st = Stitcher::new(&first, StitchOptions::for_frame(600)).unwrap();
+        let step = st.push(&next).unwrap();
+        assert_eq!(step.kind, StitchStepKind::Appended);
+        assert_eq!(step.appended, 150);
+        assert_eq!(st.height(), 750);
+    }
+
+    #[test]
+    fn stitches_with_small_brightness_change_and_sidebar_animation() {
+        let page = web_page(1200, 320);
+        let first = crop_rows(&page, 0, 600);
+        let mut next = crop_rows(&page, 180, 780);
+        for row in next.data.chunks_exact_mut(320 * 4) {
+            for (x, pixel) in row.chunks_exact_mut(4).enumerate() {
+                if x < 240 {
+                    for channel in &mut pixel[..3] {
+                        *channel = channel.saturating_add(3);
+                    }
+                } else {
+                    pixel[..3].fill(15);
+                }
+            }
+        }
+        let mut st = Stitcher::new(&first, StitchOptions::for_frame(600)).unwrap();
+        let step = st.push(&next).unwrap();
+        assert_eq!(step.kind, StitchStepKind::Appended);
+        assert_eq!(step.appended, 180);
     }
 
     /// 真实重叠小于 `min_overlap`（这里 200 行 < 308）时，靠"近乎完美的行哈希"
