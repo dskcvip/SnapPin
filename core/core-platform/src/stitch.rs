@@ -214,6 +214,14 @@ impl LongCapture {
         self.stitcher.canvas()
     }
 
+    /// 采集结束后立即还原光标；结果窗仍可继续持有本会话的画布。
+    pub fn restore_cursor(&mut self) {
+        if self.cursor_hidden {
+            show_cursor();
+            self.cursor_hidden = false;
+        }
+    }
+
     /// 结束会话，取出最终长图。
     ///
     /// 因为 `LongCapture` 实现了 `Drop`（恢复光标），不能直接按字段 move，
@@ -249,6 +257,9 @@ impl LongCapture {
     pub fn step_auto(&mut self) -> Result<StepOutcome, String> {
         let px = self.next_px;
         scroll_wheel_px(px, self.scroll_point)?;
+        // CGEventPost 异步投递；立刻取帧会把尚未开始滚动的页面误判为到底。
+        #[cfg(target_os = "macos")]
+        std::thread::sleep(Duration::from_millis(160));
         let frame = match self.grab_stable()? {
             Some(f) => f,
             None => return Ok(StepOutcome::Stopped),

@@ -2950,6 +2950,8 @@ pub async fn long_capture_commit(
 fn run_long_driver(app: &AppHandle) {
     let state = app.state::<AppState>();
     let mut no_match = 0u32;
+    let mut initial_still = 0u32;
+    let mut appended_any = false;
     let mut last_score = 0.0f32;
     let mut last_steps = 0u32;
     let mut error: Option<String> = None;
@@ -3012,6 +3014,8 @@ fn run_long_driver(app: &AppHandle) {
         match step.kind {
             StitchStepKind::Appended => {
                 no_match = 0;
+                initial_still = 0;
+                appended_any = true;
                 emit_long(
                     app,
                     "scrolling",
@@ -3048,6 +3052,13 @@ fn run_long_driver(app: &AppHandle) {
                 }
             }
             StitchStepKind::Still => {
+                if !appended_any {
+                    initial_still += 1;
+                    if initial_still >= 5 {
+                        error = Some("页面没有滚动，请确认选区中心位于可滚动内容上".to_string());
+                        break 'outer;
+                    }
+                }
                 emit_long(
                     app,
                     "scrolling",
@@ -3055,10 +3066,14 @@ fn run_long_driver(app: &AppHandle) {
                     step.steps,
                     step.score,
                     &thumb,
-                    "已到底部，正在收尾…",
+                    if appended_any {
+                        "已到底部，正在收尾…"
+                    } else {
+                        "等待页面滚动…"
+                    },
                 );
                 // 到底判定（连续 still_rounds 轮没动）在算法层
-                if step.still_count >= 2 {
+                if appended_any && step.still_count >= 2 {
                     reason = "bottom";
                     break 'outer;
                 }
@@ -3068,10 +3083,13 @@ fn run_long_driver(app: &AppHandle) {
 
     // 会话可能已被 commit 取走：那就由它收尾，这里什么都不做
     let final_info = {
-        let guard = state.long.lock().unwrap();
+        let mut guard = state.long.lock().unwrap();
         guard
-            .as_ref()
-            .map(|s| (s.capture.height(), s.thumb.to_string_lossy().to_string()))
+            .as_mut()
+            .map(|s| {
+                s.capture.restore_cursor();
+                (s.capture.height(), s.thumb.to_string_lossy().to_string())
+            })
     };
     let Some((height, thumb)) = final_info else {
         state.long_active.store(false, Ordering::SeqCst);
