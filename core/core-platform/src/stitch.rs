@@ -425,8 +425,12 @@ fn capture_below_window(monitor: &xcap::Monitor, rect: &Rect, window_id: u32) ->
     let provider = CGImage::data_provider(Some(image));
     let data = CGDataProvider::data(provider.as_deref())
         .ok_or_else(|| "capture below preview returned no pixels".to_string())?;
+    let bytes = unsafe { data.as_bytes_unchecked() };
+    if row_bytes < width * 4 || bytes.len() < row_bytes * height {
+        return Err("capture below preview returned invalid pixel layout".to_string());
+    }
     let mut pixels = Vec::with_capacity(width * height * 4);
-    for row in data.chunks_exact(row_bytes) {
+    for row in bytes.chunks_exact(row_bytes).take(height) {
         pixels.extend_from_slice(&row[..width * 4]);
     }
     for pixel in pixels.chunks_exact_mut(4) {
