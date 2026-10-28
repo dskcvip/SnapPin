@@ -94,6 +94,17 @@ pub struct StitchStep {
     pub steps: u32,
     /// 超长模式降采样倍数：1 = 原分辨率；2 = 已整体缩小一半（高度上限翻倍）
     pub scale: u32,
+    /// 与上一帧的整图平均绝对差（灰度域 0..255）。
+    ///
+    /// **诊断用**：页面"没滚"时它 < `still_threshold`；滚太多（一帧跨过整个
+    /// 视口）时它会接近纯噪声水平（>80）。0.1.13 真机 NoMatch 连出 5 轮，
+    /// 就是靠它区分"事件没送出去"和"送去但量不对"。
+    pub diff: f32,
+    /// 阶段 1 在**全候选范围**（含 `min_overlap` 以下）找到的最优行偏移，
+    /// 0 表示没有任何候选。真实滚动量小于 `min_overlap` 时这里能看到它。
+    pub best_shift: u32,
+    /// 上面那个候选的平均 Hamming 距离（0..1，越小越像）
+    pub best_mean: f32,
 }
 
 /// 整数倍盒式降采样（零依赖：core-algo 不吃任何图像库）。
@@ -245,9 +256,12 @@ impl Stitcher {
         }
         self.steps += 1;
 
+        let frame_hashes = row_hashes(frame, self.hash_step);
         // --- 帧差：与上一轮比整图 ---
         // 尺寸不一致（逻辑上不该发生）按"差异极大"处理：不当静止，继续尝试匹配
         let diff = frame_mean_abs_diff(self.prev.as_ref().unwrap(), frame).unwrap_or(255.0);
+        // 诊断用的全范围最优候选（含 min_overlap 以下），见 find_overlap 注释
+        let (diag_shift, diag_mean) = self.scan_best_shift(&frame_hashes);
         if diff < self.opts.still_threshold {
             // 页面没动：不拼（拼了也是重复行），只累计静止轮次
             self.still_count += 1;
@@ -260,12 +274,14 @@ impl Stitcher {
                 height: self.canvas.height,
                 steps: self.steps,
                 scale: self.scale,
+                diff,
+                best_shift: diag_shift,
+                best_mean: diag_mean,
             });
         }
         self.still_count = 0;
 
         // --- 找重叠 ---
-        let frame_hashes = row_hashes(frame, self.hash_step);
         match self.find_overlap(frame, &frame_hashes) {
             Some((shift, score)) => {
                 let append_rows = frame.height - shift;
@@ -286,6 +302,9 @@ impl Stitcher {
                     height: self.canvas.height,
                     steps: self.steps,
                     scale: self.scale,
+                    diff,
+                    best_shift: diag_shift,
+                    best_mean: diag_mean,
                 })
             }
             None => {
@@ -299,6 +318,9 @@ impl Stitcher {
                     height: self.canvas.height,
                     steps: self.steps,
                     scale: self.scale,
+                    diff,
+                    best_shift: diag_shift,
+                    best_mean: diag_mean,
                 })
             }
         }
@@ -360,6 +382,12 @@ impl Stitcher {
 
     /// 两阶段重叠匹配。返回 (shift, score)：shift = 新帧顶部对齐累积图的
     /// 行偏移（即累积图有 shift 行与新帧头部重复）。
+    ///
+    /// 0.1.14 起：`min_overlap` 以下不再一律判死 —— 若某个 shift 在行哈希上
+    /// **几乎完美**（平均汉明距离 < `PERFECT_MEAN`）且行数 ≥ `MIN_TRUST_OVERLAP`，
+    /// 就用 SAD 复核后接受。原因是真机上滚动量可能小于 min_overlap（合成滚轮
+    /// 事件的像素当量与预期不符），此时页面明明在滚，却被判 NoMatch 永远拼不上
+    /// —— 0.1.13 真机就是 NoMatch 连出 5 轮、height 一动不动。
     fn find_overlap(&self, frame: &RgbaBuffer, frame_hashes: &[u64]) -> Option<(u32, f32)> {
         let fh = frame.height;
         let ch = self.canvas.height;
@@ -373,20 +401,11 @@ impl Stitcher {
         if s_hi < s_lo || s_lo == 0 {
             return None;
         }
-        let l = self.tail_hashes.len();
 
         // 阶段 1：行哈希平均 Hamming，取 top-3 最小
         let mut top: [(f32, u32); 3] = [(f32::MAX, 0); 3];
         for s in s_lo..=s_hi {
-            let mut d = 0u32;
-            let base = l - s as usize;
-            for (fh_i, th_i) in frame_hashes[..s as usize]
-                .iter()
-                .zip(&self.tail_hashes[base..base + s as usize])
-            {
-                d += (fh_i ^ th_i).count_ones();
-            }
-            let mean = d as f32 / (s as f32 * 64.0);
+            let mean = self.shift_mean(frame_hashes, s);
             // 插入排序维护小顶堆（3 个元素，展开比 BinaryHeap 快）
             if mean < top[2].0 {
                 top[2] = (mean, s);
@@ -413,11 +432,59 @@ impl Stitcher {
                 }
             }
         }
+        if best.is_none() {
+            // 放宽下界：真实滚动量小于 min_overlap 时按"近乎完美的哈希匹配"认。
+            // 只用 SAD 复核，宁可少拼也不硬拼。
+            let (s, mean) = self.scan_best_shift(frame_hashes);
+            if s >= MIN_TRUST_OVERLAP && mean < PERFECT_MEAN {
+                let sad = region_sad(&self.canvas, frame, s);
+                if sad < self.opts.match_threshold {
+                    best = Some((sad, s));
+                }
+            }
+        }
         best.map(|(sad, s)| (s, (1.0 - sad / 255.0).clamp(0.0, 1.0)))
+    }
+
+    /// 在**全候选范围**（1..=max_overlap）上扫行哈希平均汉明距离，
+    /// 返回 (最优 shift, 平均距离)。纯诊断用，不影响匹配判定。
+    fn scan_best_shift(&self, frame_hashes: &[u64]) -> (u32, f32) {
+        let s_max = self
+            .opts
+            .max_overlap
+            .min(frame_hashes.len() as u32 - 1)
+            .min(self.tail_hashes.len() as u32);
+        let mut best = (f32::MAX, 0u32);
+        for s in 1..=s_max {
+            let mean = self.shift_mean(frame_hashes, s);
+            if mean < best.0 {
+                best = (mean, s);
+            }
+        }
+        (best.1, best.0)
+    }
+
+    /// shift = s 时的行哈希平均汉明距离（0..1）。
+    #[inline]
+    fn shift_mean(&self, frame_hashes: &[u64], s: u32) -> f32 {
+        let base = self.tail_hashes.len() - s as usize;
+        let mut d = 0u32;
+        for (fh_i, th_i) in frame_hashes[..s as usize]
+            .iter()
+            .zip(&self.tail_hashes[base..base + s as usize])
+        {
+            d += (fh_i ^ th_i).count_ones();
+        }
+        d as f32 / (s as f32 * 64.0)
     }
 }
 
 // ---------------------------------------------------------------- 纯函数
+
+/// 放宽匹配下界时，行哈希"近乎完美"的阈值（平均汉明距离，0..1）。
+const PERFECT_MEAN: f32 = 0.02;
+/// 放宽匹配下界时，最少可信重叠行数（少于这个即使哈希完美也当噪声）。
+const MIN_TRUST_OVERLAP: u32 = 24;
 
 /// 灰度近似（整数加权，避免每像素浮点除法）。
 /// `(r*77 + g*150 + b*29) >> 8` 是 Rec.601 亮度的快速近似。
@@ -523,6 +590,28 @@ mod tests {
         let mut st = Stitcher::new(&a, opts).unwrap();
         let step = st.push(&b).unwrap();
         assert_eq!(step.kind, StitchStepKind::Appended);
+        assert_eq!(step.appended, 400);
+        assert_eq!(st.height(), 1000);
+        assert_eq!(st.canvas(), &crop_rows(&page, 0, 1000));
+    }
+
+    #[test]
+    /// 真实重叠小于 `min_overlap`（这里 200 行 < 308）时，靠"近乎完美的行哈希"
+    /// 放宽下界。
+    ///
+    /// 对应真机场景：一步滚太远（一帧跨过大半个视口），重叠掉到下界以下 ——
+    /// 老逻辑一律 NoMatch，长截图永远只有一屏。0.1.13 真机 NoMatch 连出 5 轮、
+    /// height 一动不动，是这一类问题的典型症状。
+    #[test]
+    fn small_overlap_below_min_still_appends() {
+        let page = web_page(1400, 320);
+        let opts = StitchOptions::for_frame(600); // min_overlap = 308
+        let mut st = Stitcher::new(&crop_rows(&page, 0, 600), opts).unwrap();
+        // 帧 = 页面 400..1000 行：与上一帧重叠 200 行（< 308），新内容 400 行
+        let b = crop_rows(&page, 400, 1000);
+        let step = st.push(&b).unwrap();
+        assert_eq!(step.kind, StitchStepKind::Appended);
+        assert_eq!(step.best_shift, 200);
         assert_eq!(step.appended, 400);
         assert_eq!(st.height(), 1000);
         assert_eq!(st.canvas(), &crop_rows(&page, 0, 1000));

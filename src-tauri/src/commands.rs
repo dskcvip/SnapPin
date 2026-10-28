@@ -2687,6 +2687,26 @@ fn begin_long_session(
     let thumb = snappin_core_platform::new_temp_png_path();
 
     let monitor = snappin_core_platform::monitor_by_index(idx).map_err(|e| e.to_string())?;
+    // 建会话前把坐标打出来：macOS 上"滚不动"若是因为滚动点算错（落在别的窗口
+    // 甚至屏幕外），日志里这一行就是唯一的证据。
+    {
+        let (ox, oy) = (
+            monitor.x().unwrap_or(-1),
+            monitor.y().unwrap_or(-1),
+        );
+        crate::logln!(
+            "[snappin] long session: rect=({},{},{}x{}) monitor_origin=({},{}) scroll_point=({},{}) lines={}",
+            rect.x,
+            rect.y,
+            rect.w,
+            rect.h,
+            ox,
+            oy,
+            ox + rect.x + (rect.w / 2) as i32,
+            oy + rect.y + (rect.h / 2) as i32,
+            scroll_lines
+        );
+    }
     let capture = LongCapture::new(
         monitor,
         rect,
@@ -2970,14 +2990,18 @@ fn run_long_driver(app: &AppHandle) {
             }
         };
         let (step, thumb) = stepped;
-        // 每步落一行：macOS 上"滚不动"到底是事件没送到还是页面没响应，
-        // 光看 done 的汇总看不出来（2026-10-27 0.1.12 真机：三次长截图都是
-        // 1850px = 选区高度，一步都没拼上）。
+        // 每步落一行：NoMatch 连出时靠 diff/best_shift 区分三种情况 ——
+        //   ① diff 极小 → 事件没送出去（页面没动）
+        //   ② best_shift 有值但 < min_overlap → 滚了，只是量比预期小
+        //   ③ best_shift 无值且 diff 巨大 → 一帧跨过整个视口（滚太多）
         crate::logln!(
-            "[snappin] long step {}: kind={:?} score={:.3} height={}px light={}",
+            "[snappin] long step {}: kind={:?} score={:.3} diff={:.2} best_shift={} best_mean={:.4} height={}px light={}",
             step.steps,
             step.kind,
             step.score,
+            step.diff,
+            step.best_shift,
+            step.best_mean,
             step.height,
             no_match >= LONG_NO_MATCH_RETRY
         );
