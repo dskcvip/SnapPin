@@ -26,6 +26,7 @@ pub const SETTINGS_LABEL: &str = "settings";
 pub const PIN_MANAGER_LABEL: &str = "pinmanager";
 /// 长截图结果窗（拼接完成后接管展示与保存/复制/贴图）
 pub const LONG_RESULT_LABEL: &str = "longresult";
+pub const LONG_PREVIEW_LABEL: &str = "longpreview";
 
 /// 注入到所有 webview 的守卫脚本（document-start，早于页面脚本执行）。
 ///
@@ -161,6 +162,37 @@ pub fn hide_all_overlays(app: &AppHandle) {
         }
     });
     crate::logln!("[snappin] long: hid {n} overlay window(s)");
+}
+
+/// 长截图只保留选中显示器的透明浮层，用来显示选区边框。
+pub fn show_only_long_overlay(app: &AppHandle, selected: usize) -> Result<(), String> {
+    let selected_label = format!("{OVERLAY_PREFIX}{selected}");
+    let labels: Vec<String> = app
+        .webview_windows()
+        .into_keys()
+        .filter(|label| label.starts_with(OVERLAY_PREFIX))
+        .collect();
+    let (tx, rx) = mpsc::channel();
+    let app_cb = app.clone();
+    app.run_on_main_thread(move || {
+        let mut result = Ok(());
+        for label in labels {
+            if let Some(window) = app_cb.get_webview_window(&label) {
+                let operation = if label == selected_label {
+                    window.show()
+                } else {
+                    window.hide()
+                };
+                if let Err(error) = operation {
+                    result = Err(error.to_string());
+                }
+            }
+        }
+        let _ = tx.send(result);
+    })
+    .map_err(|error| error.to_string())?;
+    rx.recv_timeout(Duration::from_secs(2))
+        .unwrap_or_else(|_| Err("long overlay visibility timed out".to_string()))
 }
 
 /// 悬浮球窗口应有的边长（逻辑像素）：球径 + 两侧留白。
@@ -834,6 +866,102 @@ pub fn show_long_result(app: &AppHandle) -> Result<(), String> {
         });
     }
     Ok(())
+}
+
+/// 长截图进行时的右下角缩略预览。独立于截图浮层，网页仍可接收滚轮。
+pub fn show_long_preview(app: &AppHandle) -> Result<(), String> {
+    let (tx, rx) = mpsc::channel();
+    let app_cb = app.clone();
+    app.run_on_main_thread(move || {
+        let result = (|| {
+            if app_cb.get_webview_window(LONG_PREVIEW_LABEL).is_some() {
+                return Ok(());
+            }
+            let (x, y, h) = if let Some(m) = app_cb.primary_monitor().map_err(|e| e.to_string())? {
+                let sf = m.scale_factor();
+                let w = m.size().width as f64 / sf;
+                let screen_h = m.size().height as f64 / sf;
+                let h = (screen_h * 0.72).clamp(300.0, 620.0);
+                (
+                    m.position().x as f64 / sf + (w - 356.0).max(0.0),
+                    m.position().y as f64 / sf + (screen_h - h - 16.0).max(0.0),
+                    h,
+                )
+            } else {
+                (800.0, 100.0, 560.0)
+            };
+            let win = WebviewWindowBuilder::new(
+                &app_cb,
+                LONG_PREVIEW_LABEL,
+                WebviewUrl::App("longpreview.html".into()),
+            )
+            .title("SnapPin 长截图预览")
+            .inner_size(340.0, h)
+            .position(x, y)
+            .decorations(false)
+            .transparent(true)
+            .shadow(false)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .resizable(false)
+            .initialization_script(WEBVIEW_GUARD)
+            .build()
+            .map_err(|e| e.to_string())?;
+            let protection = win.set_content_protected(true);
+            crate::logln!("[snappin] long preview capture protection: {protection:?}");
+            #[cfg(windows)]
+            {
+                use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+                let handle = win.window_handle().map_err(|e| e.to_string())?;
+                let hwnd = match handle.as_raw() {
+                    RawWindowHandle::Win32(h) => h.hwnd.get(),
+                    _ => return Err("preview is not a Win32 window".to_string()),
+                };
+                if !snappin_core_platform::stitch::set_hwnd_capture_excluded(hwnd, true) {
+                    let _ = win.close();
+                    return Err("cannot exclude preview from capture".to_string());
+                }
+            }
+            let app_close = app_cb.clone();
+            win.on_window_event(move |event| {
+                if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
+                    let state = app_close.state::<AppState>();
+                    state.long_stop.store(true, Ordering::SeqCst);
+                }
+            });
+            Ok(())
+        })();
+        let _ = tx.send(result);
+    })
+    .map_err(|e| e.to_string())?;
+    rx.recv_timeout(Duration::from_secs(5))
+        .unwrap_or_else(|_| Err("long preview window timed out".to_string()))
+}
+
+pub fn close_long_preview(app: &AppHandle) {
+    post_to_main(app, move |app| {
+        if let Some(win) = app.get_webview_window(LONG_PREVIEW_LABEL) {
+            let _ = win.close();
+        }
+    });
+}
+
+#[cfg(target_os = "macos")]
+pub fn long_preview_window_number(app: &AppHandle) -> Result<u32, String> {
+    let (tx, rx) = mpsc::channel();
+    let app_cb = app.clone();
+    app.run_on_main_thread(move || {
+        let result = app_cb
+            .get_webview_window(LONG_PREVIEW_LABEL)
+            .ok_or_else(|| "long preview window missing".to_string())
+            .and_then(|win| win.ns_window().map_err(|e| e.to_string()))
+            .map(crate::winsnap::ns_window_number)
+            .and_then(|id| u32::try_from(id).map_err(|_| "invalid preview window number".to_string()));
+        let _ = tx.send(result);
+    })
+    .map_err(|e| e.to_string())?;
+    rx.recv_timeout(Duration::from_secs(2))
+        .unwrap_or_else(|_| Err("preview window number timed out".to_string()))
 }
 
 /// 关闭长截图结果窗（保存/复制/贴图完成或用户关闭时调用）。

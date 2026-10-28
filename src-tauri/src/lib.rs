@@ -265,6 +265,7 @@ pub fn run() {
                         let ours = label == windows::BALL_LABEL
                             || label.starts_with(windows::OVERLAY_PREFIX)
                             || label.starts_with(windows::PIN_PREFIX)
+                            || label == windows::LONG_PREVIEW_LABEL
                             || label == "menu"
                             || label == windows::OCR_LABEL
                             || label == windows::TRANS_LABEL
@@ -383,6 +384,7 @@ pub fn run() {
             commands::ocr_recognize,
             commands::long_capture_start,
             commands::long_capture_stop,
+            commands::long_preview_info,
             commands::long_result_open,
             commands::long_result_info,
             commands::long_result_close,

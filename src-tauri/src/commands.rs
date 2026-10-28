@@ -483,7 +483,7 @@ pub(crate) fn check_and_fix_permissions(app: &AppHandle) {
     let mark = |ok: bool| if ok { "✓ 已授权" } else { "✗ 未授权" };
     let msg = format!(
         "屏幕录制：{}\n（截图/OCR 用；缺了只能截到桌面壁纸）\n\n\
-         辅助功能：{}\n（长截图自动滚动用；缺了页面完全不动且不报错）\n\n\
+         辅助功能：{}\n\n\
          ⚠️ 每升级一个版本，adhoc 签名的 cdhash 都会变，旧授权会变成\
          \"勾着但无效\"的僵尸记录 —— 这时要用下面的「重置授权」清一遍再重新勾选。",
         mark(scr),
@@ -2464,6 +2464,7 @@ pub fn discard_long_session(app: &AppHandle, state: &AppState, why: &str) {
     );
     state.long_active.store(false, Ordering::SeqCst);
     unregister_long_esc(app);
+    windows::close_long_preview(app);
 }
 
 /// 会话显示器 ID `"m{idx}"` → `xcap::Monitor::all()` 下标。
@@ -2480,12 +2481,8 @@ fn monitor_index(monitor_id: &str) -> Result<usize, String> {
 /// 长截图进度事件名（前端 `listen("long-capture-progress")`）。
 pub const LONG_EVENT: &str = "long-capture-progress";
 
-/// 驱动循环步数上限：600 步 × 默认 3 行 ≈ 1800 行滚动，
-/// 对应 32000px 的算法高度上限，正常长截图远到不了（防死循环兜底）。
-const LONG_MAX_STEPS: u32 = 600;
-/// 连续 NoMatch 上限（含轻滚重试）：超过即认为页面不再滚动或内容
-/// 被整体替换（切 tab / 无限加载流），收尾出图。
-const LONG_NO_MATCH_GIVE_UP: u32 = 4;
+/// 手动采样步数上限，防止用户长时间不结束会话。
+const LONG_MAX_STEPS: u32 = 3600;
 /// 贴图封顶比例：长图逻辑尺寸相对主屏幅面的上限（0.7 = 70%）。
 const LONG_PIN_MAX_RATIO: f64 = 0.7;
 
@@ -2507,25 +2504,6 @@ pub struct LongProgressPayload {
     pub message: String,
 }
 
-/// 把某个显示器的浮层置顶/取消置顶（macOS 等授权流程用）。
-///
-/// **必须投主线程**：这是 NSWindow 的 level 变更，AppKit 不容许在任意线程上
-/// 改窗口属性（异步命令跑在工作线程上，直接调有崩进程的风险）。这里用非阻塞
-/// 的 `run_on_main_thread`，不占住命令线程。
-#[cfg(target_os = "macos")]
-fn set_overlay_topmost(app: &AppHandle, idx: usize, on_top: bool) {
-    let label = format!("{}{}", windows::OVERLAY_PREFIX, idx);
-    let app_cb = app.clone();
-    let _ = app.run_on_main_thread(move || {
-        if let Some(w) = app_cb.get_webview_window(&label) {
-            let r = w.set_always_on_top(on_top);
-            crate::logln!("[snappin] overlay {label}: always_on_top={on_top} -> {r:?}");
-        } else {
-            crate::logln!("[snappin] overlay {label}: 窗口不存在，跳过置顶变更");
-        }
-    });
-}
-
 /// 长截图：复用当前截图会话的浮层，把选区交给驱动循环自动滚动拼接。
 ///
 /// 流程（重活在 `begin_long_session`，放在阻塞线程里做）：
@@ -2540,7 +2518,6 @@ pub async fn long_capture_start(
     state: State<'_, AppState>,
     monitor_id: String,
     rect: RectPayload,
-    scroll_lines: Option<i32>,
     session_id: Option<u64>,
 ) -> Result<(), String> {
     // 陈旧会话防护（与 confirm_selection 同口径）
@@ -2568,48 +2545,6 @@ pub async fn long_capture_start(
     }
     // monitor_id "m0" → xcap::Monitor::all()[0]（id 即采集下标，见 capture_shot）
     let idx = monitor_index(&monitor_id)?;
-    // macOS 前置：自动滚动靠 CGEventPost，必须先在「辅助功能」里授权。
-    //
-    // 2026-10-27 真机日志：长截图首帧采到 1850px，之后 0 步报"需要辅助功能
-    // 权限"。系统对未授权的 CGEventPost 是**静默丢弃**，如果不在启动前拦住，
-    // 用户看到的是"滚了但页面不动"的灵异现象。
-    //
-    // 0.1.10 真机日志：这里原来 `return Err(...)`，而 Err 只落到前端 console，
-    // 浮层会永远停在"正在启动…"。现在改成发一条 `need-accessibility` 进度事件：
-    // UI 切到"等授权"卡片并轮询 `accessibility_granted`，勾上就自动开跑。
-    #[cfg(target_os = "macos")]
-    {
-        if !snappin_core_platform::has_accessibility_permission() {
-            crate::logln!("[snappin] long capture blocked: 无「辅助功能」权限");
-            // ★ 先把浮层从"永远置顶"降下来。浮层是全屏置顶的不透明冻结图，
-            //   系统设置窗口会被它整块挡住 —— 用户点了「打开系统设置」却什么都
-            //   看不到，这正是"给了权限还是提示没权限"的观感来源。降级后系统
-            //   设置浮在前面，用户能真正去勾选；授权成功后这里再抬回去。
-            set_overlay_topmost(&app, idx, false);
-            crate::commands::prepare_accessibility_grant(&app);
-            emit_long(
-                &app,
-                "need-accessibility",
-                0,
-                0,
-                0.0,
-                "",
-                "需要「辅助功能」权限才能自动滚动。已打开系统设置的「辅助功能」，\
-                 勾选 SnapPin 后这里会自动开始（立即生效，不用重启）",
-            );
-            crate::logln!("[snappin] blocked: need-accessibility emitted, waiting");
-            // 存活心跳：如果下一份日志里没有这一行，就说明进程在"被拦下"这条路
-            // 上 3 秒内就死了（不是用户点按钮之后死的），能直接把范围缩到上面
-            // 那几行之间。
-            std::thread::spawn(|| {
-                std::thread::sleep(std::time::Duration::from_secs(3));
-                crate::logln!("[snappin] blocked: alive 3s after block (no crash here)");
-            });
-            return Ok(());
-        }
-        // 已授权（可能是上一轮被降级后用户勾完再来）：重新置顶，恢复截图浮层
-        set_overlay_topmost(&app, idx, true);
-    }
     // 选区坐标 → 采集坐标系。
     //
     // **两个平台的单位不同，不能一刀切乘 sf**：
@@ -2642,11 +2577,9 @@ pub async fn long_capture_start(
             h: (rect.h * k).round().max(1.0) as u32,
         }
     };
-    let scroll_lines = scroll_lines.unwrap_or(3).clamp(1, 20);
-
     let app2 = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        if let Err(e) = begin_long_session(&app2, idx, cap_rect, scroll_lines) {
+        if let Err(e) = begin_long_session(&app2, idx, cap_rect) {
             eprintln!("[snappin] long capture start failed: {e}");
             emit_long(&app2, "error", 0, 0, 0.0, "", format!("长截图启动失败：{e}"));
         }
@@ -2661,7 +2594,6 @@ fn begin_long_session(
     app: &AppHandle,
     idx: usize,
     rect: AlgoRect,
-    scroll_lines: i32,
 ) -> Result<(), String> {
     let state = app.state::<AppState>();
     // 防重入（命令体已查过一次；await 之间可能有并发启动）
@@ -2677,6 +2609,10 @@ fn begin_long_session(
 
     let excluded = overlay_hwnd != 0
         && snappin_core_platform::stitch::set_hwnd_capture_excluded(overlay_hwnd, true);
+    #[cfg(windows)]
+    if !excluded {
+        return Err("cannot exclude selection border from capture".to_string());
+    }
 
     // ★ 整个拼接期间**不显示浮层**，因此也不需要"抓帧前后隐藏/显示"的回调。
     //
@@ -2710,27 +2646,24 @@ fn begin_long_session(
             monitor.y().unwrap_or(-1),
         );
         crate::logln!(
-            "[snappin] long session: rect=({},{},{}x{}) monitor_origin=({},{}) scroll_point=({},{}) lines={}",
+            "[snappin] long manual session: rect=({},{},{}x{}) monitor_origin=({},{})",
             rect.x,
             rect.y,
             rect.w,
             rect.h,
             ox,
             oy,
-            ox + rect.x + (rect.w / 2) as i32,
-            oy + rect.y + (rect.h / 2) as i32,
-            scroll_lines
         );
     }
     let capture = LongCapture::new(
         monitor,
         rect,
         StitchOptions::for_frame(rect.h),
-        // 起始滚动量按用户选的"行数"折算（一行 ≈ 40px），之后由 step_auto 自适应
-        scroll_lines.max(1) * 40,
+        0,
         hide_ui,
         show_ui,
         Some(stop),
+        true,
     );
     let capture = match capture {
         Ok(c) => c,
@@ -2741,6 +2674,13 @@ fn begin_long_session(
         }
     };
 
+    if let Err(e) = write_thumbnail(capture.canvas(), &thumb) {
+        restore_long_overlay(app, idx, overlay_hwnd, !excluded);
+        return Err(e);
+    }
+    let first_height = capture.height();
+    let first_steps = capture.steps();
+    let thumb_str = thumb.to_string_lossy().to_string();
     *state.long.lock().unwrap() = Some(LongSession {
         capture,
         overlay_idx: idx,
@@ -2749,10 +2689,43 @@ fn begin_long_session(
         preview: None,
         thumb,
     });
+    if let Err(e) = windows::show_only_long_overlay(app, idx) {
+        discard_long_session(app, &state, "selection-border-open-failed");
+        return Err(e);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let id = app
+            .get_webview_window(&overlay_label)
+            .map(|window| overlay_window_number(&window))
+            .and_then(|id| u32::try_from(id).ok())
+            .filter(|id| *id != 0);
+        let Some(id) = id else {
+            discard_long_session(app, &state, "selection-border-id-failed");
+            return Err("selection border window number unavailable".to_string());
+        };
+        if let Some(session) = state.long.lock().unwrap().as_mut() {
+            session.capture.set_excluded_window(id);
+        }
+        crate::logln!("[snappin] long capture below selection border id={id}");
+    }
+    if let Err(e) = windows::show_long_preview(app) {
+        discard_long_session(app, &state, "preview-open-failed");
+        return Err(e);
+    }
     state.long_active.store(true, Ordering::SeqCst);
     register_long_esc(app);
+    emit_long(
+        app,
+        "scrolling",
+        first_height,
+        first_steps,
+        1.0,
+        &thumb_str,
+        "滚动页面继续截图",
+    );
 
-    // 驱动循环：独立阻塞线程，逐步 step() 到底/停止/出错
+    // 手动滚轮驱动循环：独立线程采集页面变化，不接管滚轮。
     let app2 = app.clone();
     tauri::async_runtime::spawn_blocking(move || run_long_driver(&app2));
     Ok(())
@@ -2770,6 +2743,20 @@ pub fn long_capture_stop(state: State<'_, AppState>) -> Result<(), String> {
     }
     state.long_stop.store(true, Ordering::SeqCst);
     Ok(())
+}
+
+#[tauri::command]
+pub fn long_preview_info(state: State<'_, AppState>) -> Result<LongProgressPayload, String> {
+    let guard = state.long.lock().unwrap();
+    let session = guard.as_ref().ok_or_else(|| "long capture session not found".to_string())?;
+    Ok(LongProgressPayload {
+        phase: "scrolling".to_string(),
+        height: session.capture.height(),
+        steps: session.capture.steps(),
+        score: 1.0,
+        thumb: session.thumb.to_string_lossy().to_string(),
+        message: "滚动页面继续截图".to_string(),
+    })
 }
 
 /// 长截图收尾出口：copy=复制到剪贴板 / pin=贴图 / save=保存。
@@ -2961,13 +2948,9 @@ pub async fn long_capture_commit(
     Ok(ConfirmPayload { path: path_str })
 }
 
-/// 长截图驱动循环（阻塞线程）：滚动 → 稳态 → 采集 → 拼接，直到
-/// 到底 / 用户停止 / 连续无匹配 / 出错，然后发 done 事件并还原浮层。
+/// 手动长截图驱动循环：轮询采集页面，用户停止后收尾。
 fn run_long_driver(app: &AppHandle) {
     let state = app.state::<AppState>();
-    let mut no_match = 0u32;
-    let mut initial_still = 0u32;
-    let mut appended_any = false;
     let mut last_score = 0.0f32;
     let mut last_steps = 0u32;
     let mut error: Option<String> = None;
@@ -2987,16 +2970,16 @@ fn run_long_driver(app: &AppHandle) {
                 return;
             };
             let lc = &mut session.capture;
-            // 自适应步进：滚动量（像素）由上一步的结果自动调，见 step_auto
-            let r = lc.step_auto();
+            let r = lc.step_manual();
             match r {
                 Ok(StepOutcome::Stopped) => {
                     reason = "stopped";
                     break 'outer;
                 }
                 Ok(StepOutcome::Stepped(step)) => {
-                    // 缩略图每步覆盖写（240px 宽，几毫秒），前端状态条实时预览
-                    let _ = write_thumbnail(lc.canvas(), &session.thumb);
+                    if step.kind == StitchStepKind::Appended {
+                        let _ = write_thumbnail(lc.canvas(), &session.thumb);
+                    }
                     (step, session.thumb.to_string_lossy().to_string())
                 }
                 Err(e) => {
@@ -3006,32 +2989,17 @@ fn run_long_driver(app: &AppHandle) {
             }
         };
         let (step, thumb) = stepped;
-        // 每步落一行：NoMatch 连出时靠 diff/best_shift 区分三种情况 ——
-        //   ① diff 极小 → 事件没送出去（页面没动）
-        //   ② best_shift 有值但 < min_overlap → 滚了，只是量比预期小
-        //   ③ best_shift 无值且 diff 巨大 → 一帧跨过整个视口（滚太多）
-        // next_px 是**下一步**的滚动量（本轮结果已自适应过）
-        crate::logln!(
-            "[snappin] long step {}: kind={:?} score={:.3} diff={:.2} best_shift={} best_mean={:.4} height={}px next_px={}",
-            step.steps,
-            step.kind,
-            step.score,
-            step.diff,
-            step.best_shift,
-            step.best_mean,
-            step.height,
-            {
-                let g = state.long.lock().unwrap();
-                g.as_ref().map(|s| s.capture.next_px()).unwrap_or(-1)
-            }
-        );
+        if step.kind != StitchStepKind::Still {
+            crate::logln!(
+                "[snappin] long manual step {}: kind={:?} score={:.3} diff={:.2} best_shift={} best_mean={:.4} height={}px",
+                step.steps, step.kind, step.score, step.diff, step.best_shift,
+                step.best_mean, step.height
+            );
+        }
         last_score = step.score;
         last_steps = step.steps;
         match step.kind {
             StitchStepKind::Appended => {
-                no_match = 0;
-                initial_still = 0;
-                appended_any = true;
                 emit_long(
                     app,
                     "scrolling",
@@ -3041,7 +3009,7 @@ fn run_long_driver(app: &AppHandle) {
                     &thumb,
                     // 超长模式：降采样后高度上限翻倍，但清晰度下降，必须让用户看到
                     format!(
-                        "正在拼接… 已 {} px{}",
+                        "滚动页面继续截图 · 已 {} px{}",
                         step.height,
                         if step.scale > 1 {
                             format!("（超长模式 · 清晰度 1/{}）", step.scale)
@@ -3052,7 +3020,6 @@ fn run_long_driver(app: &AppHandle) {
                 );
             }
             StitchStepKind::NoMatch => {
-                no_match += 1;
                 emit_long(
                     app,
                     "scrolling",
@@ -3060,41 +3027,16 @@ fn run_long_driver(app: &AppHandle) {
                     step.steps,
                     step.score,
                     &thumb,
-                    "画面变化中，调整滚动…",
+                    "滚动过快，找不到重叠；请向上滚回已截区域",
                 );
-                if no_match >= LONG_NO_MATCH_GIVE_UP {
-                    error = Some("画面已变化，但找不到可靠的拼接重叠区域".to_string());
-                    break 'outer;
-                }
             }
             StitchStepKind::Still => {
-                if !appended_any {
-                    initial_still += 1;
-                    if initial_still >= 5 {
-                        error = Some("页面没有滚动，请确认选区中心位于可滚动内容上".to_string());
-                        break 'outer;
-                    }
-                }
-                emit_long(
-                    app,
-                    "scrolling",
-                    step.height,
-                    step.steps,
-                    step.score,
-                    &thumb,
-                    if appended_any {
-                        "已到底部，正在收尾…"
-                    } else {
-                        "等待页面滚动…"
-                    },
-                );
-                // 到底判定（连续 still_rounds 轮没动）在算法层
-                if appended_any && step.still_count >= 2 {
-                    reason = "bottom";
-                    break 'outer;
-                }
+                // 手动模式由用户明确结束；静止只降低采样频率。
             }
         }
+        std::thread::sleep(std::time::Duration::from_millis(
+            if step.kind == StitchStepKind::Still { 180 } else { 35 },
+        ));
     }
 
     // 会话可能已被 commit 取走：那就由它收尾，这里什么都不做
@@ -3120,7 +3062,6 @@ fn run_long_driver(app: &AppHandle) {
             "done",
             match reason {
                 "stopped" => "已停止".to_string(),
-                "bottom" => format!("已到底部，共 {height} px"),
                 _ => format!("已完成，共 {height} px"),
             },
         ),
@@ -3134,6 +3075,7 @@ fn run_long_driver(app: &AppHandle) {
         &thumb,
         &message,
     );
+    windows::close_long_preview(app);
     // 诊断：结果面板出现时把屏幕上所有中小窗口打一遍（排查"多出来的灰框"）
     #[cfg(windows)]
     crate::winsnap::log_window_inventory("long-result-shown");
@@ -3357,10 +3299,10 @@ pub fn ocr_result(app: AppHandle) -> OcrResultPayload {
     OcrResultPayload { lines, image }
 }
 
-/// 悬停吸附：返回光标处应高亮的顶层窗口（逻辑坐标 + 标题）。
+/// 悬停吸附：返回光标处应高亮的窗口或子区域（逻辑坐标 + 标题）。
 ///
 /// 前端在"还没出选区"时按 ~15fps 调它，用于高亮鼠标下的窗口；
-/// 单击即选中整个窗口（对标 QQ 截图 / 微信截图的识窗行为）。
+/// 单击即选中高亮区域（对标 QQ 截图 / 微信截图的识窗行为）。
 /// 返回 None 表示光标下只有我们自己的窗口（浮层/悬浮球/菜单），不高亮。
 ///
 /// 实现细节与坑见 `winsnap` 模块：浮层自己是全屏窗口，`WindowFromPoint`
@@ -3415,7 +3357,9 @@ pub fn window_snap(
         Some(s)
     })();
     {
-        let cur = snap.as_ref().map(|s| s.title.clone());
+        let cur = snap.as_ref().map(|s| {
+            format!("{}:{:.0},{:.0},{:.0},{:.0}", s.title, s.x, s.y, s.w, s.h)
+        });
         let mut last = LAST.lock().unwrap();
         let changed = match last.as_ref() {
             None => true,
@@ -3423,8 +3367,9 @@ pub fn window_snap(
         };
         if changed {
             match (&cur, &snap) {
-                (Some(t), Some(s)) => crate::logln!(
-                    "snap target: {t:?} {}x{} at ({}, {})",
+                (Some(_), Some(s)) => crate::logln!(
+                    "snap target: {:?} {}x{} at ({}, {})",
+                    s.title,
                     s.w.round(),
                     s.h.round(),
                     s.x.round(),

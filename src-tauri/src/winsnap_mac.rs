@@ -75,6 +75,8 @@ extern "C" {
     fn CFNumberGetValue(num: CFNumberRef, kind: i32, out: *mut c_void) -> bool;
     fn CFStringGetCString(s: CFStringRef, buf: *mut i8, size: isize, enc: u32) -> bool;
     fn CFRelease(cf: CFTypeRef);
+    fn CFStringCreateWithCString(allocator: CFTypeRef, text: *const i8, encoding: u32)
+        -> CFStringRef;
 
     // CoreGraphics 以全局常量形式导出的字典键
     static kCGWindowBounds: CFStringRef;
@@ -83,6 +85,23 @@ extern "C" {
     static kCGWindowNumber: CFStringRef;
     static kCGWindowOwnerName: CFStringRef;
     static kCGWindowOwnerPID: CFStringRef;
+}
+
+#[link(name = "ApplicationServices", kind = "framework")]
+extern "C" {
+    fn AXUIElementCreateApplication(pid: i32) -> CFTypeRef;
+    fn AXUIElementCopyElementAtPosition(
+        application: CFTypeRef,
+        x: f32,
+        y: f32,
+        element: *mut CFTypeRef,
+    ) -> i32;
+    fn AXUIElementCopyAttributeValue(
+        element: CFTypeRef,
+        attribute: CFStringRef,
+        value: *mut CFTypeRef,
+    ) -> i32;
+    fn AXValueGetValue(value: CFTypeRef, kind: u32, out: *mut c_void) -> bool;
 }
 
 // Objective-C 运行时（`objc_msgSend` / `sel_registerName` 在 libobjc.A.dylib）
@@ -99,6 +118,91 @@ pub struct MacWindow {
     pub w: f64,
     pub h: f64,
     pub title: String,
+}
+
+fn ax_attribute(name: &'static [u8]) -> CFStringRef {
+    unsafe { CFStringCreateWithCString(core::ptr::null(), name.as_ptr().cast(), ENC_UTF8) }
+}
+
+fn ax_rect(element: CFTypeRef, position: CFStringRef, size: CFStringRef) -> Option<CGRect> {
+    let mut position_value: CFTypeRef = core::ptr::null();
+    let mut size_value: CFTypeRef = core::ptr::null();
+    let position_ok = unsafe { AXUIElementCopyAttributeValue(element, position, &mut position_value) == 0 };
+    let size_ok = unsafe { AXUIElementCopyAttributeValue(element, size, &mut size_value) == 0 };
+    let mut origin = CGPoint::default();
+    let mut dimensions = CGSize::default();
+    let valid = position_ok
+        && size_ok
+        && !position_value.is_null()
+        && !size_value.is_null()
+        && unsafe { AXValueGetValue(position_value, 1, (&mut origin as *mut CGPoint).cast()) }
+        && unsafe { AXValueGetValue(size_value, 2, (&mut dimensions as *mut CGSize).cast()) };
+    if !position_value.is_null() {
+        unsafe { CFRelease(position_value) };
+    }
+    if !size_value.is_null() {
+        unsafe { CFRelease(size_value) };
+    }
+    valid.then_some(CGRect { origin, size: dimensions })
+}
+
+/// 在命中应用的辅助功能树中向上找可截图的区域；权限不足时回退整窗。
+fn ax_region(pid: i64, x: f64, y: f64, window: CGRect) -> Option<CGRect> {
+    let app = unsafe { AXUIElementCreateApplication(i32::try_from(pid).ok()?) };
+    if app.is_null() {
+        return None;
+    }
+    let mut element: CFTypeRef = core::ptr::null();
+    let hit = unsafe { AXUIElementCopyElementAtPosition(app, x as f32, y as f32, &mut element) };
+    unsafe { CFRelease(app) };
+    if hit != 0 || element.is_null() {
+        return None;
+    }
+
+    let position = ax_attribute(b"AXPosition\0");
+    let size = ax_attribute(b"AXSize\0");
+    let parent = ax_attribute(b"AXParent\0");
+    if position.is_null() || size.is_null() || parent.is_null() {
+        unsafe { CFRelease(element) };
+        for key in [position, size, parent] {
+            if !key.is_null() {
+                unsafe { CFRelease(key) };
+            }
+        }
+        return None;
+    }
+
+    let window_area = window.size.width * window.size.height;
+    let mut best: Option<CGRect> = None;
+    for _ in 0..16 {
+        if let Some(rect) = ax_rect(element, position, size) {
+            let area = rect.size.width * rect.size.height;
+            if rect.size.width >= 120.0
+                && rect.size.height >= 32.0
+                && area >= 30_000.0
+                && area < window_area * 0.95
+                && rect.origin.x >= window.origin.x - 2.0
+                && rect.origin.y >= window.origin.y - 2.0
+                && rect.origin.x + rect.size.width <= window.origin.x + window.size.width + 2.0
+                && rect.origin.y + rect.size.height <= window.origin.y + window.size.height + 2.0
+            {
+                if best.map_or(true, |current| area < current.size.width * current.size.height) {
+                    best = Some(rect);
+                }
+            }
+        }
+        let mut next: CFTypeRef = core::ptr::null();
+        let status = unsafe { AXUIElementCopyAttributeValue(element, parent, &mut next) };
+        unsafe { CFRelease(element) };
+        if status != 0 || next.is_null() {
+            break;
+        }
+        element = next;
+    }
+    for key in [position, size, parent] {
+        unsafe { CFRelease(key) };
+    }
+    best
 }
 
 fn dict_get(dict: CFDictionaryRef, key: CFStringRef) -> CFTypeRef {
@@ -216,11 +320,12 @@ pub fn snap_at(x: f64, y: f64, mon_x: f64, mon_y: f64, skip: &[isize]) -> Option
             // 无标题窗口（或被系统隐去标题）时退回应用名，比空标签有用
             title = unsafe { dict_string(info, kCGWindowOwnerName) };
         }
+        let region = ax_region(pid, px, py, rect).unwrap_or(rect);
         found = Some(MacWindow {
-            x: rect.origin.x - mon_x,
-            y: rect.origin.y - mon_y,
-            w: rect.size.width,
-            h: rect.size.height,
+            x: region.origin.x - mon_x,
+            y: region.origin.y - mon_y,
+            w: region.size.width,
+            h: region.size.height,
             title,
         });
         break;

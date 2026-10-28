@@ -82,6 +82,10 @@ pub struct LongCapture {
     /// 会话期间系统光标是否被本会话隐藏（决定采集走单帧还是双帧治愈，
     /// 以及 Drop 时要不要恢复显示）。
     cursor_hidden: bool,
+    /// 手动模式由用户滚动网页，不接管鼠标位置或系统光标。
+    manual: bool,
+    /// macOS 预览窗的 CGWindowID；采集它下方的窗口，预览始终可见。
+    excluded_window: Option<u32>,
     /// 帧相对选区的像素倍率（**各平台不同**）。
     ///
     /// - Windows：`capture_region` 收物理像素、返回物理像素 → 1
@@ -107,6 +111,7 @@ impl LongCapture {
         hide_ui: Option<UiCallback>,
         show_ui: Option<UiCallback>,
         stop: Option<Arc<AtomicBool>>,
+        manual: bool,
     ) -> Result<Self, String> {
         if rect.is_empty() {
             return Err("long capture rect is empty".to_string());
@@ -126,9 +131,11 @@ impl LongCapture {
         // 光标策略：先隐藏系统光标，再把光标一次性送到滚动点——隐藏状态下
         // 这次移动用户看不见，也不会被采进帧里。之后整个会话不再动光标，
         // 滚动事件照样能落到光标所在窗口（滚动点）。
-        let cursor_hidden = hide_cursor();
-        set_cursor_pos(scroll_point.0, scroll_point.1);
-        let first = match if cursor_hidden {
+        let cursor_hidden = !manual && hide_cursor();
+        if !manual {
+            set_cursor_pos(scroll_point.0, scroll_point.1);
+        }
+        let first = match if cursor_hidden || manual {
             grab_once(monitor.get(), &rect, &hide_ui, &show_ui)
         } else {
             // 隐藏失败（极少数平台/远程桌面）：退回双帧治愈，保证图里不进光标
@@ -188,6 +195,8 @@ impl LongCapture {
             show_ui,
             stop,
             cursor_hidden,
+            manual,
+            excluded_window: None,
             frame_scale: sx,
         })
     }
@@ -291,6 +300,32 @@ impl LongCapture {
         Ok(StepOutcome::Stepped(step))
     }
 
+    /// 用户滚轮驱动的采集：不注入输入，不等待页面停止后才记录中间帧。
+    /// 快速连续滚动时，中间帧也能为下一帧留下可匹配的重叠。
+    pub fn step_manual(&mut self) -> Result<StepOutcome, String> {
+        if self.is_stopped() {
+            return Ok(StepOutcome::Stopped);
+        }
+        let started = Instant::now();
+        let frame = self.grab_cursorless()?;
+        let capture_ms = started.elapsed().as_millis();
+        let step = self.stitcher.push(&frame).map_err(|e| e.to_string())?;
+        if step.kind != StitchStepKind::Still {
+            eprintln!(
+                "[perf] long manual step={} capture={}ms match={}ms kind={:?}",
+                step.steps,
+                capture_ms,
+                started.elapsed().as_millis() - capture_ms,
+                step.kind
+            );
+        }
+        Ok(StepOutcome::Stepped(step))
+    }
+
+    pub fn set_excluded_window(&mut self, id: u32) {
+        self.excluded_window = Some(id);
+    }
+
     /// 下一步的滚动量（物理像素）。供日志/测试观察自适应过程。
     pub fn next_px(&self) -> i32 {
         self.next_px
@@ -338,7 +373,11 @@ impl LongCapture {
     }
 
     fn grab_cursorless(&self) -> Result<RgbaBuffer, String> {
-        if self.cursor_hidden {
+        #[cfg(target_os = "macos")]
+        if let Some(id) = self.excluded_window {
+            return capture_below_window(self.monitor.get(), &self.rect, id);
+        }
+        if self.cursor_hidden || self.manual {
             // 光标已隐藏：单帧即可，无需治愈
             grab_once(
                 self.monitor.get(),
@@ -357,6 +396,43 @@ impl LongCapture {
             )
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+fn capture_below_window(monitor: &xcap::Monitor, rect: &Rect, window_id: u32) -> Result<RgbaBuffer, String> {
+    use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+    use objc2_core_graphics::{
+        CGDataProvider, CGImage, CGWindowImageOption, CGWindowListCreateImage, CGWindowListOption,
+    };
+
+    let bounds = CGRect {
+        origin: CGPoint {
+            x: monitor.x().map_err(|e| e.to_string())? as f64 + rect.x as f64,
+            y: monitor.y().map_err(|e| e.to_string())? as f64 + rect.y as f64,
+        },
+        size: CGSize { width: rect.w as f64, height: rect.h as f64 },
+    };
+    let image = CGWindowListCreateImage(
+        bounds,
+        CGWindowListOption::OptionOnScreenBelowWindow,
+        window_id,
+        CGWindowImageOption::Default,
+    );
+    let image = image.as_deref().ok_or_else(|| "capture below preview returned no image".to_string())?;
+    let width = CGImage::width(Some(image));
+    let height = CGImage::height(Some(image));
+    let row_bytes = CGImage::bytes_per_row(Some(image));
+    let provider = CGImage::data_provider(Some(image));
+    let data = CGDataProvider::data(provider.as_deref())
+        .ok_or_else(|| "capture below preview returned no pixels".to_string())?;
+    let mut pixels = Vec::with_capacity(width * height * 4);
+    for row in data.chunks_exact(row_bytes) {
+        pixels.extend_from_slice(&row[..width * 4]);
+    }
+    for pixel in pixels.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+    RgbaBuffer::new(width as u32, height as u32, pixels).map_err(|e| e.to_string())
 }
 
 /// 会话结束（正常取出 / 异常丢弃）时恢复系统光标。
@@ -442,12 +518,12 @@ pub fn heal_cursor_at(a: &mut RgbaBuffer, b: &RgbaBuffer, cx: i32, cy: i32, half
     }
 }
 
-/// 保存拼接图的缩略图（宽 ≤ 240px，fast PNG）。
+/// 保存拼接图的缩略图（宽 ≤ 320px，fast PNG）。
 pub fn write_thumbnail(canvas: &RgbaBuffer, path: &Path) -> Result<(), String> {
     use image::imageops::FilterType;
     let img = image::RgbaImage::from_raw(canvas.width, canvas.height, canvas.data.clone())
         .ok_or_else(|| "invalid canvas buffer".to_string())?;
-    let tw = 240.min(canvas.width);
+    let tw = 320.min(canvas.width);
     let th = ((canvas.height as f64 * tw as f64 / canvas.width as f64).round() as u32).max(1);
     let small = image::imageops::resize(&img, tw, th, FilterType::Triangle);
     let buffer = RgbaBuffer::new(tw, th, small.into_raw()).map_err(|e| e.to_string())?;
@@ -705,7 +781,7 @@ fn scroll_wheel_event(px: i32, at: (i32, i32)) -> Result<(), String> {
 
 // ---------------------------------------------------------------- 采集排除（Windows）
 
-/// 把窗口（含全部子窗口，覆盖 WebView2 的 Chrome_WidgetWin）标记为
+/// 把顶层窗口标记为
 /// 「排除出屏幕采集」——窗口照常显示，但不出现在 BitBlt 采集结果里。
 ///
 /// 实测确认对 GDI BitBlt 有效（scripts/test_wda_cursor.ps1）：
@@ -722,54 +798,18 @@ pub fn set_hwnd_capture_excluded(hwnd: isize, excluded: bool) -> bool {
     }
     const WDA_NONE: u32 = 0x0;
     const WDA_EXCLUDEFROMCAPTURE: u32 = 0x11;
-    unsafe {
-        set_hwnd_excluded_recursive(
-            hwnd,
-            if excluded {
-                WDA_EXCLUDEFROMCAPTURE
-            } else {
-                WDA_NONE
-            },
-        )
-    }
-}
-
-#[cfg(windows)]
-unsafe fn set_hwnd_excluded_recursive(hwnd: isize, affinity: u32) -> bool {
     use std::ffi::c_void;
     extern "system" {
         fn SetWindowDisplayAffinity(hwnd: *mut c_void, affinity: u32) -> i32;
-        fn EnumChildWindows(
-            hwnd_parent: *mut c_void,
-            enum_proc: Option<unsafe extern "system" fn(*mut c_void, *mut c_void) -> i32>,
-            param: *mut c_void,
-        ) -> i32;
     }
-    if SetWindowDisplayAffinity(hwnd as *mut c_void, affinity) == 0 {
-        return false;
+    // SetWindowDisplayAffinity only accepts a top-level window. WebView2 child
+    // HWNDs are covered by their parent and fail when passed separately.
+    unsafe {
+        SetWindowDisplayAffinity(
+            hwnd as *mut c_void,
+            if excluded { WDA_EXCLUDEFROMCAPTURE } else { WDA_NONE },
+        ) != 0
     }
-    // 子窗口（WebView2 渲染宿主）也要设：WDA 按 HWND 生效，不自动继承
-    struct Ctx {
-        affinity: u32,
-        all_ok: bool,
-    }
-    unsafe extern "system" fn enum_proc(child: *mut c_void, param: *mut c_void) -> i32 {
-        let ctx = &mut *(param as *mut Ctx);
-        if SetWindowDisplayAffinity(child, ctx.affinity) == 0 {
-            ctx.all_ok = false;
-        }
-        1 // 继续枚举
-    }
-    let mut ctx = Ctx {
-        affinity,
-        all_ok: true,
-    };
-    EnumChildWindows(
-        hwnd as *mut c_void,
-        Some(enum_proc),
-        &mut ctx as *mut Ctx as *mut c_void,
-    );
-    ctx.all_ok
 }
 
 /// 非 Windows 平台无 WDA 等价物，恒 false（调用方走 macOS 隐藏回调）。
@@ -850,11 +890,11 @@ mod tests {
         let path = dir.join("thumb.png");
         write_thumbnail(&canvas, &path).unwrap();
         let back = crate::load_rgba(&path).unwrap();
-        assert_eq!(back.width, 240);
-        assert_eq!(back.height, 900); // 3000 * 240/800
+        assert_eq!(back.width, 320);
+        assert_eq!(back.height, 1200); // 3000 * 320/800
         // 缩略图 (120,0) 应约等于原图 (400,0)（同一梯度位置）
         let a = canvas.pixel(400, 0).unwrap();
-        let b = back.pixel(120, 0).unwrap();
+        let b = back.pixel(160, 0).unwrap();
         for c in 0..3 {
             assert!((a[c] as i32 - b[c] as i32).abs() <= 8, "channel {c} drifted");
         }

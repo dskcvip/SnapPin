@@ -7,6 +7,7 @@ import { OcrWindow } from './windows/OcrWindow'
 import { TranslationWindow } from './windows/TranslationWindow'
 import { PinManagerWindow } from './windows/PinManagerWindow'
 import { LongResultWindow } from './windows/LongResultWindow'
+import { LongPreviewWindow } from './windows/LongPreviewWindow'
 import { getWindowKind } from './lib/windowKind'
 
 /**
@@ -38,6 +39,8 @@ export function App() {
       return <PinManagerWindow />
     case 'longresult':
       return <LongResultWindow />
+    case 'longpreview':
+      return <LongPreviewWindow />
     default:
       return <MainWindow />
   }

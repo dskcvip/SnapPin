@@ -46,12 +46,12 @@
    否则鼠标一进去就"卡"在高亮框上，选区拖不动。 */
 .win-snap {
   position: absolute;
-  /* 5px（用户要求，与选区边框一致）。border-box：外沿精确贴住窗口边界，
+  /* border-box：外沿精确贴住候选区域边界，
      不会因为边框把高亮框画得比目标窗口大一圈。 */
   box-sizing: border-box;
-  border: 5px solid var(--accent, #12a5d8);
+  border: 2px solid var(--accent, #12a5d8);
   border-radius: 2px;
-  background: rgba(18, 165, 216, 0.08);
+  background: transparent;
   box-shadow:
     0 0 0 1px rgba(255, 255, 255, 0.5) inset,
     0 2px 10px rgba(15, 23, 42, 0.12);
@@ -395,11 +395,9 @@
 
 .sel {
   position: absolute;
-  /* 5px（用户要求）：1px/2px 在浅色截图上都不够醒目。
-     **必须 border-box**：边框画在内侧，外沿仍等于真实选区边界，
-     否则视觉框会比实际截取区域大 10px（框选和出图对不上）。 */
+  /* 边框画在内侧，外沿仍等于真实选区边界。 */
   box-sizing: border-box;
-  border: 5px solid var(--brand);
+  border: 2px solid var(--brand);
   /* 只剩内侧那条白线（原外圈阴影已改由 .mask 承担） */
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.35);
   pointer-events: none;
@@ -974,6 +972,19 @@
 .overlay-root.long-result-mode .annotate-wrap,
 .overlay-root.long-wait-mode .annotate-wrap {
   display: none;
+}
+
+.overlay-root.long-running .mask,
+.overlay-root.long-running .win-snap,
+.overlay-root.long-running .sel-size,
+.overlay-root.long-running .handle,
+.overlay-root.long-running .long-bar {
+  display: none;
+}
+
+.overlay-root.long-running .sel {
+  border-color: #ee453d;
+  box-shadow: inset 0 0 0 1px #fff, 0 0 0 1px rgba(0, 0, 0, 0.45);
 }
 
 /* 长截图公共面板外观（与 .ocr-panel 同语言） */

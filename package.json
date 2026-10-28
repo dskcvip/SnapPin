@@ -1,7 +1,7 @@
 {
   "name": "snappin",
   "private": true,
-  "version": "0.1.16",
+  "version": "0.1.17",
   "type": "module",
   "description": "SnapPin - cross-platform screenshot & pin-to-screen desktop tool",
   "scripts": {
@@ -16,6 +16,7 @@
   "dependencies": {
     "@tauri-apps/api": "^2.12.4",
     "@tauri-apps/plugin-dialog": "^2.8.3",
+    "lucide-react": "^1.63.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1"
   },

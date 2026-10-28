@@ -1,4 +1,4 @@
-//! 窗口吸附：光标悬停时找出下方的顶层窗口，供浮层高亮 + 单击选中整窗。
+//! 窗口吸附：光标悬停时找出顶层窗口及其可用子区域。
 //!
 //! 参考行为：QQ 截图 / 微信截图 / Shottr 的"悬停识窗、单击选中"。
 //!
@@ -49,7 +49,7 @@ mod platform {
     }
 
     #[repr(C)]
-    #[derive(Default)]
+    #[derive(Clone, Copy, Default)]
     struct RECT {
         left: i32,
         top: i32,
@@ -61,6 +61,11 @@ mod platform {
     // HWND 在 64 位下是指针宽度的不透明句柄，用 isize 承载。
     extern "system" {
         fn EnumWindows(
+            cb: Option<unsafe extern "system" fn(isize, isize) -> i32>,
+            lparam: isize,
+        ) -> i32;
+        fn EnumChildWindows(
+            hwnd: isize,
             cb: Option<unsafe extern "system" fn(isize, isize) -> i32>,
             lparam: isize,
         ) -> i32;
@@ -235,7 +240,55 @@ mod platform {
         }
     }
 
-    /// 查询吸附窗口。`x/y` 是浮层内的逻辑坐标，`mon_x/mon_y/sf` 是当前显示器
+    /// 资源管理器等应用把内容区、导航栏做成独立子窗口。选取光标下最小的
+    /// 有意义区域；按钮和图标尺寸太小，仍由其上层区域承接吸附。
+    fn region_at_point(root: isize, pt: POINT) -> RECT {
+        struct RegionScan {
+            pt: POINT,
+            root: RECT,
+            best: RECT,
+            best_area: i64,
+        }
+        unsafe extern "system" fn scan_child(hwnd: isize, param: isize) -> i32 {
+            let scan = &mut *(param as *mut RegionScan);
+            if IsWindowVisible(hwnd) == 0 {
+                return 1;
+            }
+            let rect = rect_of(hwnd);
+            let width = rect.right - rect.left;
+            let height = rect.bottom - rect.top;
+            let area = width as i64 * height as i64;
+            let root_area = (scan.root.right - scan.root.left) as i64
+                * (scan.root.bottom - scan.root.top) as i64;
+            if contains(&rect, scan.pt)
+                && width >= 120
+                && height >= 32
+                && area >= 30_000
+                && area < root_area * 95 / 100
+                && area < scan.best_area
+            {
+                scan.best = rect;
+                scan.best_area = area;
+            }
+            1
+        }
+
+        let root_rect = visual_rect(root);
+        let root_area = (root_rect.right - root_rect.left) as i64
+            * (root_rect.bottom - root_rect.top) as i64;
+        let mut scan = RegionScan {
+            pt,
+            root: root_rect,
+            best: root_rect,
+            best_area: root_area,
+        };
+        unsafe {
+            EnumChildWindows(root, Some(scan_child), &mut scan as *mut RegionScan as isize);
+        }
+        scan.best
+    }
+
+    /// 查询吸附区域。`x/y` 是浮层内的逻辑坐标，`mon_x/mon_y/sf` 是当前显示器
     /// 的原点与缩放，用于逻辑 ↔ 物理换算；`skip` 是浮层自己的 HWND。
     pub fn snap_at(
         x: f64,
@@ -248,8 +301,7 @@ mod platform {
         let px = (mon_x + x * sf).round() as i32;
         let py = (mon_y + y * sf).round() as i32;
         let h = window_at_point(POINT { x: px, y: py }, skip)?;
-        // 用 DWM 可见边界：GetWindowRect 含窗口阴影的透明边，框选会多一圈
-        let r = visual_rect(h);
+        let r = region_at_point(h, POINT { x: px, y: py });
         let title = title_of(h);
         // 物理 → 逻辑
         Some(WindowSnap {
@@ -284,7 +336,15 @@ mod platform {
         #[test]
         #[ignore]
         fn manual_probe_desktop() {
-            for (x, y) in [(900.0, 400.0), (100.0, 300.0), (1800.0, 1100.0)] {
+            for (x, y) in [
+                (900.0, 60.0),
+                (900.0, 400.0),
+                (900.0, 600.0),
+                (1100.0, 530.0),
+                (1100.0, 650.0),
+                (1100.0, 900.0),
+                (100.0, 300.0),
+            ] {
                 let s = snap_at(x, y, 0.0, 0.0, 1.0, &[]);
                 println!("probe ({x},{y}) -> {s:?}");
             }

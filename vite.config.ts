@@ -29,6 +29,7 @@ export default defineConfig({
         trans: 'trans.html',
         pinmanager: 'pinmanager.html',
         longresult: 'longresult.html',
+        longpreview: 'longpreview.html',
       },
     },
   },

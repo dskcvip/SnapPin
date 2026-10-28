@@ -325,20 +325,20 @@ export interface LongProgress {
 }
 
 /**
- * 开始长截图：把当前选区交给 Rust 自动滚动拼接。
+ * 开始长截图：用户滚动页面，后台持续采集并拼接。
  * `rect` 为**显示器逻辑像素**（与 confirm_selection 同口径）。
  * 启动失败时也会收到 phase="error" 的进度事件（前端据此复位）。
  */
 export const longCaptureStart = (
   monitorId: string,
   rect: Rect,
-  scrollLines?: number,
   sessionId?: number,
 ): Promise<void> =>
-  timedInvoke('long_capture_start', { monitorId, rect, scrollLines, sessionId })
+  timedInvoke('long_capture_start', { monitorId, rect, sessionId })
 
 /** 停止长截图滚动（Esc / 前端停止按钮）：驱动循环收尾后发 done 事件。 */
 export const longCaptureStop = (): Promise<void> => invoke('long_capture_stop')
+export const longPreviewInfo = (): Promise<LongProgress> => invoke('long_preview_info')
 
 /** macOS「辅助功能」授权是否已生效（等授权卡片轮询用；其它平台恒 true）。 */
 export const accessibilityGranted = (): Promise<boolean> => invoke('accessibility_granted')

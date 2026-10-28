@@ -852,7 +852,7 @@ export function OverlayWindow() {
     }
   }
 
-  /** 长截图（M5）：把当前选区交给 Rust 自动滚动拼接。
+  /** 长截图：用户在网页上滚动，独立预览窗显示实时拼接结果。
    *
    *  启动失败不走 reject：Rust 会补发一条 phase="error" 的进度事件，
    *  UI 统一由事件驱动切到结果面板（避免"命令 reject 与 error 事件"
@@ -871,8 +871,7 @@ export function OverlayWindow() {
     setLongActError(null)
     longOwnerRef.current = true
     try {
-      // 每步 3 行滚轮（一格 ≈ 3 行）：长页面步进太小人肉等不及，太大易丢重叠
-      await longCaptureStart(ctx.monitorId, rect, 3, ctx.sessionId)
+      await longCaptureStart(ctx.monitorId, rect, ctx.sessionId)
     } catch (e) {
       longOwnerRef.current = false
       setLongMode('off')
@@ -1029,7 +1028,7 @@ export function OverlayWindow() {
   const rectRef = useRef<Rect | null>(null)
   rectRef.current = rect
 
-  /** 悬停识窗查询（节流 ~15fps + 乱序丢弃）。只查顶层窗口，
+  /** 悬停识窗查询（节流 ~15fps + 乱序丢弃）。查询窗口和可用子区域，
    *  查不到（光标下只有我们自己的窗口）就清空高亮。 */
   const querySnap = useCallback(
     (x: number, y: number) => {
@@ -1270,7 +1269,7 @@ export function OverlayWindow() {
     )
   }
 
-  const active = draft ?? rect
+  const active = draft ?? hoverWin ?? rect
   const sf = ctx.scaleFactor
   // 冻屏图必须 1:1 落到物理像素上：
   // 冻结图是物理像素尺寸（如 1920×1200），浮层窗口的 CSS 尺寸是逻辑像素
@@ -1375,7 +1374,7 @@ export function OverlayWindow() {
           }}
         >
           <span className="win-snap-label">
-            {hoverWin.title || '窗口'}　{hoverWin.w}×{hoverWin.h}
+            {Math.round(hoverWin.w * sf)} × {Math.round(hoverWin.h * sf)}
           </span>
         </div>
       )}
@@ -1424,13 +1423,13 @@ export function OverlayWindow() {
         </div>
       )}
 
-      {active && (
+      {(draft || rect) && (
         <div
           className={`sel ${rect ? 'sel-final' : ''}`}
-          style={{ left: active.x, top: active.y, width: active.w, height: active.h }}
+          style={{ left: active!.x, top: active!.y, width: active!.w, height: active!.h }}
         >
           <span className="sel-size">
-            {Math.round(active.w * sf)} × {Math.round(active.h * sf)}
+            {Math.round(active!.w * sf)} × {Math.round(active!.h * sf)}
           </span>
           {rect && (
             <>
@@ -1589,7 +1588,7 @@ export function OverlayWindow() {
               </button>
               <button
                 className="sbtn"
-                title="长截图（自动滚动拼接整个页面，Esc 停止）"
+                title="长截图（滚动页面，实时预览；Esc 完成）"
                 disabled={longMode === 'running'}
                 onClick={(e) => {
                   if (!rect) {

@@ -10,6 +10,7 @@ export type WindowKind =
   | 'trans'
   | 'pinmanager'
   | 'longresult'
+  | 'longpreview'
 
 declare global {
   interface Window {
@@ -28,6 +29,7 @@ export function getWindowKind(): WindowKind {
     kind === 'trans' ||
     kind === 'pinmanager' ||
     kind === 'longresult' ||
+    kind === 'longpreview' ||
     kind === 'settings'
   ) {
     return kind

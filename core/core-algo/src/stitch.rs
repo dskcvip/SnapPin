@@ -163,6 +163,7 @@ pub struct Stitcher {
     /// 上一帧（帧差检测用）；None = 还未开始
     prev: Option<RgbaBuffer>,
     still_count: u32,
+    recovering: bool,
     steps: u32,
     /// 行哈希降采样步长（宽 / 此值 = 每行采样列数，至少 16 列）
     hash_step: u32,
@@ -186,6 +187,7 @@ impl Stitcher {
             tail_hashes: Vec::new(),
             prev: None,
             still_count: 0,
+            recovering: false,
             steps: 0,
             hash_step: (first.width / 64).max(1),
             scale: 1,
@@ -265,26 +267,35 @@ impl Stitcher {
         // --- 帧差：与上一轮比整图 ---
         // 尺寸不一致（逻辑上不该发生）按"差异极大"处理：不当静止，继续尝试匹配
         let diff = frame_mean_abs_diff(self.prev.as_ref().unwrap(), frame).unwrap_or(255.0);
-        // 诊断用的全范围最优候选（含 min_overlap 以下），见 find_overlap 注释
-        let (diag_shift, diag_mean) = self.scan_best_shift(&frame_hashes);
-        if diff < self.opts.still_threshold {
+        // 用户滚动过快导致 NoMatch 后可能滚回已截尾部；此时上一帧不同，
+        // 但不能把已有画面当新内容再追加一次。
+        let tail_diff = if self.recovering {
+            canvas_tail_diff(&self.canvas, frame).unwrap_or(255.0)
+        } else {
+            255.0
+        };
+        if diff < self.opts.still_threshold || tail_diff < self.opts.still_threshold {
             // 页面没动：不拼（拼了也是重复行），只累计静止轮次
             self.still_count += 1;
+            if tail_diff < self.opts.still_threshold {
+                self.recovering = false;
+            }
             self.prev = Some(frame.clone());
             return Ok(StitchStep {
                 kind: StitchStepKind::Still,
                 appended: 0,
-                score: (1.0 - diff / 255.0).clamp(0.0, 1.0),
+                score: (1.0 - diff.min(tail_diff) / 255.0).clamp(0.0, 1.0),
                 still_count: self.still_count,
                 height: self.canvas.height,
                 steps: self.steps,
                 scale: self.scale,
                 diff,
-                best_shift: diag_shift,
-                best_mean: diag_mean,
+                best_shift: 0,
+                best_mean: 0.0,
             });
         }
         self.still_count = 0;
+        let (diag_shift, diag_mean) = self.scan_best_shift(&frame_hashes);
 
         // --- 找重叠 ---
         match self.find_overlap(frame, &frame_hashes) {
@@ -299,6 +310,7 @@ impl Stitcher {
                 }
                 self.append_rows(frame, shift, &frame_hashes);
                 self.prev = Some(frame.clone());
+                self.recovering = false;
                 Ok(StitchStep {
                     kind: StitchStepKind::Appended,
                     appended: append_rows,
@@ -315,6 +327,7 @@ impl Stitcher {
             None => {
                 // 不拼，但更新 prev（下一轮的帧差基准）
                 self.prev = Some(frame.clone());
+                self.recovering = true;
                 Ok(StitchStep {
                     kind: StitchStepKind::NoMatch,
                     appended: 0,
@@ -576,6 +589,18 @@ pub fn frame_mean_abs_diff(a: &RgbaBuffer, b: &RgbaBuffer) -> Option<f32> {
     Some(sum as f32 / n)
 }
 
+fn canvas_tail_diff(canvas: &RgbaBuffer, frame: &RgbaBuffer) -> Option<f32> {
+    if canvas.width != frame.width || canvas.height < frame.height {
+        return None;
+    }
+    let tail = &canvas.data[canvas.data.len() - frame.data.len()..];
+    let mut sum = 0u64;
+    for (a, b) in tail.chunks_exact(4).zip(frame.data.chunks_exact(4)) {
+        sum += luma(a).abs_diff(luma(b)) as u64;
+    }
+    Some(sum as f32 / (frame.width as f32 * frame.height as f32))
+}
+
 /// 每行 8 个横向分段的亮度特征；局部变化只影响所在字节。
 /// 返回长度 = height 的向量。
 pub fn row_hashes(img: &RgbaBuffer, step: u32) -> Vec<u64> {
@@ -779,6 +804,17 @@ mod tests {
         assert_eq!(step.kind, StitchStepKind::NoMatch);
         assert_eq!(step.appended, 0);
         assert_eq!(st.height(), 600); // 没拼
+    }
+
+    #[test]
+    fn returning_to_captured_tail_after_no_match_does_not_append() {
+        let page = web_page(600, 320);
+        let unrelated = RgbaBuffer::new(320, 600, vec![128; 320 * 600 * 4]).unwrap();
+        let mut st = Stitcher::new(&page, StitchOptions::for_frame(600)).unwrap();
+        assert_eq!(st.push(&unrelated).unwrap().kind, StitchStepKind::NoMatch);
+        let returned = st.push(&page).unwrap();
+        assert_eq!(returned.kind, StitchStepKind::Still);
+        assert_eq!(st.height(), 600);
     }
 
     #[test]
