@@ -156,7 +156,7 @@ pub struct AppState {    /// 当前配置（磁盘 config.json 的内存镜像�
     /// 长截图是否进行中（不取锁的快照，供全局热键处理器查询——
     /// 主线程不能阻塞在驱动循环持的 `long` 锁上）。
     pub long_active: AtomicBool,
-    /// 收尾时**保留**长截图会话（一次性）。
+    /// 结果窗接管后保留长截图会话，直到提交或关闭。
     ///
     /// 拼接完成 → 结果窗接管（要能保存/复制/贴图）→ 此时必须退出截图模式，
     /// 而退出会走 `end_capture_session` → `discard_long_session` 把会话丢掉，

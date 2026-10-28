@@ -2426,7 +2426,7 @@ async fn save_dialog(
 pub fn discard_long_session(app: &AppHandle, state: &AppState, why: &str) {
     // 结果窗已经接手（拼接完成 → 退出截图模式）时不要丢弃会话，
     // 否则结果窗的保存/复制/贴图全部报 "session not found"。
-    if state.long_keep.swap(false, Ordering::SeqCst) {
+    if state.long_keep.load(Ordering::SeqCst) {
         eprintln!("[snappin] keep long capture for result window (why={why})");
         return;
     }
@@ -2434,6 +2434,7 @@ pub fn discard_long_session(app: &AppHandle, state: &AppState, why: &str) {
     let Some(session) = session else {
         return;
     };
+    state.long_keep.store(false, Ordering::SeqCst);
     eprintln!(
         "[snappin] discard long capture (why={why}, height={}px, steps={})",
         session.capture.height(),
@@ -2548,6 +2549,7 @@ pub async fn long_capture_start(
             }
             crate::logln!("[snappin] long: 丢弃上一轮泄漏的会话（long_active=false）");
             *guard = None;
+            state.long_keep.store(false, Ordering::SeqCst);
         }
     }
     // monitor_id "m0" → xcap::Monitor::all()[0]（id 即采集下标，见 capture_shot）
@@ -2861,6 +2863,7 @@ pub async fn long_capture_commit(
         crate::logln!("[snappin] long commit({action}) failed: session not found");
         return Err("long capture session not found".to_string());
     };
+    state.long_keep.store(false, Ordering::SeqCst);
     crate::logln!(
         "[snappin] long commit({action}) start: {}x{}, {} steps",
         session.capture.canvas().width,

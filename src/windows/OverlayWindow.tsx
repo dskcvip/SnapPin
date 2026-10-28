@@ -189,6 +189,8 @@ const ACTION_LABEL: Record<ShotAction, string> = {
  */
 export function OverlayWindow() {
   const [ctx, setCtx] = useState<OverlayContext | null>(null)
+  const ctxRef = useRef<OverlayContext | null>(null)
+  ctxRef.current = ctx
   const [error, setError] = useState<string | null>(null)
   const [rect, setRect] = useState<Rect | null>(null)
   const [draft, setDraft] = useState<Rect | null>(null)
@@ -272,6 +274,7 @@ export function OverlayWindow() {
   const [longActError, setLongActError] = useState<string | null>(null)
   /** 每次收到 need-accessibility 递增：让轮询 effect 在"手动重试仍失败"时重启 */
   const [longWaitNonce, setLongWaitNonce] = useState(0)
+  const longOwnerRef = useRef(false)
   /** 1×1 取色 Scratch 画布（模块级复用会与其它预览画布抢状态，故随组件） */
   const pickCanvasRef = useRef<HTMLCanvasElement | null>(null)
   /** 冻结图的 ImageBitmap（Rust 读字节 → Blob → 解码）。
@@ -591,10 +594,11 @@ export function OverlayWindow() {
   // ① Rust 关闭全部浮层并清空会话；② 本窗口自关；
   // ③ 其余浮层轮询发现会话结束（ready true→false）也会自关。
   const exitCapture = async () => {
-    uiLog(`exitCapture session=${ctx?.sessionId}`)
+    const sessionId = ctxRef.current?.sessionId
+    uiLog(`exitCapture session=${sessionId}`)
     try {
       // 带上本会话代号：Rust 会忽略上一轮迟到的取消，避免误杀新会话
-      await cancelCapture(ctx?.sessionId)
+      await cancelCapture(sessionId)
     } catch {
       /* 忽略：交由自关兜底 */
     }
@@ -865,10 +869,13 @@ export function OverlayWindow() {
     setLongMode('running')
     setLongProgress(null)
     setLongActError(null)
+    longOwnerRef.current = true
     try {
       // 每步 3 行滚轮（一格 ≈ 3 行）：长页面步进太小人肉等不及，太大易丢重叠
       await longCaptureStart(ctx.monitorId, rect, 3, ctx.sessionId)
     } catch (e) {
+      longOwnerRef.current = false
+      setLongMode('off')
       uiLog(`long start failed: ${String(e)}`)
     }
   }
@@ -893,9 +900,11 @@ export function OverlayWindow() {
   useEffect(() => {
     let unlisten: (() => void) | undefined
     listen<LongProgress>('long-capture-progress', (ev) => {
+      if (!longOwnerRef.current) return
       const p = ev.payload
       setLongProgress(p)
       if (p.phase === 'done') {
+        longOwnerRef.current = false
         uiLog(`long done: ${p.message} (${p.height}px, ${p.steps} steps)`)
         // 拼接完成 → 结果交给独立结果窗，并**退出截图模式**。
         // 顺序不能反：long_result_open 会先置位"保留会话"，之后再关浮层，
@@ -919,6 +928,7 @@ export function OverlayWindow() {
         return
       }
       if (p.phase === 'error') {
+        longOwnerRef.current = false
         // 出错时留在浮层面板里显示原因（用户要能看到失败信息）
         setLongMode('result')
         uiLog(`long error: ${p.message} (${p.height}px, ${p.steps} steps)`)
