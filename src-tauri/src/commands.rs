@@ -2468,9 +2468,6 @@ pub const LONG_EVENT: &str = "long-capture-progress";
 /// 驱动循环步数上限：600 步 × 默认 3 行 ≈ 1800 行滚动，
 /// 对应 32000px 的算法高度上限，正常长截图远到不了（防死循环兜底）。
 const LONG_MAX_STEPS: u32 = 600;
-/// 连续 NoMatch 达到此次数后改为轻滚（1 行）重试——大跨度滚动后
-/// 页面常有惯性/动画，小步滚动更容易重新建立重叠。
-const LONG_NO_MATCH_RETRY: u32 = 2;
 /// 连续 NoMatch 上限（含轻滚重试）：超过即认为页面不再滚动或内容
 /// 被整体替换（切 tab / 无限加载流），收尾出图。
 const LONG_NO_MATCH_GIVE_UP: u32 = 4;
@@ -2711,7 +2708,8 @@ fn begin_long_session(
         monitor,
         rect,
         StitchOptions::for_frame(rect.h),
-        scroll_lines,
+        // 起始滚动量按用户选的"行数"折算（一行 ≈ 40px），之后由 step_auto 自适应
+        scroll_lines.max(1) * 40,
         hide_ui,
         show_ui,
         Some(stop),
@@ -2968,11 +2966,8 @@ fn run_long_driver(app: &AppHandle) {
                 return;
             };
             let lc = &mut session.capture;
-            let r = if no_match >= LONG_NO_MATCH_RETRY {
-                lc.step(1)
-            } else {
-                lc.step_default()
-            };
+            // 自适应步进：滚动量（像素）由上一步的结果自动调，见 step_auto
+            let r = lc.step_auto();
             match r {
                 Ok(StepOutcome::Stopped) => {
                     reason = "stopped";
@@ -2994,8 +2989,9 @@ fn run_long_driver(app: &AppHandle) {
         //   ① diff 极小 → 事件没送出去（页面没动）
         //   ② best_shift 有值但 < min_overlap → 滚了，只是量比预期小
         //   ③ best_shift 无值且 diff 巨大 → 一帧跨过整个视口（滚太多）
+        // next_px 是**下一步**的滚动量（本轮结果已自适应过）
         crate::logln!(
-            "[snappin] long step {}: kind={:?} score={:.3} diff={:.2} best_shift={} best_mean={:.4} height={}px light={}",
+            "[snappin] long step {}: kind={:?} score={:.3} diff={:.2} best_shift={} best_mean={:.4} height={}px next_px={}",
             step.steps,
             step.kind,
             step.score,
@@ -3003,7 +2999,10 @@ fn run_long_driver(app: &AppHandle) {
             step.best_shift,
             step.best_mean,
             step.height,
-            no_match >= LONG_NO_MATCH_RETRY
+            {
+                let g = state.long.lock().unwrap();
+                g.as_ref().map(|s| s.capture.next_px()).unwrap_or(-1)
+            }
         );
         last_score = step.score;
         last_steps = step.steps;

@@ -70,8 +70,11 @@ pub struct LongCapture {
     /// 滚轮发送点 / 光标停留点（**绝对物理像素**，Windows 虚拟桌面坐标）
     scroll_point: (i32, i32),
     stitcher: Stitcher,
-    /// 每步默认滚轮格数（一格 ≈ 120 delta ≈ 3 行）
-    scroll_lines: i32,
+    /// 下一步滚动量（**物理像素**，自适应调整，见 `step_auto`）
+    next_px: i32,
+    /// 滚动量下限 / 上限（上限 = 3/4 帧高：再大就没有可拼的重叠了）
+    min_px: i32,
+    max_px: i32,
     hide_ui: Option<UiCallback>,
     show_ui: Option<UiCallback>,
     /// 外部停止标志（用户按 Esc 时置位；None = 不可中断，测试用）
@@ -99,7 +102,8 @@ impl LongCapture {
         monitor: xcap::Monitor,
         rect: Rect,
         opts: StitchOptions,
-        scroll_lines: i32,
+        // 起始滚动量（物理像素）；之后由 `step_auto` 按拼接结果自适应
+        init_px: i32,
         hide_ui: Option<UiCallback>,
         show_ui: Option<UiCallback>,
         stop: Option<Arc<AtomicBool>>,
@@ -172,7 +176,11 @@ impl LongCapture {
             rect,
             scroll_point,
             stitcher,
-            scroll_lines: scroll_lines.max(1),
+            // 起始步进由调用方给（默认 1/6 帧高），夹在 [8, 3/4 帧高]：
+            // 太大没有可拼重叠，太小一步几乎看不出滚动。之后 step_auto 自适应。
+            next_px: init_px.clamp(8, (rect.h / 4 * 3).max(64) as i32),
+            min_px: 8,
+            max_px: (rect.h / 4 * 3).max(64) as i32,
             hide_ui,
             show_ui,
             stop,
@@ -223,28 +231,41 @@ impl LongCapture {
         stitcher.into_canvas()
     }
 
-    /// 推进一步：滚动 → 等稳态 → 采集 → 拼接。
+    /// 推进一步：滚动 → 等稳态 → 采集 → 拼接 → **按结果自适应下一步滚动量**。
     ///
-    /// `lines` 覆盖默认格数（NoMatch 重试时调用方传 1 轻滚）。
+    /// 为什么自适应：不同浏览器/不同页面对同一个合成滚轮事件的实际滚动量差异
+    /// 极大（0.1.13 真机上 Chrome 对同一事件的反应和系统 App 完全不同），固定
+    /// "3 行"不是滚太少（页面几乎不动、重叠超出匹配范围）就是滚太多（一帧跨过
+    /// 半个视口、没有重叠可拼）。这里用上一步的拼接结果自动调：
+    /// - `Appended` 拼上了 → 步进不变（已经合适）；
+    /// - `Still` 画面没动 → 步进 ×2（上限 3/4 帧高）；
+    /// - `NoMatch` 拼不上 → 步进 ÷2（下限 8px）。
+    ///
     /// 等待稳态期间若 `stop` 被置位，返回 `StepOutcome::Stopped`（本步作废，
     /// 拼接器保持原状，调用方应结束会话并取 `into_canvas()`）。
     ///
     /// 光标在 `new()` 时已一次性送到滚动点并隐藏，本函数**不再碰光标**：
     /// 旧实现每步 `SetCursorPos` 一次、每帧瞬移两次，是"屏幕不停闪"的主因。
-    pub fn step(&mut self, lines: i32) -> Result<StepOutcome, String> {
-        scroll_wheel(lines, self.scroll_point)?;
+    pub fn step_auto(&mut self) -> Result<StepOutcome, String> {
+        let px = self.next_px;
+        scroll_wheel_px(px, self.scroll_point)?;
         let frame = match self.grab_stable()? {
             Some(f) => f,
             None => return Ok(StepOutcome::Stopped),
         };
         let step = self.stitcher.push(&frame).map_err(|e| e.to_string())?;
+        // 自适应：只在上一次失败的方向上调整，成功就稳住
+        self.next_px = match step.kind {
+            StitchStepKind::Appended => self.next_px,
+            StitchStepKind::Still => (self.next_px * 2).min(self.max_px),
+            StitchStepKind::NoMatch => (self.next_px / 2).max(self.min_px),
+        };
         Ok(StepOutcome::Stepped(step))
     }
 
-    /// 用默认格数推进一步。
-    pub fn step_default(&mut self) -> Result<StepOutcome, String> {
-        let lines = self.scroll_lines;
-        self.step(lines)
+    /// 下一步的滚动量（物理像素）。供日志/测试观察自适应过程。
+    pub fn next_px(&self) -> i32 {
+        self.next_px
     }
 
     // ---------------------------------------------------------------- 采集
@@ -499,7 +520,7 @@ pub fn set_cursor_pos(x: i32, y: i32) {
     }
 }
 
-/// 注入滚轮事件（向下滚动 `lines` 格）。
+/// 注入滚轮事件，向下滚动 `px` **物理像素**（自适应步进的唯一入口）。
 ///
 /// 调用前光标应已位于滚动点（`new()` 里一次性送过去并隐藏）。
 ///
@@ -507,14 +528,22 @@ pub fn set_cursor_pos(x: i32, y: i32) {
 /// Windows 用"当前光标位置"即可（调用方已提前把光标送过去），`at` 只被
 /// macOS 用来显式设置合成事件的发生点 —— 否则事件默认落在 (0,0)，
 /// 系统会把滚轮投给屏幕左上角的窗口而不是目标页面。
-pub fn scroll_wheel(lines: i32, at: (i32, i32)) -> Result<(), String> {
-    let lines = lines.max(1);
+///
+/// 为什么用像素而不是"格"：Windows 一格 = 120 delta ≈ 3 行 ≈ 120px，但 macOS 上
+/// "行"是个与 App 相关的抽象（系统偏好里 1~3 行可调，浏览器还会再乘），同一个
+/// 事件在不同页面上实际滚出来的距离能差出几倍 —— 固定格数必然导致"滚太少拼不上"
+/// 或"滚太多没重叠"。像素是唯一可预测、可自适应的单位。
+pub fn scroll_wheel_px(px: i32, at: (i32, i32)) -> Result<(), String> {
+    let px = px.max(1);
     #[cfg(not(target_os = "macos"))]
     let _ = at;
     #[cfg(windows)]
     {
+        // Windows 只有"格"这个单位：120 delta = 一格 ≈ 3 行。向上取整到整格，
+        // 至少滚一格，否则和没滚没区别。
         const MOUSEEVENTF_WHEEL: u32 = 0x0800;
         const WHEEL_DELTA: i32 = 120;
+        let lines = (px / WHEEL_DELTA).max(1);
         extern "system" {
             fn mouse_event(dw_flags: u32, dx: i32, dy: i32, dw_data: u32, dw_extra_info: usize);
         }
@@ -527,22 +556,32 @@ pub fn scroll_wheel(lines: i32, at: (i32, i32)) -> Result<(), String> {
     }
     #[cfg(target_os = "macos")]
     {
-        // **单位用像素，不用"行"**。
-        //
-        // 0.1.12 真机（macOS 13.6.6 / Chrome）第一次真正跑到自动滚动：辅助功能
-        // 权限已 true、事件也 post 出去了，但页面一步都不动 —— 三次长截图都是
-        // `已到底部，共 1850 px`（= 选区高度，一屏都没拼上）。
-        //
-        // 原因是 Chromium / WebKit 计算滚动量看的是 **NSEvent.scrollingDeltaY**
-        // （对应 CGEvent 的 point delta 字段），而
-        // `CGEventCreateScrollWheelEvent(kCGScrollEventUnitLine, ...)` 只填了
-        // **line delta**。对真实鼠标两者都会填，所以系统自带 App 看起来能用；
-        // 合成事件只填 line delta 时，浏览器视作 0 像素滚动 —— 与"没权限"的
-        // 表现一模一样，极易误判。这里改成 pixel 单位，并把 line / point /
-        // fixed-point 三个 delta 字段都显式写一遍，尽量贴近真实滚轮事件。
+        let _ = px; // macOS 直接用像素，无需换算
+        scroll_wheel_event(px, at)
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let _ = (px, at);
+        Err("当前平台暂不支持自动滚动，请使用手动滚动模式".to_string())
+    }
+}
+
+/// macOS：合成一个**像素增量**的滚轮事件并投到 HID tap。
+///
+/// 0.1.12 真机第一次真正跑到自动滚动时：权限有、事件也 post 出去了，页面却一步
+/// 不动。根因是 `CGEventCreateScrollWheelEvent(kCGScrollEventUnitLine, ...)` 只填
+/// **line delta**，而 Chromium/WebKit 读的是 **point delta**
+/// （NSEvent.scrollingDeltaY）—— 真实鼠标两个字段都填，合成事件只填一个时浏览器
+/// 视作 0px。所以这里单位用 pixel，并把 line / point / fixed-point 三个 delta 与
+/// `is_continuous` 一起显式写全。
+#[cfg(target_os = "macos")]
+fn scroll_wheel_event(px: i32, at: (i32, i32)) -> Result<(), String> {
+    {
+        // **单位用像素**（见 `scroll_wheel_px` 的说明）：Chrome / Safari 只认
+        // point delta，line delta 对它们等于 0px。
         const K_CG_SCROLL_EVENT_UNIT_PIXEL: u32 = 0;
         const K_CG_HID_EVENT_TAP: u32 = 0; // CGEventTapLocation 枚举首项
-        // 一格滚轮 ≈ 40px（macOS 常见的"一行"像素当量）
+        // line delta 按"一行 ≈ 40px"折算，只为兼容读 line delta 的老 App
         const PX_PER_LINE: i32 = 40;
         // CGEventField 的字段号（CGEventTypes.h）
         const F_DELTA_AXIS1: u32 = 11;
@@ -577,8 +616,9 @@ pub fn scroll_wheel(lines: i32, at: (i32, i32)) -> Result<(), String> {
                     .to_string(),
             );
         }
-        // 负值 = 向后（向下）滚
-        let px = -lines * PX_PER_LINE;
+        // 负值 = 向后（向下）滚；调用方传入的是"向下多少像素"
+        let px = -px;
+        let lines = (px.abs() / PX_PER_LINE).max(1);
         unsafe {
             let event = CGEventCreateScrollWheelEvent(
                 std::ptr::null(),
