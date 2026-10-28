@@ -49,7 +49,7 @@
   /* border-box：外沿精确贴住候选区域边界，
      不会因为边框把高亮框画得比目标窗口大一圈。 */
   box-sizing: border-box;
-  border: 2px solid var(--accent, #12a5d8);
+  border: 3px solid var(--selection-border, #1688f0);
   border-radius: 2px;
   background: transparent;
   box-shadow:
@@ -65,7 +65,7 @@
   bottom: calc(100% + 3px);
   padding: 2px 7px;
   border-radius: 4px;
-  background: var(--accent, #12a5d8);
+  background: var(--selection-border, #1688f0);
   color: #fff;
   font-size: 11px;
   line-height: 1.5;
@@ -397,7 +397,7 @@
   position: absolute;
   /* 边框画在内侧，外沿仍等于真实选区边界。 */
   box-sizing: border-box;
-  border: 2px solid var(--brand);
+  border: 3px solid var(--selection-border, #1688f0);
   /* 只剩内侧那条白线（原外圈阴影已改由 .mask 承担） */
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.35);
   pointer-events: none;
@@ -407,7 +407,7 @@
 .sel-final {
   /* 定稿后**不再用白色**：5px 白边框压在白底内容上几乎看不见
      （用户要的是"更容易查看"）。保持品牌蓝 + 内侧一道白线做对比。 */
-  border-color: var(--brand);
+  border-color: var(--selection-border, #1688f0);
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.85);
 }
 
@@ -983,7 +983,7 @@
 }
 
 .overlay-root.long-running .sel {
-  border-color: #ee453d;
+  border-color: var(--selection-border, #1688f0);
   box-shadow: inset 0 0 0 1px #fff, 0 0 0 1px rgba(0, 0, 0, 0.45);
 }
 

@@ -296,6 +296,7 @@ impl LongCapture {
             StitchStepKind::Appended => self.next_px,
             StitchStepKind::Still => (self.next_px * 2).min(self.max_px),
             StitchStepKind::NoMatch => (self.next_px / 2).max(self.min_px),
+            StitchStepKind::Rewound => self.next_px,
         };
         Ok(StepOutcome::Stepped(step))
     }

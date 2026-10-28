@@ -1269,7 +1269,7 @@ export function OverlayWindow() {
     )
   }
 
-  const active = draft ?? hoverWin ?? rect
+  const active = draft ?? rect ?? hoverWin
   const sf = ctx.scaleFactor
   // 冻屏图必须 1:1 落到物理像素上：
   // 冻结图是物理像素尺寸（如 1920×1200），浮层窗口的 CSS 尺寸是逻辑像素

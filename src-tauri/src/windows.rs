@@ -870,12 +870,30 @@ pub fn show_long_result(app: &AppHandle) -> Result<(), String> {
 
 /// 长截图进行时的右下角缩略预览。独立于截图浮层，网页仍可接收滚轮。
 pub fn show_long_preview(app: &AppHandle) -> Result<(), String> {
+    // close_long_preview is posted to the main thread. A new capture can start
+    // before that post runs, so wait for the old WebView to be removed.
+    if app.get_webview_window(LONG_PREVIEW_LABEL).is_some() {
+        run_on_main(app, |app| {
+            if let Some(win) = app.get_webview_window(LONG_PREVIEW_LABEL) {
+                let _ = win.close();
+            }
+        });
+        for _ in 0..40 {
+            if app.get_webview_window(LONG_PREVIEW_LABEL).is_none() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        if app.get_webview_window(LONG_PREVIEW_LABEL).is_some() {
+            return Err("previous long preview window did not close".to_string());
+        }
+    }
     let (tx, rx) = mpsc::channel();
     let app_cb = app.clone();
     app.run_on_main_thread(move || {
         let result = (|| {
             if app_cb.get_webview_window(LONG_PREVIEW_LABEL).is_some() {
-                return Ok(());
+                return Err("previous long preview window still exists".to_string());
             }
             let (x, y, h) = if let Some(m) = app_cb.primary_monitor().map_err(|e| e.to_string())? {
                 let sf = m.scale_factor();
@@ -923,10 +941,15 @@ pub fn show_long_preview(app: &AppHandle) -> Result<(), String> {
                 }
             }
             let app_close = app_cb.clone();
+            let capture_session = app_cb.state::<AppState>().session.load(Ordering::SeqCst);
             win.on_window_event(move |event| {
                 if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
                     let state = app_close.state::<AppState>();
-                    state.long_stop.store(true, Ordering::SeqCst);
+                    if state.session.load(Ordering::SeqCst) == capture_session
+                        && state.long_active.load(Ordering::SeqCst)
+                    {
+                        state.long_stop.store(true, Ordering::SeqCst);
+                    }
                 }
             });
             Ok(())

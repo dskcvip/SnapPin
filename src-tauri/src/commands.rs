@@ -2448,6 +2448,7 @@ pub fn discard_long_session(app: &AppHandle, state: &AppState, why: &str) {
     let Some(session) = session else {
         return;
     };
+    let _ = std::fs::remove_file(&session.thumb);
     state.long_keep.store(false, Ordering::SeqCst);
     eprintln!(
         "[snappin] discard long capture (why={why}, height={}px, steps={})",
@@ -2802,6 +2803,9 @@ pub async fn long_result_open(app: AppHandle, state: State<'_, AppState>) -> Res
         }
     };
     crate::logln!("[snappin] long result → {}", path.display());
+    if let Some(session) = state.long.lock().unwrap().as_ref() {
+        let _ = std::fs::remove_file(&session.thumb);
+    }
 
     // 2) 置位"保留会话"：紧随其后的 exitCapture 会走 discard_long_session
     state.long_keep.store(true, Ordering::SeqCst);
@@ -2842,6 +2846,7 @@ pub async fn long_result_close(app: AppHandle, state: State<'_, AppState>) -> Re
     let dropped = state.long.lock().unwrap().take();
     match dropped {
         Some(session) => {
+            let _ = std::fs::remove_file(&session.thumb);
             // 直接丢弃即可：LongCapture 的 Drop 会恢复系统光标、还原浮层状态
             drop(session);
             crate::logln!("[snappin] long result closed, session dropped");
@@ -2866,6 +2871,7 @@ pub async fn long_capture_commit(
         crate::logln!("[snappin] long commit({action}) failed: session not found");
         return Err("long capture session not found".to_string());
     };
+    let _ = std::fs::remove_file(&session.thumb);
     state.long_keep.store(false, Ordering::SeqCst);
     crate::logln!(
         "[snappin] long commit({action}) start: {}x{}, {} steps",
@@ -3028,6 +3034,17 @@ fn run_long_driver(app: &AppHandle) {
                     step.score,
                     &thumb,
                     "滚动过快，找不到重叠；请向上滚回已截区域",
+                );
+            }
+            StitchStepKind::Rewound => {
+                emit_long(
+                    app,
+                    "scrolling",
+                    step.height,
+                    step.steps,
+                    step.score,
+                    &thumb,
+                    "已向上滚动；回到已截末尾后继续向下滚动",
                 );
             }
             StitchStepKind::Still => {
