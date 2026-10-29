@@ -73,6 +73,7 @@ static void SPStop(SPLongStream *session) {
         dispatch_semaphore_signal(done);
     }];
     dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC));
+    session.stream = nil;
 }
 
 void *snappin_long_stream_start(uint32_t displayID, double x, double y, double width, double height,

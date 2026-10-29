@@ -241,15 +241,22 @@ mod native {
         pub fn next(&self) -> Result<Option<(StreamFrame, usize, u64)>, String> {
             self.context.pop()
         }
+
+        pub fn stop(&mut self) {
+            if !self.handle.is_null() {
+                unsafe {
+                    snappin_long_stream_stop(self.handle);
+                }
+                self.handle = std::ptr::null_mut();
+                eprintln!("[snappin] mac long stream stopped");
+            }
+        }
     }
 
     impl Drop for MacCaptureStream {
         fn drop(&mut self) {
+            self.stop();
             self.context.close();
-            unsafe {
-                snappin_long_stream_stop(self.handle);
-            }
-            eprintln!("[snappin] mac long stream stopped");
         }
     }
 }

@@ -262,6 +262,23 @@ impl LongCapture {
         }
     }
 
+    /// Finish consumes frames already captured before the user's stop. Cancellation
+    /// drops the session instead, clearing its queue without producing a result.
+    pub fn finish_manual(&mut self) -> Result<(), String> {
+        #[cfg(target_os = "macos")]
+        if let Some(mut stream) = self.stream.take() {
+            stream.stop();
+            let mut drained = 0u32;
+            while let Some((frame, _, _)) = stream.next()? {
+                self.stitcher.push(&frame.image).map_err(|e| e.to_string())?;
+                drained += 1;
+            }
+            eprintln!("[perf] long stream finish drained={} height={}px", drained, self.height());
+        }
+        self.restore_cursor();
+        Ok(())
+    }
+
     /// 结束会话，取出最终长图。
     ///
     /// Field guards stop the stream and restore the cursor on every exit path.

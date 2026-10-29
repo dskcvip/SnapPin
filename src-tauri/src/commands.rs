@@ -3111,7 +3111,9 @@ fn run_long_driver(app: &AppHandle) {
         guard
             .as_mut()
             .map(|s| {
-                s.capture.restore_cursor();
+                if let Err(e) = s.capture.finish_manual() { error = Some(e); }
+                last_steps = s.capture.steps();
+                let _ = write_thumbnail(s.capture.canvas(), &s.thumb);
                 (s.capture.height(), s.thumb.to_string_lossy().to_string())
             })
     };
