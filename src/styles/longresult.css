@@ -122,7 +122,6 @@
   max-width: none;
   max-height: none;
   margin: 0 auto;
-  image-rendering: -webkit-optimize-contrast;
 }
 
 .lr-img {

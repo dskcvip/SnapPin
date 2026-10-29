@@ -81,7 +81,7 @@ pub enum StitchStepKind {
     NoMatch,
     /// 帧与上一轮几乎相同：页面没动（可能到底）
     Still,
-    /// 画面向上回滚；保留当前结果，等待再次滚到已截末尾。
+    /// 画面仍在已截范围内；不改变结果。
     Rewound,
 }
 
@@ -166,7 +166,8 @@ pub struct Stitcher {
     prev: Option<RgbaBuffer>,
     still_count: u32,
     recovering: bool,
-    rewinding: bool,
+    /// 上一帧顶部相对当前画布顶部的位置。
+    viewport_top: u32,
     steps: u32,
     /// 行哈希降采样步长（宽 / 此值 = 每行采样列数，至少 16 列）
     hash_step: u32,
@@ -191,7 +192,7 @@ impl Stitcher {
             prev: None,
             still_count: 0,
             recovering: false,
-            rewinding: false,
+            viewport_top: 0,
             steps: 0,
             hash_step: (first.width / 64).max(1),
             scale: 1,
@@ -233,6 +234,7 @@ impl Stitcher {
         if let Some(prev) = self.prev.take() {
             self.prev = downscale_by(&prev, 2).ok();
         }
+        self.viewport_top /= 2;
         self.rebuild_tail_hashes();
         true
     }
@@ -301,12 +303,30 @@ impl Stitcher {
         self.still_count = 0;
         let (diag_shift, diag_mean) = self.scan_best_shift(&frame_hashes);
 
-        if self.is_upward_frame(frame, &frame_hashes) {
+        let upward = self.match_previous(frame, true);
+        let downward = self.match_previous(frame, false);
+        if let Some(shift) = upward.filter(|up| downward.is_none_or(|down| *up > down)) {
+            let moved = frame.height - shift;
+            let prepend = moved.saturating_sub(self.viewport_top);
+            if self.canvas.height as u64 + prepend as u64 > self.opts.max_height as u64 {
+                self.steps -= 1;
+                return Err(AlgoError::TooTall {
+                    max: self.opts.max_height,
+                });
+            }
+            if prepend > 0 {
+                self.prepend_rows(frame, prepend);
+            }
+            self.viewport_top = self.viewport_top + prepend - moved;
             self.prev = Some(frame.clone());
-            self.rewinding = true;
+            self.recovering = false;
             return Ok(StitchStep {
-                kind: StitchStepKind::Rewound,
-                appended: 0,
+                kind: if prepend > 0 {
+                    StitchStepKind::Appended
+                } else {
+                    StitchStepKind::Rewound
+                },
+                appended: prepend,
                 score: 1.0,
                 still_count: 0,
                 height: self.canvas.height,
@@ -318,24 +338,31 @@ impl Stitcher {
             });
         }
 
+        if self.viewport_top + frame.height < self.canvas.height {
+            if let Some(shift) = downward {
+                let next_top = self.viewport_top + frame.height - shift;
+                if next_top + frame.height <= self.canvas.height {
+                    self.viewport_top = next_top;
+                    self.prev = Some(frame.clone());
+                    self.recovering = false;
+                    return Ok(StitchStep {
+                        kind: StitchStepKind::Rewound,
+                        appended: 0,
+                        score: 1.0,
+                        still_count: 0,
+                        height: self.canvas.height,
+                        steps: self.steps,
+                        scale: self.scale,
+                        diff,
+                        best_shift: diag_shift,
+                        best_mean: diag_mean,
+                    });
+                }
+            }
+        }
+
         // --- 找重叠 ---
         match self.find_overlap(frame, &frame_hashes) {
-            Some((shift, _)) if self.rewinding && shift < frame.height / 2 => {
-                self.prev = Some(frame.clone());
-                self.recovering = true;
-                Ok(StitchStep {
-                    kind: StitchStepKind::Rewound,
-                    appended: 0,
-                    score: 0.0,
-                    still_count: 0,
-                    height: self.canvas.height,
-                    steps: self.steps,
-                    scale: self.scale,
-                    diff,
-                    best_shift: diag_shift,
-                    best_mean: diag_mean,
-                })
-            }
             Some((shift, score)) => {
                 let append_rows = frame.height - shift;
                 if self.canvas.height as u64 + append_rows as u64 > self.opts.max_height as u64 {
@@ -346,9 +373,9 @@ impl Stitcher {
                     });
                 }
                 self.append_rows(frame, shift, &frame_hashes);
+                self.viewport_top = self.canvas.height - frame.height;
                 self.prev = Some(frame.clone());
                 self.recovering = false;
-                self.rewinding = false;
                 Ok(StitchStep {
                     kind: StitchStepKind::Appended,
                     appended: append_rows,
@@ -434,6 +461,16 @@ impl Stitcher {
             let drop = self.tail_hashes.len() - keep;
             self.tail_hashes.drain(0..drop);
         }
+    }
+
+    fn prepend_rows(&mut self, frame: &RgbaBuffer, rows: u32) {
+        let bytes = rows as usize * self.width as usize * 4;
+        let mut data = Vec::with_capacity(self.canvas.data.len() + bytes);
+        data.extend_from_slice(&frame.data[..bytes]);
+        data.extend_from_slice(&self.canvas.data);
+        self.canvas.data = data;
+        self.canvas.height += rows;
+        // The canvas tail has not changed.
     }
 
     /// 两阶段重叠匹配。返回 (shift, score)：shift = 新帧顶部对齐累积图的
@@ -525,19 +562,24 @@ impl Stitcher {
         overlap_mean(&self.tail_hashes, frame_hashes, s)
     }
 
-    fn is_upward_frame(&self, frame: &RgbaBuffer, frame_hashes: &[u64]) -> bool {
+    fn match_previous(&self, frame: &RgbaBuffer, upward: bool) -> Option<u32> {
         let Some(prev) = self.prev.as_ref() else {
-            return false;
+            return None;
         };
+        let frame_hashes = row_hashes(frame, self.hash_step);
         let prev_hashes = row_hashes(prev, self.hash_step);
-        let min_overlap = (frame.height / 3).max(MIN_TRUST_OVERLAP);
+        let min_overlap = MIN_TRUST_OVERLAP.min(frame.height.saturating_sub(1));
         let max_overlap = frame.height.saturating_sub(1).min(prev.height);
         if min_overlap > max_overlap {
-            return false;
+            return None;
         }
         let mut candidates = [(f32::MAX, 0u32); 8];
         for s in min_overlap..=max_overlap {
-            let mean = overlap_mean(frame_hashes, &prev_hashes, s);
+            let mean = if upward {
+                overlap_mean(&frame_hashes, &prev_hashes, s)
+            } else {
+                overlap_mean(&prev_hashes, &frame_hashes, s)
+            };
             if mean < candidates[7].0 {
                 candidates[7] = (mean, s);
                 for i in (1..8).rev() {
@@ -547,13 +589,20 @@ impl Stitcher {
                 }
             }
         }
-        candidates.iter().any(|&(mean, s)| {
-            if s == 0 || mean >= PERFECT_MEAN {
-                return false;
-            }
-            let (frac, sad) = region_row_vote(frame, prev, s);
-            frac >= MATCH_ROW_FRAC && sad < self.opts.match_threshold
-        })
+        candidates
+            .iter()
+            .filter_map(|&(mean, s)| {
+                if s == 0 || mean >= PERFECT_MEAN {
+                    return None;
+                }
+                let (frac, sad) = if upward {
+                    region_row_vote(frame, prev, s)
+                } else {
+                    region_row_vote(prev, frame, s)
+                };
+                (frac >= 0.9 && sad < 2.0).then_some(s)
+            })
+            .max()
     }
 }
 
@@ -880,13 +929,26 @@ mod tests {
     }
 
     #[test]
-    fn scrolling_up_from_the_initial_selection_keeps_its_height() {
+    fn scrolling_up_from_the_initial_selection_prepends() {
         let page = web_page(1200, 320);
-        let mut st = Stitcher::new(&crop_rows(&page, 200, 800), StitchOptions::for_frame(600)).unwrap();
+        let mut st =
+            Stitcher::new(&crop_rows(&page, 200, 800), StitchOptions::for_frame(600)).unwrap();
         let step = st.push(&crop_rows(&page, 100, 700)).unwrap();
-        assert_eq!(step.kind, StitchStepKind::Rewound);
-        assert_eq!(step.appended, 0);
-        assert_eq!(st.canvas(), &crop_rows(&page, 200, 800));
+        assert_eq!(step.kind, StitchStepKind::Appended);
+        assert_eq!(step.appended, 100);
+        assert_eq!(st.canvas(), &crop_rows(&page, 100, 800));
+        let step = st.push(&crop_rows(&page, 0, 600)).unwrap();
+        assert_eq!(step.appended, 100);
+        assert_eq!(st.canvas(), &crop_rows(&page, 0, 800));
+        for start in [100, 200] {
+            assert_eq!(
+                st.push(&crop_rows(&page, start, start + 600)).unwrap().kind,
+                StitchStepKind::Rewound
+            );
+        }
+        let step = st.push(&crop_rows(&page, 300, 900)).unwrap();
+        assert_eq!(step.appended, 100);
+        assert_eq!(st.canvas(), &crop_rows(&page, 0, 900));
     }
 
     #[test]

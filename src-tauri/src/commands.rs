@@ -3044,7 +3044,7 @@ fn run_long_driver(app: &AppHandle) {
                     step.steps,
                     step.score,
                     &thumb,
-                    "已向上滚动；回到已截末尾后继续向下滚动",
+                    "当前内容已截取；继续滚动可扩展长图",
                 );
             }
             StitchStepKind::Still => {

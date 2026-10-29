@@ -23,8 +23,8 @@ export function LongResultWindow() {
   const [info, setInfo] = useState<LongResultInfo | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const [busy, setBusy] = useState<ShotAction | null>(null)
-  /** true = 适应窗口宽度（默认）；false = 原始像素 1:1 */
-  const [fit, setFit] = useState(true)
+  /** true = 适应窗口宽度；false = 原始像素 1:1（默认） */
+  const [fit, setFit] = useState(false)
 
   useEffect(() => {
     let alive = true
