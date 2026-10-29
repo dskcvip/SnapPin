@@ -309,11 +309,10 @@ impl Stitcher {
         let at_tail = self.viewport_top + frame.height == self.canvas.height;
         let downward = self.match_previous(frame, &frame_hashes, &prev_hashes, false,
             at_tail.then_some(candidates.as_slice()));
-        // A strict previous-frame match already identifies the direction. Do not
-        // scan the opposite direction and canvas again on every streaming frame.
-        let upward = if downward.is_none() {
-            self.match_previous(frame, &frame_hashes, &prev_hashes, true, None)
-        } else { None };
+        // Repeated cards can match in both directions. Compare both and prefer
+        // the larger overlap (smaller movement), otherwise an upward scroll can
+        // accidentally append another copy of an earlier section.
+        let upward = self.match_previous(frame, &frame_hashes, &prev_hashes, true, None);
         if let Some(shift) = upward.filter(|up| downward.is_none_or(|down| *up > down)) {
             let moved = frame.height - shift;
             let prepend = moved.saturating_sub(self.viewport_top);
@@ -1036,6 +1035,18 @@ mod tests {
         let recovered = st.push(&crop_rows(&page, 1100, 1700)).unwrap();
         assert_eq!(recovered.kind, StitchStepKind::Appended);
         assert_eq!(st.canvas().data, crop_rows(&page, 1000, 1700).data);
+    }
+
+    #[test]
+    fn repeated_sections_do_not_reverse_an_upward_scroll() {
+        let tile = textured_page(400, 320);
+        let mut pixels = Vec::new();
+        for _ in 0..4 { pixels.extend_from_slice(&tile.data); }
+        let page = RgbaBuffer::new(320, 1600, pixels).unwrap();
+        let mut st = Stitcher::new(&crop_rows(&page, 400, 1000), StitchOptions::for_frame(600)).unwrap();
+        let step = st.push(&crop_rows(&page, 350, 950)).unwrap();
+        assert_eq!(step.appended, 50);
+        assert_eq!(st.canvas().data, crop_rows(&page, 350, 1000).data);
     }
 
     #[test]
