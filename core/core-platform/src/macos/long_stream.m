@@ -24,8 +24,8 @@ API_AVAILABLE(macos(12.3))
     static NSString *statusKey;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        NSString *const *key = dlsym(RTLD_DEFAULT, "SCStreamFrameInfoStatus");
-        if (key) statusKey = *key;
+        const CFStringRef *key = (const CFStringRef *)dlsym(RTLD_DEFAULT, "SCStreamFrameInfoStatus");
+        if (key) statusKey = (__bridge NSString *)*key;
     });
     CFArrayRef attachments = CMSampleBufferGetSampleAttachmentsArray(sample, false);
     if (statusKey && attachments && CFArrayGetCount(attachments)) {
@@ -69,7 +69,7 @@ static void SPStop(SPLongStream *session) {
         session.context = NULL;
     });
     dispatch_semaphore_t done = dispatch_semaphore_create(0);
-    [session.stream stopCaptureWithCompletionHandler:^(NSError *error) {
+    [session.stream stopCaptureWithCompletionHandler:^(NSError *__unused error) {
         dispatch_semaphore_signal(done);
     }];
     dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC));

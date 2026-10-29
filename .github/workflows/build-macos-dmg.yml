@@ -56,6 +56,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: ". -> target"
+          cache-on-failure: true
 
       - name: 安装前端依赖
         run: npm ci
@@ -65,8 +66,9 @@ jobs:
 
       - name: 测试长截图算法和帧缓存
         run: |
-          cargo test -p snappin-core-algo stitch::tests --lib --release
-          cargo test -p snappin-core-platform capture_stream::tests --lib --release
+          HOST_TARGET=$(rustc -vV | sed -n 's/^host: //p')
+          cargo test -p snappin-core-algo stitch::tests --lib --release --target "$HOST_TARGET"
+          cargo test -p snappin-core-platform capture_stream::tests --lib --release --target "$HOST_TARGET"
 
       - name: 打包 .app / .dmg
         # --features custom-protocol 必须显式带上，否则 WebviewUrl::App 会去连 devUrl，

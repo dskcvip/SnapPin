@@ -5,6 +5,7 @@ fn main() {
             .file("src/macos/long_stream.m")
             .flag("-fobjc-arc")
             .flag("-fblocks")
+            .flag("-mmacosx-version-min=11.0")
             .compile("snappin_long_stream");
         // ScreenCaptureKit is loaded at runtime so macOS 11 can use the legacy path.
         for framework in ["Foundation", "CoreMedia", "CoreVideo", "CoreGraphics"] {
