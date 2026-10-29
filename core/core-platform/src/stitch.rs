@@ -116,6 +116,14 @@ impl LongCapture {
         if rect.is_empty() {
             return Err("long capture rect is empty".to_string());
         }
+        // The macOS selection outline is composited into edge pixels of screen captures.
+        // Keep the visible outline while sampling just inside its three-point stroke.
+        #[cfg(target_os = "macos")]
+        let rect = if rect.w > 40 {
+            Rect { x: rect.x + 4, w: rect.w - 8, ..rect }
+        } else {
+            rect
+        };
         let monitor = SendMonitor(monitor);
         // 滚轮点 = 显示器原点 + 选区中心（物理像素；macOS 的 x()/y() 是点，
         // 与 scroll_wheel 的 CGEvent 坐标系一致，无需换算）

@@ -8,7 +8,7 @@
 //! 1. **分段亮度粗定位**：每行分成 8 段，各取平均亮度装入 64 位特征，
 //!    在全候选范围上算平均亮度差，保留多个候选。局部动画只影响
 //!    所在段，不会让整行哈希失效。
-//! 2. **全分辨率 SAD 精修**：对候选逐像素计算各横向区域的平均绝对差，
+//! 2. **采样 SAD 精修**：对候选均匀采样行和列，计算各横向区域的平均绝对差，
 //!    按行内多数区域和重叠行的多数投票。
 //!    平均差超过 `match_threshold` 判定"没有可靠重叠"（页面内容被替换 /
 //!    横向漂移），调用方应丢弃该帧而不是硬拼。
@@ -303,8 +303,9 @@ impl Stitcher {
         self.still_count = 0;
         let (diag_shift, diag_mean) = self.scan_best_shift(&frame_hashes);
 
-        let upward = self.match_previous(frame, true);
-        let downward = self.match_previous(frame, false);
+        let prev_hashes = row_hashes(self.prev.as_ref().unwrap(), self.hash_step);
+        let upward = self.match_previous(frame, &frame_hashes, &prev_hashes, true);
+        let downward = self.match_previous(frame, &frame_hashes, &prev_hashes, false);
         if let Some(shift) = upward.filter(|up| downward.is_none_or(|down| *up > down)) {
             let moved = frame.height - shift;
             let prepend = moved.saturating_sub(self.viewport_top);
@@ -562,12 +563,16 @@ impl Stitcher {
         overlap_mean(&self.tail_hashes, frame_hashes, s)
     }
 
-    fn match_previous(&self, frame: &RgbaBuffer, upward: bool) -> Option<u32> {
+    fn match_previous(
+        &self,
+        frame: &RgbaBuffer,
+        frame_hashes: &[u64],
+        prev_hashes: &[u64],
+        upward: bool,
+    ) -> Option<u32> {
         let Some(prev) = self.prev.as_ref() else {
             return None;
         };
-        let frame_hashes = row_hashes(frame, self.hash_step);
-        let prev_hashes = row_hashes(prev, self.hash_step);
         let min_overlap = MIN_TRUST_OVERLAP.min(frame.height.saturating_sub(1));
         let max_overlap = frame.height.saturating_sub(1).min(prev.height);
         if min_overlap > max_overlap {
@@ -576,9 +581,9 @@ impl Stitcher {
         let mut candidates = [(f32::MAX, 0u32); 8];
         for s in min_overlap..=max_overlap {
             let mean = if upward {
-                overlap_mean(&frame_hashes, &prev_hashes, s)
+                overlap_mean(frame_hashes, prev_hashes, s)
             } else {
-                overlap_mean(&prev_hashes, &frame_hashes, s)
+                overlap_mean(prev_hashes, frame_hashes, s)
             };
             if mean < candidates[7].0 {
                 candidates[7] = (mean, s);
@@ -609,18 +614,20 @@ impl Stitcher {
 fn overlap_mean(tail: &[u64], head: &[u64], s: u32) -> f32 {
     let base = tail.len() - s as usize;
     let mut d = 0u64;
-    for (fh_i, th_i) in head[..s as usize]
-        .iter()
-        .zip(&tail[base..base + s as usize])
-    {
+    let row_step = if s >= 128 { 4 } else { 1 };
+    let mut count = 0u32;
+    for i in (0..s as usize).step_by(row_step) {
+        let fh_i = head[i];
+        let th_i = tail[base + i];
         let mut tile_diff = [0u8; 8];
         for (tile, diff) in tile_diff.iter_mut().enumerate() {
             *diff = ((fh_i >> (tile * 8)) as u8).abs_diff((th_i >> (tile * 8)) as u8);
         }
         tile_diff.sort_unstable();
         d += tile_diff[..6].iter().map(|&v| v as u64).sum::<u64>();
+        count += 1;
     }
-    d as f32 / (s as f32 * 6.0 * 255.0)
+    d as f32 / (count as f32 * 6.0 * 255.0)
 }
 
 // ---------------------------------------------------------------- 纯函数
@@ -649,7 +656,11 @@ fn region_row_vote(canvas: &RgbaBuffer, frame: &RgbaBuffer, shift: u32) -> (f32,
     let s = shift as usize;
     let mut ok_rows = 0usize;
     let mut ok_sum = 0u64;
-    for i in 0..s {
+    let row_step = if s >= 128 { 4 } else { 1 };
+    let col_step = (w / 512).max(1);
+    let mut sampled_rows = 0usize;
+    for i in (0..s).step_by(row_step) {
+        sampled_rows += 1;
         let a_row = &canvas.data[(ch - s + i) * w * 4..(ch - s + i + 1) * w * 4];
         let b_row = &frame.data[i * w * 4..(i + 1) * w * 4];
         let mut available_tiles = 0;
@@ -663,11 +674,13 @@ fn region_row_vote(canvas: &RgbaBuffer, frame: &RgbaBuffer, shift: u32) -> (f32,
             }
             available_tiles += 1;
             let mut tile_sum = 0u64;
-            for x in x0..x1 {
+            let mut samples = 0u64;
+            for x in (x0..x1).step_by(col_step) {
                 let p = x * 4;
                 tile_sum += luma(&a_row[p..p + 4]).abs_diff(luma(&b_row[p..p + 4])) as u64;
+                samples += 1;
             }
-            let tile_mean = (tile_sum / (x1 - x0) as u64) as u32;
+            let tile_mean = (tile_sum / samples) as u32;
             if tile_mean < ROW_SAD_OK {
                 matching_tiles += 1;
                 matching_sum += tile_mean;
@@ -678,7 +691,7 @@ fn region_row_vote(canvas: &RgbaBuffer, frame: &RgbaBuffer, shift: u32) -> (f32,
             ok_sum += (matching_sum / matching_tiles) as u64;
         }
     }
-    let frac = ok_rows as f32 / s as f32;
+    let frac = ok_rows as f32 / sampled_rows as f32;
     let sad = if ok_rows == 0 {
         255.0
     } else {
