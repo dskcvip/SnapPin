@@ -63,6 +63,11 @@ jobs:
       - name: 构建前端
         run: npm run build
 
+      - name: 测试长截图算法和帧缓存
+        run: |
+          cargo test -p snappin-core-algo stitch::tests --lib --release
+          cargo test -p snappin-core-platform capture_stream::tests --lib --release
+
       - name: 打包 .app / .dmg
         # --features custom-protocol 必须显式带上，否则 WebviewUrl::App 会去连 devUrl，
         # 打出来的包启动即白屏。

@@ -272,7 +272,7 @@ impl Stitcher {
         let frame_hashes = row_hashes(frame, self.hash_step);
         // --- 帧差：与上一轮比整图 ---
         // 尺寸不一致（逻辑上不该发生）按"差异极大"处理：不当静止，继续尝试匹配
-        let diff = frame_mean_abs_diff(self.prev.as_ref().unwrap(), frame).unwrap_or(255.0);
+        let diff = sampled_frame_diff(self.prev.as_ref().unwrap(), frame).unwrap_or(255.0);
         // 用户滚动过快导致 NoMatch 后可能滚回已截尾部；此时上一帧不同，
         // 但不能把已有画面当新内容再追加一次。
         let tail_diff = if self.recovering {
@@ -391,8 +391,9 @@ impl Stitcher {
                 })
             }
             None => {
-                // 不拼，但更新 prev（下一轮的帧差基准）
-                self.prev = Some(frame.clone());
+                // A rejected frame has no known canvas position. Keep the last
+                // anchored reference so a later frame cannot prepend/append relative
+                // to an unlocated viewport after fast scrolling or an animation.
                 self.recovering = true;
                 Ok(StitchStep {
                     kind: StitchStepKind::NoMatch,
@@ -619,12 +620,15 @@ fn overlap_mean(tail: &[u64], head: &[u64], s: u32) -> f32 {
     for i in (0..s as usize).step_by(row_step) {
         let fh_i = head[i];
         let th_i = tail[base + i];
-        let mut tile_diff = [0u8; 8];
-        for (tile, diff) in tile_diff.iter_mut().enumerate() {
-            *diff = ((fh_i >> (tile * 8)) as u8).abs_diff((th_i >> (tile * 8)) as u8);
+        let (mut sum, mut largest, mut second) = (0u64, 0u8, 0u8);
+        for tile in 0..8 {
+            let diff = ((fh_i >> (tile * 8)) as u8).abs_diff((th_i >> (tile * 8)) as u8);
+            sum += diff as u64;
+            if diff >= largest { second = largest; largest = diff; }
+            else if diff > second { second = diff; }
         }
-        tile_diff.sort_unstable();
-        d += tile_diff[..6].iter().map(|&v| v as u64).sum::<u64>();
+        // Six nearest tiles, without sorting eight values for every candidate row.
+        d += sum - largest as u64 - second as u64;
         count += 1;
     }
     d as f32 / (count as f32 * 6.0 * 255.0)
@@ -656,8 +660,8 @@ fn region_row_vote(canvas: &RgbaBuffer, frame: &RgbaBuffer, shift: u32) -> (f32,
     let s = shift as usize;
     let mut ok_rows = 0usize;
     let mut ok_sum = 0u64;
-    let row_step = if s >= 128 { 4 } else { 1 };
-    let col_step = (w / 512).max(1);
+    let row_step = (s / 128).max(1);
+    let col_step = (w / 256).max(1);
     let mut sampled_rows = 0usize;
     for i in (0..s).step_by(row_step) {
         sampled_rows += 1;
@@ -729,11 +733,28 @@ fn canvas_tail_diff(canvas: &RgbaBuffer, frame: &RgbaBuffer) -> Option<f32> {
         return None;
     }
     let tail = &canvas.data[canvas.data.len() - frame.data.len()..];
+    Some(sampled_pixel_diff(tail, &frame.data, frame.width, frame.height))
+}
+
+fn sampled_frame_diff(a: &RgbaBuffer, b: &RgbaBuffer) -> Option<f32> {
+    if a.width != b.width || a.height != b.height { return None; }
+    Some(sampled_pixel_diff(&a.data, &b.data, a.width, a.height))
+}
+
+fn sampled_pixel_diff(a: &[u8], b: &[u8], width: u32, height: u32) -> f32 {
+    let row_step = (height as usize / 96).max(1);
+    let col_step = (width as usize / 128).max(1);
     let mut sum = 0u64;
-    for (a, b) in tail.chunks_exact(4).zip(frame.data.chunks_exact(4)) {
-        sum += luma(a).abs_diff(luma(b)) as u64;
+    let mut count = 0u64;
+    for y in (0..height as usize).step_by(row_step) {
+        // Vary column phase so narrow text strokes do not always fall between samples.
+        for x in ((y % col_step)..width as usize).step_by(col_step) {
+            let p = (y * width as usize + x) * 4;
+            sum += luma(&a[p..p + 4]).abs_diff(luma(&b[p..p + 4])) as u64;
+            count += 1;
+        }
     }
-    Some(sum as f32 / (frame.width as f32 * frame.height as f32))
+    sum as f32 / count.max(1) as f32
 }
 
 /// 每行 8 个横向分段的亮度特征；局部变化只影响所在字节。
@@ -787,6 +808,18 @@ mod tests {
                 let v = if dark { 35 } else { bg };
                 data.extend_from_slice(&[v, v, v, 255]);
             }
+        }
+        RgbaBuffer::new(w, h, data).unwrap()
+    }
+
+    fn textured_page(h: u32, w: u32) -> RgbaBuffer {
+        let mut data = vec![0; h as usize * w as usize * 4];
+        let mut random = 0x8123_4567u32;
+        for pixel in data.chunks_exact_mut(4) {
+            random ^= random << 13;
+            random ^= random >> 17;
+            random ^= random << 5;
+            pixel.copy_from_slice(&[random as u8, (random >> 8) as u8, (random >> 16) as u8, 255]);
         }
         RgbaBuffer::new(w, h, data).unwrap()
     }
@@ -1001,6 +1034,34 @@ mod tests {
         let returned = st.push(&page).unwrap();
         assert_eq!(returned.kind, StitchStepKind::Still);
         assert_eq!(st.height(), 600);
+    }
+
+    #[test]
+    fn rejected_fast_scroll_frames_cannot_become_new_canvas_anchors() {
+        // Distinct distant regions: a mostly white synthetic page can legitimately
+        // produce ambiguous matches between unrelated blank rows.
+        let page = textured_page(3000, 320);
+        let first = crop_rows(&page, 1000, 1600);
+        let mut st = Stitcher::new(&first, StitchOptions::for_frame(600)).unwrap();
+        assert_eq!(st.push(&crop_rows(&page, 2000, 2600)).unwrap().kind, StitchStepKind::NoMatch);
+        assert_eq!(st.push(&crop_rows(&page, 1900, 2500)).unwrap().kind, StitchStepKind::NoMatch);
+        assert_eq!(st.canvas().data, first.data);
+        let recovered = st.push(&crop_rows(&page, 1100, 1700)).unwrap();
+        assert_eq!(recovered.kind, StitchStepKind::Appended);
+        assert_eq!(st.canvas().data, crop_rows(&page, 1000, 1700).data);
+    }
+
+    #[test]
+    fn fast_retina_scroll_preserves_every_output_pixel() {
+        let page = textured_page(7000, 3344);
+        let mut st = Stitcher::new(&crop_rows(&page, 1000, 2676), StitchOptions::for_frame(1676)).unwrap();
+        let started = std::time::Instant::now();
+        for y in [2300, 3600, 4900, 3600, 2300, 1000, 0] {
+            assert_ne!(st.push(&crop_rows(&page, y, y + 1676)).unwrap().kind, StitchStepKind::NoMatch);
+        }
+        assert_eq!((st.canvas().width, st.canvas().height), (3344, 6576));
+        assert_eq!(st.canvas().data, crop_rows(&page, 0, 6576).data);
+        eprintln!("retina fast scroll: seven frames in {:?}", started.elapsed());
     }
 
     #[test]

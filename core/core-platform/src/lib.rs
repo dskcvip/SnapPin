@@ -8,6 +8,8 @@ pub mod qr;
 pub mod ocr;
 pub mod stitch;
 pub mod translate;
+#[cfg(any(target_os = "macos", test))]
+mod capture_stream;
 
 use anyhow::{Context, Result};
 use snappin_core_algo::RgbaBuffer;

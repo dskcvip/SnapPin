@@ -59,6 +59,16 @@ pub enum StepOutcome {
     Stepped(StitchStep),
     /// `stop` 标志在等待稳态期间被置位（用户按了 Esc），本步作废
     Stopped,
+    /// Continuous capture has not produced another changed frame yet.
+    Waiting,
+}
+
+struct CursorRestore(bool);
+
+impl Drop for CursorRestore {
+    fn drop(&mut self) {
+        if self.0 { show_cursor(); }
+    }
 }
 
 /// 一次长截图采集会话。
@@ -81,7 +91,7 @@ pub struct LongCapture {
     stop: Option<Arc<AtomicBool>>,
     /// 会话期间系统光标是否被本会话隐藏（决定采集走单帧还是双帧治愈，
     /// 以及 Drop 时要不要恢复显示）。
-    cursor_hidden: bool,
+    cursor_hidden: CursorRestore,
     /// 手动模式由用户滚动网页，不接管鼠标位置或系统光标。
     manual: bool,
     /// macOS 预览窗的 CGWindowID；采集它下方的窗口，预览始终可见。
@@ -95,6 +105,10 @@ pub struct LongCapture {
     /// 这不是可以忽略的细节：双帧治愈里 `cx = 光标x - rect.x` 是拿逻辑
     /// 选区算的，直接当帧内坐标用会差整整一个倍率（光标残影留在别处）。
     frame_scale: f32,
+    #[cfg(target_os = "macos")]
+    stream: Option<crate::capture_stream::MacCaptureStream>,
+    #[cfg(target_os = "macos")]
+    stream_previous: Option<(u64, f64)>,
 }
 
 impl LongCapture {
@@ -202,10 +216,14 @@ impl LongCapture {
             hide_ui,
             show_ui,
             stop,
-            cursor_hidden,
+            cursor_hidden: CursorRestore(cursor_hidden),
             manual,
             excluded_window: None,
             frame_scale: sx,
+            #[cfg(target_os = "macos")]
+            stream: None,
+            #[cfg(target_os = "macos")]
+            stream_previous: None,
         })
     }
 
@@ -236,27 +254,20 @@ impl LongCapture {
 
     /// 采集结束后立即还原光标；结果窗仍可继续持有本会话的画布。
     pub fn restore_cursor(&mut self) {
-        if self.cursor_hidden {
+        #[cfg(target_os = "macos")]
+        drop(self.stream.take());
+        if self.cursor_hidden.0 {
             show_cursor();
-            self.cursor_hidden = false;
+            self.cursor_hidden.0 = false;
         }
     }
 
     /// 结束会话，取出最终长图。
     ///
-    /// 因为 `LongCapture` 实现了 `Drop`（恢复光标），不能直接按字段 move，
-    /// 这里用 `ManuallyDrop` 阻止自动 drop、由本函数显式完成"恢复光标"，
-    /// 再把 `stitcher` 读出来（`ptr::read` 配合 ManuallyDrop 是标准做法：
-    /// 原值不会被二次 drop，`cursor_hidden` 是 Copy 类型无所谓）。
-    pub fn into_canvas(self) -> RgbaBuffer {
-        let this = std::mem::ManuallyDrop::new(self);
-        if this.cursor_hidden {
-            show_cursor();
-        }
-        // SAFETY: `this` 是 ManuallyDrop，函数返回后不会有 Drop 跑到 stitcher；
-        // 这里把 stitcher 的所有权读出来交给调用方，正好一次。
-        let stitcher = unsafe { std::ptr::read(&this.stitcher) };
-        stitcher.into_canvas()
+    /// Field guards stop the stream and restore the cursor on every exit path.
+    pub fn into_canvas(mut self) -> RgbaBuffer {
+        self.restore_cursor();
+        self.stitcher.into_canvas()
     }
 
     /// 推进一步：滚动 → 等稳态 → 采集 → 拼接 → **按结果自适应下一步滚动量**。
@@ -316,6 +327,25 @@ impl LongCapture {
             return Ok(StepOutcome::Stopped);
         }
         let started = Instant::now();
+        #[cfg(target_os = "macos")]
+        if let Some(stream) = &self.stream {
+            let Some((frame, queued, dropped)) = stream.next()? else {
+                return Ok(StepOutcome::Waiting);
+            };
+            let (gap, interval_ms) = self.stream_previous.map(|(seq, time)| (
+                frame.sequence.saturating_sub(seq + 1),
+                ((frame.source_time - time).max(0.0) * 1000.0) as u64,
+            )).unwrap_or((0, 0));
+            self.stream_previous = Some((frame.sequence, frame.source_time));
+            let age_ms = frame.received.elapsed().as_millis();
+            let step = self.stitcher.push(&frame.image).map_err(|e| e.to_string())?;
+            eprintln!(
+                "[perf] long stream step={} seq={} interval={}ms age={}ms queued={} dropped={} gap={} match={}ms kind={:?}",
+                step.steps, frame.sequence, interval_ms, age_ms, queued, dropped, gap,
+                started.elapsed().as_millis(), step.kind
+            );
+            return Ok(StepOutcome::Stepped(step));
+        }
         let frame = self.grab_cursorless()?;
         let capture_ms = started.elapsed().as_millis();
         let step = self.stitcher.push(&frame).map_err(|e| e.to_string())?;
@@ -333,6 +363,15 @@ impl LongCapture {
 
     pub fn set_excluded_window(&mut self, id: u32) {
         self.excluded_window = Some(id);
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn start_manual_stream(&mut self) -> Result<(), String> {
+        self.stream = Some(crate::capture_stream::MacCaptureStream::start(
+            self.monitor.get().id().map_err(|e| e.to_string())?, self.rect,
+            self.stitcher.canvas().width, (self.rect.h as f32 * self.frame_scale).round() as u32,
+        )?);
+        Ok(())
     }
 
     /// 下一步的滚动量（物理像素）。供日志/测试观察自适应过程。
@@ -386,7 +425,7 @@ impl LongCapture {
         if let Some(id) = self.excluded_window {
             return capture_below_window(self.monitor.get(), &self.rect, id);
         }
-        if self.cursor_hidden || self.manual {
+        if self.cursor_hidden.0 || self.manual {
             // 光标已隐藏：单帧即可，无需治愈
             grab_once(
                 self.monitor.get(),
@@ -446,18 +485,6 @@ fn capture_below_window(monitor: &xcap::Monitor, rect: &Rect, window_id: u32) ->
         pixel.swap(0, 2);
     }
     RgbaBuffer::new(width as u32, height as u32, pixels).map_err(|e| e.to_string())
-}
-
-/// 会话结束（正常取出 / 异常丢弃）时恢复系统光标。
-///
-/// 这是"光标隐藏"方案的保险：任何路径退出都必须让鼠标箭头回来，
-/// 否则用户会以为系统坏了。`into_canvas()` 消耗 self 前也会走到这里。
-impl Drop for LongCapture {
-    fn drop(&mut self) {
-        if self.cursor_hidden {
-            show_cursor();
-        }
-    }
 }
 
 /// 采一帧选区（物理像素）。光标已隐藏或已被治愈，直接采。
@@ -613,11 +640,17 @@ pub fn heal_cursor_at(a: &mut RgbaBuffer, b: &RgbaBuffer, cx: i32, cy: i32, half
 /// 保存拼接图的缩略图（宽 ≤ 320px，fast PNG）。
 pub fn write_thumbnail(canvas: &RgbaBuffer, path: &Path) -> Result<(), String> {
     use image::imageops::FilterType;
-    let img = image::RgbaImage::from_raw(canvas.width, canvas.height, canvas.data.clone())
+    // Borrow the full canvas. A preview update must not clone hundreds of MB or
+    // run a wide reconstruction filter over every full-resolution source pixel.
+    let img = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(
+        canvas.width, canvas.height, canvas.data.as_slice())
         .ok_or_else(|| "invalid canvas buffer".to_string())?;
     let tw = 320.min(canvas.width);
     let th = ((canvas.height as f64 * tw as f64 / canvas.width as f64).round() as u32).max(1);
-    let small = image::imageops::resize(&img, tw, th, FilterType::Triangle);
+    let sample_w = (tw * 2).min(canvas.width);
+    let sample_h = ((canvas.height as f64 * sample_w as f64 / canvas.width as f64).round() as u32).max(1);
+    let sampled = image::imageops::resize(&img, sample_w, sample_h, FilterType::Nearest);
+    let small = image::imageops::resize(&sampled, tw, th, FilterType::Triangle);
     let buffer = RgbaBuffer::new(tw, th, small.into_raw()).map_err(|e| e.to_string())?;
     crate::save_png_fast(&buffer, path).map_err(|e| e.to_string())
 }

@@ -2738,6 +2738,22 @@ fn begin_long_session(
         discard_long_session(app, &state, "preview-open-failed");
         return Err(e);
     }
+    #[cfg(target_os = "macos")]
+    {
+        let stream_result = {
+            let mut guard = state.long.lock().unwrap();
+            guard.as_mut().ok_or_else(|| "long capture session disappeared".to_string())?
+                .capture.start_manual_stream()
+        };
+        if let Err(error) = stream_result {
+            if error.contains("requires macOS 12.3") {
+                crate::logln!("[snappin] mac long stream unavailable; legacy capture: {error}");
+            } else {
+                discard_long_session(app, &state, "stream-start-failed");
+                return Err(format!("连续采集启动失败：{error}"));
+            }
+        }
+    }
     state.long_active.store(true, Ordering::SeqCst);
     register_long_esc(app);
     emit_long(
@@ -2987,7 +3003,7 @@ fn run_long_driver(app: &AppHandle) {
     let mut reason = "done";
     let mut last_thumb = std::time::Instant::now() - std::time::Duration::from_secs(1);
 
-    'outer: for _ in 0..LONG_MAX_STEPS {
+    'outer: while last_steps < LONG_MAX_STEPS {
         if state.long_stop.load(Ordering::SeqCst) {
             reason = "stopped";
             break;
@@ -3007,6 +3023,7 @@ fn run_long_driver(app: &AppHandle) {
                     reason = "stopped";
                     break 'outer;
                 }
+                Ok(StepOutcome::Waiting) => None,
                 Ok(StepOutcome::Stepped(step)) => {
                     if step.kind == StitchStepKind::Appended
                         && last_thumb.elapsed() >= std::time::Duration::from_millis(300)
@@ -3014,7 +3031,7 @@ fn run_long_driver(app: &AppHandle) {
                         let _ = write_thumbnail(lc.canvas(), &session.thumb);
                         last_thumb = std::time::Instant::now();
                     }
-                    (step, session.thumb.to_string_lossy().to_string())
+                    Some((step, session.thumb.to_string_lossy().to_string()))
                 }
                 Err(e) => {
                     error = Some(e);
@@ -3022,7 +3039,10 @@ fn run_long_driver(app: &AppHandle) {
                 }
             }
         };
-        let (step, thumb) = stepped;
+        let Some((step, thumb)) = stepped else {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            continue;
+        };
         if step.kind != StitchStepKind::Still {
             crate::logln!(
                 "[snappin] long manual step {}: kind={:?} score={:.3} diff={:.2} best_shift={} best_mean={:.4} height={}px",
@@ -3080,7 +3100,8 @@ fn run_long_driver(app: &AppHandle) {
             }
         }
         std::thread::sleep(std::time::Duration::from_millis(
-            if step.kind == StitchStepKind::Still { 180 } else { 5 },
+            if cfg!(target_os = "macos") { 5 }
+            else if step.kind == StitchStepKind::Still { 180 } else { 5 },
         ));
     }
 
