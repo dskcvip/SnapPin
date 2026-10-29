@@ -69,6 +69,7 @@ jobs:
           HOST_TARGET=$(rustc -vV | sed -n 's/^host: //p')
           cargo test -p snappin-core-algo stitch::tests --lib --release --target "$HOST_TARGET"
           cargo test -p snappin-core-platform capture_stream::tests --lib --release --target "$HOST_TARGET"
+          cargo test -p snappin-core-platform stitch::tests --lib --release --target "$HOST_TARGET"
 
       - name: 打包 .app / .dmg
         # --features custom-protocol 必须显式带上，否则 WebviewUrl::App 会去连 devUrl，

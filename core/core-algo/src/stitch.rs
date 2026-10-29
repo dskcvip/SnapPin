@@ -246,12 +246,13 @@ impl Stitcher {
     /// 掉一半，也不要"滚到一半告诉你拼不下了"。中途收缩时本轮会按新尺度重算，
     /// 保证不破坏已有的拼接结果。
     pub fn push(&mut self, raw: &RgbaBuffer) -> Result<StitchStep, AlgoError> {
-        let mut frame = self.fit_frame(raw)?;
+        let mut frame = std::borrow::Cow::Borrowed(raw);
+        if self.scale > 1 { frame = std::borrow::Cow::Owned(self.fit_frame(raw)?); }
         loop {
             match self.push_once(&frame) {
                 Err(AlgoError::TooTall { .. }) if self.shrink() => {
                     // 收缩后本轮按新尺度重来（push_once 在报错前没有改动状态）
-                    frame = downscale_by(&frame, 2)?;
+                    frame = std::borrow::Cow::Owned(downscale_by(&frame, 2)?);
                     continue;
                 }
                 other => return other,
@@ -301,11 +302,18 @@ impl Stitcher {
             });
         }
         self.still_count = 0;
-        let (diag_shift, diag_mean) = self.scan_best_shift(&frame_hashes);
+        let candidates = overlap_candidates(&self.tail_hashes, &frame_hashes, MIN_TRUST_OVERLAP);
+        let (diag_mean, diag_shift) = candidates.first().copied().unwrap_or((1.0, 0));
 
         let prev_hashes = row_hashes(self.prev.as_ref().unwrap(), self.hash_step);
-        let upward = self.match_previous(frame, &frame_hashes, &prev_hashes, true);
-        let downward = self.match_previous(frame, &frame_hashes, &prev_hashes, false);
+        let at_tail = self.viewport_top + frame.height == self.canvas.height;
+        let downward = self.match_previous(frame, &frame_hashes, &prev_hashes, false,
+            at_tail.then_some(candidates.as_slice()));
+        // A strict previous-frame match already identifies the direction. Do not
+        // scan the opposite direction and canvas again on every streaming frame.
+        let upward = if downward.is_none() {
+            self.match_previous(frame, &frame_hashes, &prev_hashes, true, None)
+        } else { None };
         if let Some(shift) = upward.filter(|up| downward.is_none_or(|down| *up > down)) {
             let moved = frame.height - shift;
             let prepend = moved.saturating_sub(self.viewport_top);
@@ -363,7 +371,10 @@ impl Stitcher {
         }
 
         // --- 找重叠 ---
-        match self.find_overlap(frame, &frame_hashes) {
+        let overlap = if at_tail {
+            downward.map(|s| (s, 1.0)).or_else(|| self.find_overlap(frame, &candidates))
+        } else { self.find_overlap(frame, &candidates) };
+        match overlap {
             Some((shift, score)) => {
                 let append_rows = frame.height - shift;
                 if self.canvas.height as u64 + append_rows as u64 > self.opts.max_height as u64 {
@@ -485,7 +496,7 @@ impl Stitcher {
     ///    重叠行的多数横向区域接近。这样**吸顶导航栏 / 加载中的
     ///    图 / 光标残影**这些只影响少数行的差异不会再掀翻整次匹配 ——
     ///    0.1.13 真机三次 NoMatch 的最可能成因就是 Apple 官网的吸顶栏。
-    fn find_overlap(&self, frame: &RgbaBuffer, frame_hashes: &[u64]) -> Option<(u32, f32)> {
+    fn find_overlap(&self, frame: &RgbaBuffer, top: &[(f32, u32)]) -> Option<(u32, f32)> {
         let fh = frame.height;
         let ch = self.canvas.height;
         // 真实可行上界：重叠不可能超过"帧高−1"（整帧重复 = 没滚，已被 still 挡掉）
@@ -495,28 +506,8 @@ impl Stitcher {
             return None;
         }
 
-        // 阶段 1a：分段行特征平均亮度差，保留多个候选给像素级复核。
-        let mut top: [(f32, u32); 8] = [(f32::MAX, 0); 8];
-        for s in s_lo..=s_max {
-            let mean = self.shift_mean(frame_hashes, s);
-            if mean < top[7].0 {
-                top[7] = (mean, s);
-                for i in (1..8).rev() {
-                    if top[i - 1].0 > top[i].0 {
-                        top.swap(i - 1, i);
-                    }
-                }
-            }
-        }
-
-        // 阶段 1b：`min_overlap` 以下（滚动极小）只收"近乎完美"的候选 ——
-        // 真实截图几乎不可能在几十行上哈希全中，宁少拼也不错拼。
-        let mut tiny: Vec<u32> = Vec::new();
-        for s in MIN_TRUST_OVERLAP..s_lo {
-            if self.shift_mean(frame_hashes, s) < PERFECT_MEAN {
-                tiny.push(s);
-            }
-        }
+        // Shortlist is bounded even for blank or animated pages. Previously
+        // every near-perfect tiny overlap was verified pixel by pixel.
 
         // 阶段 2：行级多数表决复核全部候选
         // best = (行一致率, 这些行的平均 SAD, shift)
@@ -534,34 +525,12 @@ impl Stitcher {
                 }
             }
         };
-        for &(_, s) in &top {
-            consider(s, &mut best);
-        }
-        for s in tiny {
-            consider(s, &mut best);
-        }
-        best.map(|(frac, _, s)| (s, frac.clamp(0.0, 1.0)))
-    }
-
-    /// 在**全可行范围**（1..=min(帧高−1, 哈希窗口长)）上扫分段亮度差，
-    /// 返回 (最优 shift, 平均距离)。诊断用，也驱动 `best_shift/best_mean` 日志。
-    fn scan_best_shift(&self, frame_hashes: &[u64]) -> (u32, f32) {
-        let s_max = (frame_hashes.len() as u32 - 1).min(self.tail_hashes.len() as u32);
-        let mut best = (f32::MAX, 0u32);
-        for s in 1..=s_max {
-            let mean = self.shift_mean(frame_hashes, s);
-            if mean < best.0 {
-                best = (mean, s);
+        for &(mean, s) in top {
+            if s >= s_lo || mean < PERFECT_MEAN {
+                consider(s, &mut best);
             }
         }
-        (best.1, best.0)
-    }
-
-    /// shift = s 时的分段亮度平均差（0..1）。每行取最接近的六段，
-    /// 避免固定侧栏或局部动画淹没正文的滚动信号。
-    #[inline]
-    fn shift_mean(&self, frame_hashes: &[u64], s: u32) -> f32 {
-        overlap_mean(&self.tail_hashes, frame_hashes, s)
+        best.map(|(frac, _, s)| (s, frac.clamp(0.0, 1.0)))
     }
 
     fn match_previous(
@@ -570,6 +539,7 @@ impl Stitcher {
         frame_hashes: &[u64],
         prev_hashes: &[u64],
         upward: bool,
+        known_candidates: Option<&[(f32, u32)]>,
     ) -> Option<u32> {
         let Some(prev) = self.prev.as_ref() else {
             return None;
@@ -579,22 +549,17 @@ impl Stitcher {
         if min_overlap > max_overlap {
             return None;
         }
-        let mut candidates = [(f32::MAX, 0u32); 8];
-        for s in min_overlap..=max_overlap {
-            let mean = if upward {
-                overlap_mean(frame_hashes, prev_hashes, s)
+        let computed;
+        let candidates = if let Some(known) = known_candidates {
+            known
+        } else {
+            computed = if upward {
+                overlap_candidates(frame_hashes, prev_hashes, min_overlap)
             } else {
-                overlap_mean(prev_hashes, frame_hashes, s)
+                overlap_candidates(prev_hashes, frame_hashes, min_overlap)
             };
-            if mean < candidates[7].0 {
-                candidates[7] = (mean, s);
-                for i in (1..8).rev() {
-                    if candidates[i - 1].0 > candidates[i].0 {
-                        candidates.swap(i - 1, i);
-                    }
-                }
-            }
-        }
+            &computed
+        };
         candidates
             .iter()
             .filter_map(|&(mean, s)| {
@@ -612,10 +577,32 @@ impl Stitcher {
     }
 }
 
-fn overlap_mean(tail: &[u64], head: &[u64], s: u32) -> f32 {
+// Coarse search visits every integer displacement; only the row sampling is
+// reduced. Re-rank a fixed shortlist with denser samples before pixel voting.
+// This keeps exact Retina offsets while bounding work on repeated white rows.
+fn overlap_candidates(tail: &[u64], head: &[u64], minimum: u32) -> Vec<(f32, u32)> {
+    let maximum = (head.len() as u32).saturating_sub(1).min(tail.len() as u32);
+    let mut candidates = Vec::with_capacity(24);
+    for s in minimum..=maximum {
+        let mean = overlap_mean_sampled(tail, head, s, 24);
+        let index = candidates.partition_point(|&(m, _)| m <= mean);
+        if index < 24 {
+            candidates.insert(index, (mean, s));
+            candidates.truncate(24);
+        }
+    }
+    for (mean, s) in &mut candidates {
+        *mean = overlap_mean_sampled(tail, head, *s, 96);
+    }
+    candidates.sort_by(|a, b| a.0.total_cmp(&b.0));
+    candidates.truncate(8);
+    candidates
+}
+
+fn overlap_mean_sampled(tail: &[u64], head: &[u64], s: u32, samples: usize) -> f32 {
     let base = tail.len() - s as usize;
     let mut d = 0u64;
-    let row_step = (s as usize / 96).max(1);
+    let row_step = (s as usize / samples).max(1);
     let mut count = 0u32;
     for i in (0..s as usize).step_by(row_step) {
         let fh_i = head[i];

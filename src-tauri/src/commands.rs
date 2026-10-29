@@ -3028,7 +3028,10 @@ fn run_long_driver(app: &AppHandle) {
                     if step.kind == StitchStepKind::Appended
                         && last_thumb.elapsed() >= std::time::Duration::from_millis(300)
                     {
+                        let preview_started = std::time::Instant::now();
                         let _ = write_thumbnail(lc.canvas(), &session.thumb);
+                        crate::logln!("[perf] long preview height={} elapsed={}ms", step.height,
+                            preview_started.elapsed().as_millis());
                         last_thumb = std::time::Instant::now();
                     }
                     Some((step, session.thumb.to_string_lossy().to_string()))

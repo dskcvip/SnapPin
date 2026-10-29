@@ -14,9 +14,20 @@ pub(crate) struct StreamFrame {
     pub received: Instant,
 }
 
+const QUEUE_BYTES: usize = 192 * 1024 * 1024;
+const QUEUE_FRAMES: usize = 120;
+
+struct StoredFrame {
+    pixels: Vec<u8>,
+    sequence: u64,
+    source_time: f64,
+    received: Instant,
+}
+
 struct QueueState {
-    frames: VecDeque<StreamFrame>,
-    pending: Option<StreamFrame>,
+    frames: VecDeque<StoredFrame>,
+    pending: Option<StoredFrame>,
+    bytes: usize,
     sequence: u64,
     dropped: u64,
     signature: Option<u64>,
@@ -33,18 +44,14 @@ struct FrameQueue {
 
 impl FrameQueue {
     fn new(width: u32, height: u32) -> Self {
-        let bytes = width as usize * height as usize * 4;
-        // Include the pending frame in the budget, at most eight frames overall.
-        let capacity = ((96 * 1024 * 1024) / bytes.max(1))
-            .saturating_sub(1)
-            .clamp(1, 7);
         Self {
             width,
             height,
-            capacity,
+            capacity: QUEUE_FRAMES,
             state: Mutex::new(QueueState {
                 frames: VecDeque::new(),
                 pending: None,
+                bytes: 0,
                 sequence: 0,
                 dropped: 0,
                 signature: None,
@@ -55,18 +62,24 @@ impl FrameQueue {
     }
 
     fn push(&self, image: RgbaBuffer, source_time: f64) {
+        // Compress outside the queue lock. Keep full output pixels, but retain
+        // seconds of overlapping webpage frames rather than three raw frames.
+        let pixels = lz4_flex::compress_prepend_size(&image.data);
         let mut state = self.state.lock().unwrap();
         if state.closed {
             return;
         }
         state.sequence += 1;
-        let frame = StreamFrame {
-            image,
+        let frame = StoredFrame {
+            pixels,
             source_time,
             sequence: state.sequence,
             received: Instant::now(),
         };
-        if state.frames.len() < self.capacity {
+        if state.pending.is_none() && state.frames.len() < self.capacity
+            && state.bytes + frame.pixels.len() <= QUEUE_BYTES
+        {
+            state.bytes += frame.pixels.len();
             state.frames.push_back(frame);
         } else {
             // Retain the earlier sequence and the latest frame. Never silently
@@ -78,17 +91,26 @@ impl FrameQueue {
     }
 
     fn pop(&self) -> Result<Option<(StreamFrame, usize, u64)>, String> {
-        let mut state = self.state.lock().unwrap();
-        if let Some(frame) = state.frames.pop_front() {
-            if let Some(pending) = state.pending.take() {
-                state.frames.push_back(pending);
-            }
-            return Ok(Some((frame, state.frames.len(), state.dropped)));
-        }
-        if let Some(error) = state.error.take() {
-            return Err(error);
-        }
-        Ok(None)
+        let stored = {
+            let mut state = self.state.lock().unwrap();
+            if let Some(frame) = state.frames.pop_front() {
+                state.bytes -= frame.pixels.len();
+                if let Some(pending) = state.pending.take() {
+                    state.bytes += pending.pixels.len();
+                    state.frames.push_back(pending);
+                }
+                Some((frame, state.frames.len(), state.dropped))
+            } else if let Some(error) = state.error.take() {
+                return Err(error);
+            } else { None }
+        };
+        stored.map(|(frame, queued, dropped)| {
+            let data = lz4_flex::decompress_size_prepended(&frame.pixels)
+                .map_err(|e| format!("long frame decompression: {e}"))?;
+            let image = RgbaBuffer::new(self.width, self.height, data).map_err(|e| e.to_string())?;
+            Ok((StreamFrame { image, sequence: frame.sequence,
+                source_time: frame.source_time, received: frame.received }, queued, dropped))
+        }).transpose()
     }
 
     fn close(&self) {
@@ -96,6 +118,7 @@ impl FrameQueue {
         state.closed = true;
         state.frames.clear();
         state.pending = None;
+        state.bytes = 0;
     }
 
     #[cfg(any(target_os = "macos", test))]
@@ -232,7 +255,7 @@ mod native {
                     .into_owned());
             }
             eprintln!(
-                "[snappin] mac long stream started: {}x{} 30fps queue={} frames (+ latest)",
+                "[snappin] mac long stream started: {}x{} 30fps lossless queue={} frames (+ latest)",
                 width, height, context.capacity
             );
             Ok(Self { handle, context })
@@ -317,7 +340,44 @@ mod tests {
     #[test]
     fn retina_queue_has_a_memory_budget() {
         let queue = FrameQueue::new(3344, 1676);
-        assert!((queue.capacity + 1) * 3344 * 1676 * 4 <= 96 * 1024 * 1024);
+        assert_eq!(queue.capacity, 120);
+        assert_eq!(queue.state.lock().unwrap().bytes, 0);
+    }
+
+    #[test]
+    fn retina_scroll_burst_survives_a_stalled_stitcher_without_missing_pixels() {
+        use snappin_core_algo::stitch::{Stitcher, StitchOptions, StitchStepKind};
+        let (width, height, frame_h) = (3344u32, 6500u32, 1676u32);
+        let mut data = vec![0; width as usize * height as usize * 4];
+        for y in 0..height {
+            for x in 0..width {
+                let n = y.wrapping_mul(2654435761) ^ (x / 16).wrapping_mul(2246822519);
+                let p = ((y * width + x) * 4) as usize;
+                data[p..p + 4].copy_from_slice(&[(n >> 8) as u8, (n >> 16) as u8, (n >> 24) as u8, 255]);
+            }
+        }
+        let crop = |y: u32| RgbaBuffer::new(width, frame_h,
+            data[(y * width * 4) as usize..((y + frame_h) * width * 4) as usize].to_vec()).unwrap();
+        let queue = FrameQueue::new(width, frame_h);
+        // Model a consumer pause: all frames arrive before any matching runs.
+        // The old three-frame queue dropped almost this entire burst.
+        for i in 0..=30 { queue.push(crop(i * 150), i as f64 / 30.0); }
+        {
+            let state = queue.state.lock().unwrap();
+            assert_eq!(state.dropped, 0);
+            assert!(state.bytes <= QUEUE_BYTES);
+            eprintln!("31 Retina frames retained losslessly in {} bytes", state.bytes);
+        }
+        let mut st = Stitcher::new(&crop(0), StitchOptions::for_frame(frame_h)).unwrap();
+        let mut expected_sequence = 1;
+        while let Some((frame, _, dropped)) = queue.pop().unwrap() {
+            assert_eq!(frame.sequence, expected_sequence);
+            expected_sequence += 1;
+            assert_eq!(dropped, 0);
+            assert_ne!(st.push(&frame.image).unwrap().kind, StitchStepKind::NoMatch);
+        }
+        assert_eq!(st.height(), 4500 + frame_h);
+        assert_eq!(st.canvas().data, data[..((4500 + frame_h) * width * 4) as usize]);
     }
 
     #[test]

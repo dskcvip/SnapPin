@@ -1,7 +1,7 @@
 {
   "name": "snappin",
   "private": true,
-  "version": "0.1.23",
+  "version": "0.1.24",
   "type": "module",
   "description": "SnapPin - cross-platform screenshot & pin-to-screen desktop tool",
   "scripts": {

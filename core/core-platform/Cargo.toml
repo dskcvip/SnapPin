@@ -22,6 +22,7 @@ reqwest = { version = "0.12", features = ["blocking", "json"] }
 serde_json = { workspace = true }
 # 模型下载后校验 SHA256（防止镜像返回错误页/半截文件被当成模型）
 sha2 = "0.10"
+lz4_flex = { version = "0.11", default-features = false, features = ["std"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-core-foundation = "0.3.2"

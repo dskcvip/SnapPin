@@ -659,14 +659,21 @@ pub fn write_thumbnail(canvas: &RgbaBuffer, path: &Path) -> Result<(), String> {
     use image::imageops::FilterType;
     // Borrow the full canvas. A preview update must not clone hundreds of MB or
     // run a wide reconstruction filter over every full-resolution source pixel.
-    let img = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(
-        canvas.width, canvas.height, canvas.data.as_slice())
-        .ok_or_else(|| "invalid canvas buffer".to_string())?;
     let tw = 320.min(canvas.width);
     let th = ((canvas.height as f64 * tw as f64 / canvas.width as f64).round() as u32).max(1);
     let sample_w = (tw * 2).min(canvas.width);
     let sample_h = ((canvas.height as f64 * sample_w as f64 / canvas.width as f64).round() as u32).max(1);
-    let sampled = image::imageops::resize(&img, sample_w, sample_h, FilterType::Nearest);
+    // imageops::resize is separable: even Nearest builds an intermediate
+    // sample_w × source_height image. Gather only destination pixels instead,
+    // so preview work depends on preview size, not the full Retina canvas.
+    let sampled = image::ImageBuffer::from_fn(sample_w, sample_h, |x, y| {
+        let sx = (((2 * x as u64 + 1) * canvas.width as u64) / (2 * sample_w as u64))
+            .min(canvas.width as u64 - 1) as usize;
+        let sy = (((2 * y as u64 + 1) * canvas.height as u64) / (2 * sample_h as u64))
+            .min(canvas.height as u64 - 1) as usize;
+        let p = (sy * canvas.width as usize + sx) * 4;
+        image::Rgba([canvas.data[p], canvas.data[p + 1], canvas.data[p + 2], canvas.data[p + 3]])
+    });
     let small = image::imageops::resize(&sampled, tw, th, FilterType::Triangle);
     let buffer = RgbaBuffer::new(tw, th, small.into_raw()).map_err(|e| e.to_string())?;
     crate::save_png_fast(&buffer, path).map_err(|e| e.to_string())
