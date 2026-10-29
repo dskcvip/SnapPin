@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "productName": "SnapPin",
   "mainBinaryName": "SnapPin",
-  "version": "0.1.21",
+  "version": "0.1.22",
   "identifier": "com.snappin.dev",
   "build": {
     "frontendDist": "../dist",

@@ -614,7 +614,7 @@ impl Stitcher {
 fn overlap_mean(tail: &[u64], head: &[u64], s: u32) -> f32 {
     let base = tail.len() - s as usize;
     let mut d = 0u64;
-    let row_step = if s >= 128 { 4 } else { 1 };
+    let row_step = (s as usize / 96).max(1);
     let mut count = 0u32;
     for i in (0..s as usize).step_by(row_step) {
         let fh_i = head[i];

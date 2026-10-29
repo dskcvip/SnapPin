@@ -735,23 +735,47 @@ pub fn do_capture(app: &AppHandle, state: &AppState, src: &str) -> Result<Captur
         // 表现为冻结图上有一块很淡的圆角方块残影（用户报"截图会把图标也截出来"）。
         std::thread::sleep(Duration::from_millis(300));
     }
+    let watchdog_app = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(8));
+        let state = watchdog_app.state::<AppState>();
+        if state.session.load(Ordering::SeqCst) == session_id
+            && state.capturing.load(Ordering::SeqCst)
+        {
+            state.cancel_pending.store(true, Ordering::SeqCst);
+            windows::restore_ball_after_capture(&watchdog_app);
+            eprintln!("[snappin] capture session {session_id} timed out; restoring ball");
+        }
+    });
     let after_ball = std::time::Instant::now();
 
-    // 2. 并行预创建隐藏浮层（与采集重叠；失败无妨，第 4 步会兜底创建）
-    let precreate_app = app.clone();
-    let precreate = std::thread::spawn(move || {
-        windows::precreate_overlays_hidden(&precreate_app);
-    });
+    // 2. 预创建隐藏浮层；macOS 与采集并行，Windows 在采集完成后执行。
+    #[cfg(target_os = "macos")]
+    let precreate = {
+        let precreate_app = app.clone();
+        Some(std::thread::spawn(move || {
+            windows::precreate_overlays_hidden(&precreate_app);
+        }))
+    };
+    #[cfg(not(target_os = "macos"))]
+    let precreate: Option<std::thread::JoinHandle<()>> = None;
 
     // 3. 采集（并行 + fast 压缩，双屏约 0.9s）
     let capture_start = std::time::Instant::now();
     let capture = snappin_core_platform::capture_all_monitors();
     let capture_ms = capture_start.elapsed().as_millis();
+    eprintln!("[perf] capture session={session_id} pixels_ready={}ms", capture_ms);
 
-    // 等预创建线程结束（采集已完成或接近完成）
+    // WebView2 建窗与多屏采集并发时，下一轮采集可能卡在系统窗口调用中。
+    // Windows 先完成像素采集再建浮层；macOS 保持并行预创建。
     let join_start = std::time::Instant::now();
-    let _ = precreate.join();
+    if let Some(precreate) = precreate {
+        let _ = precreate.join();
+    } else {
+        windows::precreate_overlays_hidden(app);
+    }
     let join_ms = join_start.elapsed().as_millis();
+    eprintln!("[perf] capture session={session_id} overlays_ready={}ms", join_ms);
 
     let shots = match capture {
         Ok(s) => s,
@@ -2961,6 +2985,7 @@ fn run_long_driver(app: &AppHandle) {
     let mut last_steps = 0u32;
     let mut error: Option<String> = None;
     let mut reason = "done";
+    let mut last_thumb = std::time::Instant::now() - std::time::Duration::from_secs(1);
 
     'outer: for _ in 0..LONG_MAX_STEPS {
         if state.long_stop.load(Ordering::SeqCst) {
@@ -2983,8 +3008,11 @@ fn run_long_driver(app: &AppHandle) {
                     break 'outer;
                 }
                 Ok(StepOutcome::Stepped(step)) => {
-                    if step.kind == StitchStepKind::Appended {
+                    if step.kind == StitchStepKind::Appended
+                        && last_thumb.elapsed() >= std::time::Duration::from_millis(300)
+                    {
                         let _ = write_thumbnail(lc.canvas(), &session.thumb);
+                        last_thumb = std::time::Instant::now();
                     }
                     (step, session.thumb.to_string_lossy().to_string())
                 }
@@ -3052,7 +3080,7 @@ fn run_long_driver(app: &AppHandle) {
             }
         }
         std::thread::sleep(std::time::Duration::from_millis(
-            if step.kind == StitchStepKind::Still { 180 } else { 35 },
+            if step.kind == StitchStepKind::Still { 180 } else { 5 },
         ));
     }
 
