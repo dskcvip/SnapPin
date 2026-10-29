@@ -28,5 +28,10 @@ lz4_flex = { version = "0.11", default-features = false, features = ["std"] }
 objc2-core-foundation = "0.3.2"
 objc2-core-graphics = "0.3.2"
 
+[target.'cfg(windows)'.dependencies]
+# Read completed compositor frames. GDI BitBlt can capture torn Chromium
+# surfaces / exclusion artifacts during scrolling, leaving horizontal seams.
+xcap = { version = "0.9", features = ["wgc"] }
+
 [build-dependencies]
 cc = "1"

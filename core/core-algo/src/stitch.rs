@@ -281,13 +281,17 @@ impl Stitcher {
         } else {
             255.0
         };
-        if diff < self.opts.still_threshold || tail_diff < self.opts.still_threshold {
+        if diff < self.opts.still_threshold || tail_diff == 0.0 {
             // 页面没动：不拼（拼了也是重复行），只累计静止轮次
             self.still_count += 1;
-            if tail_diff < self.opts.still_threshold {
+            if tail_diff == 0.0 {
                 self.recovering = false;
+                self.viewport_top = self.canvas.height - frame.height;
+                self.prev = Some(frame.clone());
             }
-            self.prev = Some(frame.clone());
+            // A nearly still frame may have moved a pixel. Keep the anchored
+            // reference until that movement can be measured, rather than
+            // silently moving prev without moving viewport_top.
             return Ok(StitchStep {
                 kind: StitchStepKind::Still,
                 appended: 0,
@@ -309,11 +313,27 @@ impl Stitcher {
         let at_tail = self.viewport_top + frame.height == self.canvas.height;
         let downward = self.match_previous(frame, &frame_hashes, &prev_hashes, false,
             at_tail.then_some(candidates.as_slice()));
-        // Repeated cards can match in both directions. Compare both and prefer
-        // the larger overlap (smaller movement), otherwise an upward scroll can
-        // accidentally append another copy of an earlier section.
+        // Repeated cards can match in both directions. Compare pixel error
+        // first, using the smaller movement only to break an equally good tie.
         let upward = self.match_previous(frame, &frame_hashes, &prev_hashes, true, None);
-        if let Some(shift) = upward.filter(|up| downward.is_none_or(|down| *up > down)) {
+        if downward.is_none() && upward.is_none() {
+            if let Some(top) = self.locate_captured_frame(frame, &frame_hashes) {
+                self.viewport_top = top;
+                self.prev = Some(frame.clone());
+                self.recovering = false;
+                return Ok(StitchStep {
+                    kind: StitchStepKind::Rewound, appended: 0, score: 1.0,
+                    still_count: 0, height: self.canvas.height, steps: self.steps,
+                    scale: self.scale, diff, best_shift: diag_shift, best_mean: diag_mean,
+                });
+            }
+        }
+        if let Some(shift) = upward.filter(|up| downward.is_none_or(|down| {
+            let prev = self.prev.as_ref().unwrap();
+            let up_error = alignment_error(frame, prev, frame.height - *up, *up);
+            let down_error = alignment_error(prev, frame, prev.height - down, down);
+            up_error < down_error || (up_error == down_error && *up > down)
+        })) {
             let moved = frame.height - shift;
             let prepend = moved.saturating_sub(self.viewport_top);
             if self.canvas.height as u64 + prepend as u64 > self.opts.max_height as u64 {
@@ -517,10 +537,11 @@ impl Stitcher {
             }
             let (frac, sad) = region_row_vote(&self.canvas, frame, s);
             if frac >= MATCH_ROW_FRAC && sad < self.opts.match_threshold {
+                let error = alignment_error(&self.canvas, frame, self.canvas.height - s, s);
                 match best {
                     // 行一致率高的优先，一致率相同则 SAD 小的优先
-                    Some((bf, bs, _)) if *bf > frac || (*bf == frac && *bs <= sad) => {}
-                    _ => *best = Some((frac, sad, s)),
+                    Some((bf, bs, _)) if *bf > frac || (*bf == frac && *bs <= error) => {}
+                    _ => *best = Some((frac, error, s)),
                 }
             }
         };
@@ -570,9 +591,42 @@ impl Stitcher {
                 } else {
                     region_row_vote(prev, frame, s)
                 };
-                (frac >= 0.9 && sad < 2.0).then_some(s)
+                if frac < 0.9 || sad >= 2.0 { return None; }
+                let error = if upward {
+                    alignment_error(frame, prev, frame.height - s, s)
+                } else {
+                    alignment_error(prev, frame, prev.height - s, s)
+                };
+                Some((error, s))
             })
-            .max()
+            // Tolerance admits adjacent offsets, especially across blank rows.
+            // Prefer the actual pixel alignment before the larger-overlap tie
+            // break, otherwise fast scrolls accumulate one-pixel seam errors.
+            .min_by(|a, b| a.0.total_cmp(&b.0).then(b.1.cmp(&a.1)))
+            .map(|(_, s)| s)
+    }
+
+    /// A fast reverse scroll can skip the previous viewport entirely while
+    /// remaining inside the captured document. Relocate against the canvas,
+    /// without appending or changing any of its pixels.
+    fn locate_captured_frame(&self, frame: &RgbaBuffer, hashes: &[u64]) -> Option<u32> {
+        if self.canvas.height <= frame.height { return None; }
+        let canvas_hashes = row_hashes(&self.canvas, self.hash_step);
+        let mut candidates: Vec<(f32, u32)> = Vec::with_capacity(8);
+        for top in 0..=self.canvas.height - frame.height {
+            let end = (top + frame.height) as usize;
+            let mean = overlap_mean_sampled(&canvas_hashes[..end], hashes, frame.height, 48);
+            let rank = candidates.partition_point(|&(m, _)| m <= mean);
+            if rank < 8 {
+                candidates.insert(rank, (mean, top));
+                candidates.truncate(8);
+            }
+        }
+        candidates.into_iter().find_map(|(mean, top)| {
+            if mean >= PERFECT_MEAN { return None; }
+            let (frac, sad) = region_rows_vote(&self.canvas, frame, top, 0, frame.height);
+            (frac >= 0.9 && sad < 2.0).then_some(top)
+        })
     }
 }
 
@@ -584,7 +638,7 @@ fn overlap_candidates(tail: &[u64], head: &[u64], minimum: u32) -> Vec<(f32, u32
     let mut candidates = Vec::with_capacity(24);
     for s in minimum..=maximum {
         let mean = overlap_mean_sampled(tail, head, s, 24);
-        let index = candidates.partition_point(|&(m, _)| m <= mean);
+        let index = candidates.partition_point(|&(m, overlap)| m < mean || (m == mean && overlap > s));
         if index < 24 {
             candidates.insert(index, (mean, s));
             candidates.truncate(24);
@@ -593,7 +647,7 @@ fn overlap_candidates(tail: &[u64], head: &[u64], minimum: u32) -> Vec<(f32, u32
     for (mean, s) in &mut candidates {
         *mean = overlap_mean_sampled(tail, head, *s, 96);
     }
-    candidates.sort_by(|a, b| a.0.total_cmp(&b.0));
+    candidates.sort_by(|a, b| a.0.total_cmp(&b.0).then(b.1.cmp(&a.1)));
     candidates.truncate(8);
     candidates
 }
@@ -614,10 +668,13 @@ fn overlap_mean_sampled(tail: &[u64], head: &[u64], s: u32, samples: usize) -> f
             else if diff > second { second = diff; }
         }
         // Six nearest tiles, without sorting eight values for every candidate row.
-        d += sum - largest as u64 - second as u64;
+        // Keep a small contribution from *all* tiles. Discarding the two
+        // strongest differences completely makes blank margins beat the true
+        // alignment on sparse pages (the label can occupy only one tile).
+        d += (sum - largest as u64 - second as u64) * 8 + sum;
         count += 1;
     }
-    d as f32 / (count as f32 * 6.0 * 255.0)
+    d as f32 / (count as f32 * 56.0 * 255.0)
 }
 
 // ---------------------------------------------------------------- 纯函数
@@ -626,33 +683,44 @@ fn overlap_mean_sampled(tail: &[u64], head: &[u64], s: u32, samples: usize) -> f
 const PERFECT_MEAN: f32 = 0.02;
 /// 放宽匹配下界时，最少可信重叠行数（少于这个即使哈希完美也当噪声）。
 const MIN_TRUST_OVERLAP: u32 = 24;
-/// 行级多数表决：至少这么多比例的行"几乎完全相同"才算重叠成立。
-const MATCH_ROW_FRAC: f32 = 0.5;
+/// At least this fraction of rows containing detail must agree.
+const MATCH_ROW_FRAC: f32 = 0.8;
 
 /// 行级多数表决复核（替代原来的整段平均 SAD）。
 ///
 /// 返回 `(一致行比例, 这些一致行的平均 SAD)`：
-/// - 一行至少 3/4 横向区域的平均差 < `ROW_SAD_OK`，才算一致行；
+/// - 一行至少 3/4 有细节的横向区域平均差 < `ROW_SAD_OK`，才算一致行；
 /// - 平均 SAD 只对一致区域求，避免局部动画把整行判坏。
 ///
 /// 为什么不用整段均值：一个 44 行的吸顶导航栏在 1730 行重叠里只占 2.5%，
 /// 但它的平均差可能上百，整段均值直接越过 `match_threshold` → 明明对齐了
 /// 却判 NoMatch（0.1.13 真机症状）。
 fn region_row_vote(canvas: &RgbaBuffer, frame: &RgbaBuffer, shift: u32) -> (f32, f32) {
+    region_rows_vote(canvas, frame, canvas.height - shift, 0, shift)
+}
+
+fn alignment_error(a: &RgbaBuffer, b: &RgbaBuffer, a_top: u32, rows: u32) -> f32 {
+    let row_bytes = a.width as usize * 4;
+    let start = a_top as usize * row_bytes;
+    let bytes = rows as usize * row_bytes;
+    sampled_pixel_diff(&a.data[start..start + bytes], &b.data[..bytes], a.width, rows)
+}
+
+fn region_rows_vote(canvas: &RgbaBuffer, frame: &RgbaBuffer, canvas_top: u32, frame_top: u32, rows: u32) -> (f32, f32) {
     const ROW_SAD_OK: u32 = 8;
     const TILES: usize = 8;
     let w = canvas.width as usize;
-    let ch = canvas.height as usize;
-    let s = shift as usize;
+    let s = rows as usize;
     let mut ok_rows = 0usize;
     let mut ok_sum = 0u64;
     let row_step = (s / 128).max(1);
     let col_step = (w / 256).max(1);
     let mut sampled_rows = 0usize;
     for i in (0..s).step_by(row_step) {
-        sampled_rows += 1;
-        let a_row = &canvas.data[(ch - s + i) * w * 4..(ch - s + i + 1) * w * 4];
-        let b_row = &frame.data[i * w * 4..(i + 1) * w * 4];
+        let a_y = canvas_top as usize + i;
+        let b_y = frame_top as usize + i;
+        let a_row = &canvas.data[a_y * w * 4..(a_y + 1) * w * 4];
+        let b_row = &frame.data[b_y * w * 4..(b_y + 1) * w * 4];
         let mut available_tiles = 0;
         let mut matching_tiles = 0;
         let mut matching_sum = 0u32;
@@ -662,26 +730,38 @@ fn region_row_vote(canvas: &RgbaBuffer, frame: &RgbaBuffer, shift: u32) -> (f32,
             if x0 == x1 {
                 continue;
             }
-            available_tiles += 1;
             let mut tile_sum = 0u64;
             let mut samples = 0u64;
+            let (mut a_min, mut a_max, mut b_min, mut b_max) = (255, 0, 255, 0);
             for x in (x0..x1).step_by(col_step) {
                 let p = x * 4;
-                tile_sum += luma(&a_row[p..p + 4]).abs_diff(luma(&b_row[p..p + 4])) as u64;
+                let a = luma(&a_row[p..p + 4]);
+                let b = luma(&b_row[p..p + 4]);
+                a_min = a_min.min(a); a_max = a_max.max(a);
+                b_min = b_min.min(b); b_max = b_max.max(b);
+                tile_sum += a.abs_diff(b) as u64;
                 samples += 1;
             }
+            // Empty margins provide no evidence of alignment. Count only
+            // regions containing detail in either image, including detail that
+            // disappears at a wrong offset. Otherwise seven white tiles can
+            // outvote a mismatched title/barcode in the eighth tile.
+            if a_max - a_min < 16 && b_max - b_min < 16 { continue; }
+            available_tiles += 1;
             let tile_mean = (tile_sum / samples) as u32;
             if tile_mean < ROW_SAD_OK {
                 matching_tiles += 1;
                 matching_sum += tile_mean;
             }
         }
+        if available_tiles == 0 { continue; }
+        sampled_rows += 1;
         if matching_tiles > 0 && matching_tiles * 4 >= available_tiles * 3 {
             ok_rows += 1;
             ok_sum += (matching_sum / matching_tiles) as u64;
         }
     }
-    let frac = ok_rows as f32 / sampled_rows as f32;
+    let frac = if sampled_rows < 2 { 0.0 } else { ok_rows as f32 / sampled_rows as f32 };
     let sad = if ok_rows == 0 {
         255.0
     } else {
@@ -1060,6 +1140,76 @@ mod tests {
         assert_eq!((st.canvas().width, st.canvas().height), (3344, 6576));
         assert_eq!(st.canvas().data, crop_rows(&page, 0, 6576).data);
         eprintln!("retina fast scroll: seven frames in {:?}", started.elapsed());
+    }
+
+    #[test]
+    fn middle_to_bottom_then_top_preserves_sparse_cards() {
+        // Like long-scroll.html: mostly blank, repeated card geometry, unique
+        // small labels/barcodes. Blank rows alone must never establish alignment.
+        let w = 320usize;
+        let h = 160 * 40usize;
+        let mut data = vec![255; w * h * 4];
+        for y in 0..h {
+            for x in 0..w {
+                let card = y / 160;
+                let row = y % 160;
+                let ink = (20..28).contains(&row) && x < 100
+                    && ((card + 1).wrapping_mul(2654435761) >> (x / 4 % 32)) & 1 != 0;
+                let v = if ink { 30 } else if card % 3 == 0 { 245 } else { 255 };
+                let p = (y * w + x) * 4;
+                data[p..p + 4].copy_from_slice(&[v, v, v, 255]);
+            }
+        }
+        let page = RgbaBuffer::new(w as u32, h as u32, data).unwrap();
+        let fh = 600;
+        let mut st = Stitcher::new(&crop_rows(&page, 1600, 2200), StitchOptions::for_frame(fh)).unwrap();
+        let mut end = 2200;
+        let mut start = 1600;
+        let path = (1800..=5800).step_by(200)
+            .chain((0..5800).step_by(200).rev());
+        for y in path {
+            end = end.max(y + fh);
+            start = start.min(y);
+            let step = st.push(&crop_rows(&page, y, y + fh)).unwrap();
+            assert_ne!(step.kind, StitchStepKind::NoMatch, "y={y}");
+            assert_eq!(st.height(), end - start, "y={y}, step={step:?}");
+            assert!(st.canvas().data == crop_rows(&page, start, end).data, "pixels y={y}");
+        }
+    }
+
+    #[test]
+    fn almost_still_frames_do_not_move_the_reference_without_its_position() {
+        let mut page = textured_page(1800, 320);
+        // An almost blank page: a one-pixel scroll is below the whole-image
+        // still threshold, but several such movements must accumulate.
+        for row in page.data.chunks_exact_mut(320 * 4) {
+            for pixel in row[8 * 4..].chunks_exact_mut(4) { pixel.copy_from_slice(&[255, 255, 255, 255]); }
+        }
+        let mut st = Stitcher::new(&crop_rows(&page, 500, 1100), StitchOptions::for_frame(600)).unwrap();
+        let mut top = 500;
+        let mut bottom = 1100;
+        for y in (490..500).rev().chain([450, 400, 500, 550, 600]) {
+            let step = st.push(&crop_rows(&page, y, y + 600)).unwrap();
+            if step.kind != StitchStepKind::Still {
+                assert_ne!(step.kind, StitchStepKind::NoMatch);
+                top = top.min(y); bottom = bottom.max(y + 600);
+                assert!(st.canvas().data == crop_rows(&page, top, bottom).data, "y={y} {step:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn fast_rewind_relocates_inside_the_existing_canvas() {
+        let page = textured_page(5000, 320);
+        let mut st = Stitcher::new(&crop_rows(&page, 1000, 1600), StitchOptions::for_frame(600)).unwrap();
+        for y in (1400..=4200).step_by(400) {
+            st.push(&crop_rows(&page, y, y + 600)).unwrap();
+        }
+        // Intermediate reverse-scroll frames may be missed, but these pixels
+        // already exist in the canvas and can be located without any new data.
+        assert_eq!(st.push(&crop_rows(&page, 1200, 1800)).unwrap().kind, StitchStepKind::Rewound);
+        for y in [800, 400, 0] { st.push(&crop_rows(&page, y, y + 600)).unwrap(); }
+        assert!(st.canvas().data == crop_rows(&page, 0, 4800).data);
     }
 
     #[test]

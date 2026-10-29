@@ -139,6 +139,8 @@ impl LongCapture {
             rect
         };
         let monitor = SendMonitor(monitor);
+        #[cfg(windows)]
+        eprintln!("[snappin] long capture backend=Windows.Graphics.Capture rect=({},{},{}x{})", rect.x, rect.y, rect.w, rect.h);
         // 滚轮点 = 显示器原点 + 选区中心（物理像素；macOS 的 x()/y() 是点，
         // 与 scroll_wheel 的 CGEvent 坐标系一致，无需换算）
         let mx = monitor.get().x().map_err(|e| e.to_string())?;
@@ -515,97 +517,20 @@ fn grab_once(
         f();
     }
     let result = (|| {
-        // 只采选区：xcap 0.9.8 的 capture_region 直接问系统要这块矩形，
-        // 比"整屏 BitBlt + crop"少一次全屏拷贝——既快，也少一次全屏读，
-        // 屏幕观感更稳（整屏采集在高分屏上本身就会让画面抖一下）。
+        // Windows uses completed WGC compositor frames, with cursor capture
+        // disabled by xcap. Keep source pixels intact: do not interpolate thin
+        // white rows, which can be legitimate text/rules on the page.
         let capture = || monitor
             .capture_region(rect.x.max(0) as u32, rect.y.max(0) as u32, rect.w, rect.h)
             .map_err(|e| format!("capture failed: {e}"))
             .and_then(|img| RgbaBuffer::new(img.width(), img.height(), img.into_raw()).map_err(|e| e.to_string()));
-        let mut frame = capture()?;
-        #[cfg(windows)]
-        if has_white_capture_seam(&frame) {
-            std::thread::sleep(Duration::from_millis(20));
-            frame = capture()?;
-            repair_white_capture_seams(&mut frame);
-        }
+        let frame = capture()?;
         Ok(frame)
     })();
     if let Some(f) = show_ui {
         f();
     }
     result
-}
-
-#[cfg(windows)]
-fn white_row(frame: &RgbaBuffer, y: u32) -> bool {
-    let row = &frame.data[y as usize * frame.width as usize * 4
-        ..(y as usize + 1) * frame.width as usize * 4];
-    let mut total = 0usize;
-    let mut white = 0usize;
-    for pixel in row.chunks_exact(4).step_by(8) {
-        total += 1;
-        white += (pixel[0] >= 250 && pixel[1] >= 250 && pixel[2] >= 250) as usize;
-    }
-    white * 100 >= total * 98
-}
-
-#[cfg(windows)]
-fn dark_row_fraction(frame: &RgbaBuffer, y: u32) -> f32 {
-    let row = &frame.data[y as usize * frame.width as usize * 4
-        ..(y as usize + 1) * frame.width as usize * 4];
-    let mut total = 0usize;
-    let mut dark = 0usize;
-    for pixel in row.chunks_exact(4).step_by(8) {
-        total += 1;
-        dark += (pixel[0].min(pixel[1]).min(pixel[2]) < 180) as usize;
-    }
-    dark as f32 / total as f32
-}
-
-#[cfg(windows)]
-fn white_capture_seams(frame: &RgbaBuffer) -> Vec<(u32, u32)> {
-    let mut seams = Vec::new();
-    let mut y = 1;
-    while y + 1 < frame.height {
-        if !white_row(frame, y) {
-            y += 1;
-            continue;
-        }
-        let start = y;
-        while y + 1 < frame.height && white_row(frame, y) {
-            y += 1;
-        }
-        if y - start <= 3
-            && y < frame.height
-            && dark_row_fraction(frame, start - 1) >= 0.2
-            && dark_row_fraction(frame, y) >= 0.2
-        {
-            seams.push((start, y));
-        }
-    }
-    seams
-}
-
-#[cfg(windows)]
-fn has_white_capture_seam(frame: &RgbaBuffer) -> bool {
-    !white_capture_seams(frame).is_empty()
-}
-
-#[cfg(windows)]
-fn repair_white_capture_seams(frame: &mut RgbaBuffer) {
-    let row_bytes = frame.width as usize * 4;
-    for (start, end) in white_capture_seams(frame) {
-        let before = frame.data[(start as usize - 1) * row_bytes..start as usize * row_bytes].to_vec();
-        let after = frame.data[end as usize * row_bytes..(end as usize + 1) * row_bytes].to_vec();
-        let span = end - start + 1;
-        for y in start..end {
-            let dst = &mut frame.data[y as usize * row_bytes..(y as usize + 1) * row_bytes];
-            for (x, channel) in dst.iter_mut().enumerate() {
-                *channel = ((before[x] as u32 * (end - y) + after[x] as u32 * (y - start + 1)) / span) as u8;
-            }
-        }
-    }
 }
 
 /// 采一帧选区，并用"移开光标再采一帧"治愈光标残影（光标隐藏失败时的兜底）。
@@ -970,26 +895,6 @@ pub fn set_hwnd_capture_excluded(_hwnd: isize, _excluded: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[cfg(windows)]
-    #[test]
-    fn repairs_only_thin_white_capture_seams() {
-        let mut frame = RgbaBuffer::new(80, 20, vec![60; 80 * 20 * 4]).unwrap();
-        for pixel in frame.data.chunks_exact_mut(4) { pixel[3] = 255; }
-        for y in 8..10 {
-            let row = &mut frame.data[y * 80 * 4..(y + 1) * 80 * 4];
-            row.fill(255);
-        }
-        assert!(has_white_capture_seam(&frame));
-        repair_white_capture_seams(&mut frame);
-        assert!(!has_white_capture_seam(&frame));
-        assert_eq!(&frame.data[8 * 80 * 4..8 * 80 * 4 + 4], &[60, 60, 60, 255]);
-
-        let mut white_page = RgbaBuffer::new(80, 20, vec![255; 80 * 20 * 4]).unwrap();
-        let original = white_page.clone();
-        repair_white_capture_seams(&mut white_page);
-        assert_eq!(white_page, original);
-    }
 
     /// 造一张确定性纹理图（行内容互不相同）。
     fn tex(w: u32, h: u32) -> RgbaBuffer {

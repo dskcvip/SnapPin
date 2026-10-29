@@ -622,7 +622,14 @@ pub(crate) fn handle_menu_event(app: &AppHandle, id: &str) {
         }
         "toggle-ball" => windows::toggle_ball(app),
         // 排障入口：直接打开落盘日志（release 无控制台，这是唯一的现场）
-        "open-log" => open_external(&logfile::log_path().to_string_lossy()),
+        "open-log" => {
+            if let Err(error) = logfile::open_in_viewer() {
+                crate::logln!("open runtime log failed: {error}");
+                use tauri_plugin_dialog::DialogExt;
+                app.dialog().message(format!("无法打开运行日志：{error}\n日志路径：{}", logfile::log_path().display()))
+                    .title("打开运行日志失败").show(|_| {});
+            }
+        }
         // 设置窗（翻译 Key、快捷键、外观都在这）
         //
         // **不能在这里同步建窗**：本函数跑在主线程的 webview IPC 回调 / 托盘事件里，

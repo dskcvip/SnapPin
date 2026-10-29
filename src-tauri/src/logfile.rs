@@ -56,6 +56,29 @@ pub fn log_path() -> PathBuf {
     log_dir().join("snappin.log")
 }
 
+/// Open the live log as a document, never as a cmd/start command. In
+/// particular, detach the editor's standard handles from our writable log.
+pub fn open_in_viewer() -> Result<(), String> {
+    use std::process::{Command, Stdio};
+    let path = log_path();
+    std::fs::create_dir_all(log_dir()).map_err(|e| format!("create log directory: {e}"))?;
+    OpenOptions::new().create(true).append(true).open(&path)
+        .map_err(|e| format!("open log file: {e}"))?;
+    #[cfg(windows)]
+    let mut command = {
+        let root = std::env::var_os("SystemRoot").ok_or("SystemRoot is unavailable")?;
+        Command::new(PathBuf::from(root).join("System32").join("notepad.exe"))
+    };
+    #[cfg(target_os = "macos")]
+    let mut command = { let mut c = Command::new("open"); c.arg("-t"); c };
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let mut command = Command::new("xdg-open");
+    command.arg(&path).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+        .spawn().map_err(|e| format!("start log viewer: {e}"))?;
+    crate::logln!("runtime log viewer opened: {}", path.display());
+    Ok(())
+}
+
 /// 启动最早调用一次：开文件、写启动标记、把 stderr 指过去。
 ///
 /// 失败时**静默降级**——日志不该成为启动失败的理由。
