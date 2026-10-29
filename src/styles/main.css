@@ -574,3 +574,13 @@
   border-color: transparent;
   background: transparent;
 }
+
+/* 关于：版本和官网集中在一张卡片中，与设置导航共用窗口。 */
+.set-about-main { background: #f7f7f7; padding: 40px 30px; }
+.about-page { width: 100%; max-width: 760px; margin: 0 auto; }
+.about-card { background: #fff; border-radius: 14px; padding: 4px 18px; }
+.about-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 52px; }
+.about-version span { font-size: 12px; color: #697586; margin-left: 4px; }
+.about-row .btn { white-space: nowrap; min-height: 32px; padding: 5px 12px; font-weight: 400; }
+.about-status { color: #697586; font-size: 12px; }
+@media (max-width: 640px) { .set-about-main { padding: 24px 16px; } }

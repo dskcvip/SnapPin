@@ -586,7 +586,6 @@ fn mac_native_tray_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<taur
     // 报告两项状态，并给出"去系统设置"或"重置授权"两个动作。
     let perm = MenuItem::with_id(app, "perm-check", "权限检查…", true, None::<&str>)?;
     let log = MenuItem::with_id(app, "open-log", "打开运行日志", true, None::<&str>)?;
-    let about = MenuItem::with_id(app, "about", "关于 SnapPin", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出 SnapPin", true, None::<&str>)?;
     let s1 = PredefinedMenuItem::separator(app)?;
     let s2 = PredefinedMenuItem::separator(app)?;
@@ -601,7 +600,6 @@ fn mac_native_tray_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<taur
             &s1,
             &log,
             &settings,
-            &about,
             &s2,
             &quit,
         ],
@@ -623,7 +621,6 @@ pub(crate) fn handle_menu_event(app: &AppHandle, id: &str) {
             }
         }
         "toggle-ball" => windows::toggle_ball(app),
-        "about" => open_external(ABOUT_URL),
         // 排障入口：直接打开落盘日志（release 无控制台，这是唯一的现场）
         "open-log" => open_external(&logfile::log_path().to_string_lossy()),
         // 设置窗（翻译 Key、快捷键、外观都在这）
@@ -655,9 +652,6 @@ pub(crate) fn handle_menu_event(app: &AppHandle, id: &str) {
         _ => {}
     }
 }
-
-/// "关于..." 跳转的项目仓库地址。
-pub const ABOUT_URL: &str = "https://gitee.com/dskcvip/snappin";
 
 /// macOS「隐私与安全性 → 屏幕录制」面板的深链（`open` 可直接识别）。
 pub const SCREEN_RECORDING_SETTINGS_URL: &str =

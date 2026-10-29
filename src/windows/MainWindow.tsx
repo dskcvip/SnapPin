@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   appInfo,
   ballCommand,
@@ -64,6 +64,12 @@ const ICONS = {
       <path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7" />
     </svg>
   ),
+  about: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 11v6M12 7h.01" />
+    </svg>
+  ),
   trash: (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
       <path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v6M14 11v6" />
@@ -83,6 +89,10 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
   {
     title: '数据与安全',
     items: [{ id: 'data', label: '数据管理', icon: ICONS.data }],
+  },
+  {
+    title: '',
+    items: [{ id: 'about', label: '关于', icon: ICONS.about }],
   },
 ]
 
@@ -219,7 +229,6 @@ export function MainWindow() {
   const [cfg, setCfg] = useState<AppConfig>(DEFAULT_CONFIG)
   const [dirty, setDirty] = useState(false)
   const [page, setPage] = useState('general')
-  const [navQuery, setNavQuery] = useState('')
   const [toast, setToast] = useState('')
 
   // 快捷键录制中（字段名 → 等待用户按键）
@@ -383,15 +392,6 @@ export function MainWindow() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [recording])
 
-  const groups = useMemo(() => {
-    const q = navQuery.trim()
-    if (!q) return NAV_GROUPS
-    return NAV_GROUPS.map((g) => ({
-      ...g,
-      items: g.items.filter((it) => it.label.includes(q)),
-    })).filter((g) => g.items.length > 0)
-  }, [navQuery])
-
   const openEditor = (id: string | 'new') => {
     if (id === 'new') {
       setDraft({
@@ -469,20 +469,9 @@ export function MainWindow() {
     <main className="set-root">
       {/* ---------------- 左侧导航 ---------------- */}
       <nav className="set-nav">
-        <div className="set-search">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <circle cx="11" cy="11" r="7" />
-            <path d="m20 20-3.5-3.5" />
-          </svg>
-          <input
-            value={navQuery}
-            onChange={(e) => setNavQuery(e.target.value)}
-            placeholder="搜索设置项"
-          />
-        </div>
-        {groups.map((g) => (
+        {NAV_GROUPS.map((g) => (
           <div key={g.title}>
-            <div className="set-group">{g.title}</div>
+            {g.title && <div className="set-group">{g.title}</div>}
             {g.items.map((it) => (
               <button
                 key={it.id}
@@ -498,7 +487,21 @@ export function MainWindow() {
       </nav>
 
       {/* ---------------- 右侧内容 ---------------- */}
-      <div className="set-main">
+      <div className={`set-main ${page === 'about' ? 'set-about-main' : ''}`}>
+        {page === 'about' && (
+          <section className="about-page" aria-label="关于 SnapPin">
+            <div className="about-card">
+              <div className="about-row">
+                <div className="about-version">当前版本 <span>v{info?.version ?? '—'}</span></div>
+                <button className="btn" onClick={() => openUrl('https://github.com/dskcvip/SnapPin/releases').catch(() => setToast('无法打开发布页，请稍后重试'))}>检查更新</button>
+              </div>
+              <div className="about-row">
+                <span>关于 SnapPin</span>
+                <button className="btn" onClick={() => openUrl('https://gitee.com/dskcvip/snappin').catch(() => setToast('无法打开官网，请稍后重试'))}>前往官网 <span aria-hidden="true">↗</span></button>
+              </div>
+            </div>
+          </section>
+        )}
         {page === 'general' && (
           <>
             <div className="set-page-head">
@@ -819,15 +822,16 @@ export function MainWindow() {
           </>
         )}
 
-        {/* 底部保存条：所有页共用 */}
-        <div className="btn-row">
+        {/* 关于页没有可编辑项；仍保留其他页面未保存草稿的保存入口。 */}
+        {(page !== 'about' || dirty) && <div className="btn-row">
           <button className="btn primary" disabled={!dirty} onClick={save}>
             保存设置
           </button>
           <span className={`save-state ${dirty ? 'dirty' : ''}`}>
             {toast || (dirty ? '有未保存的修改' : '已保存')}
           </span>
-        </div>
+        </div>}
+        {page === 'about' && !dirty && toast && <p role="status" className="about-status">{toast}</p>}
       </div>
 
       {/* 关闭确认提示：**固定在视口底部**，不随页面滚动跑出视野 */}

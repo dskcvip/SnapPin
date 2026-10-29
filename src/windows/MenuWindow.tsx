@@ -91,7 +91,6 @@ function appMenu(failed: string[]): MenuNode[] {
     SEP('sep-1'),
     { id: 'pin-manager', label: '贴图管理…' },
     { id: 'settings', label: '设置' },
-    { id: 'about', label: '关于 SnapPin' },
     { id: 'open-log', label: '打开运行日志' },
     // macOS 专属：屏幕录制授权"勾着却无效"时的自救入口
     // （清掉 TCC 记录，下次启动才会重新弹系统授权框）
