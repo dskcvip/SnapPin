@@ -31,8 +31,15 @@ jobs:
           test -d "$APP"
           codesign --force --deep --sign - "$APP"
           codesign --verify --deep --verbose=2 "$APP"
-          mkdir -p dist
-          hdiutil create -volname SnapPin -srcfolder "$APP" -ov -format UDZO dist/SnapPin-Flutter.dmg
+          mkdir -p dist/dmg-root
+          cp -R "$APP" dist/dmg-root/
+          ln -s /Applications dist/dmg-root/Applications
+          hdiutil create -volname SnapPin -srcfolder dist/dmg-root -ov -format UDZO dist/SnapPin-Flutter.dmg
+          MOUNT="$RUNNER_TEMP/snappin-dmg-check"
+          hdiutil attach dist/SnapPin-Flutter.dmg -readonly -nobrowse -mountpoint "$MOUNT"
+          test -d "$MOUNT/SnapPin.app"
+          test "$(readlink "$MOUNT/Applications")" = /Applications
+          hdiutil detach "$MOUNT"
       - uses: actions/upload-artifact@v4
         with:
           name: snappin-flutter-macos-dmg

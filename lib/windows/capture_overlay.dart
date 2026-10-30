@@ -686,6 +686,7 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
           }
           if (event.logicalKey == LogicalKeyboardKey.enter &&
               selection != null) {
+            if (_editingText != null) return KeyEventResult.ignored;
             _copy();
             return KeyEventResult.handled;
           }

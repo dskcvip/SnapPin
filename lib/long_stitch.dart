@@ -53,6 +53,7 @@ class LongStitchSession {
   int _stillCount = 0;
   int _viewportTop = 0;
   bool _previousLocated = true;
+  final List<Uint8List> _detachedFrames = [];
 
   static LongStitchSession start(
     Uint8List png, {
@@ -89,12 +90,16 @@ class LongStitchSession {
       throw StateError('长截图采集帧尺寸变化');
     }
     final raw = image.getBytes(order: img.ChannelOrder.rgba);
-    return _pushRaw(raw);
+    return _pushRaw(raw, sourcePng: png);
   }
 
-  LongStep _pushRaw(Uint8List raw) {
+  LongStep _pushRaw(
+    Uint8List raw, {
+    Uint8List? sourcePng,
+    bool replay = false,
+  }) {
     final next = raw;
-    _steps++;
+    if (!replay) _steps++;
     final frameDiff = _difference(_previous, next, 0, 0, _frameHeight);
     if (frameDiff < 1.0) {
       _stillCount++;
@@ -112,11 +117,40 @@ class LongStitchSession {
 
     // A viewport moving through rows already on the canvas must not be
     // appended again when the user scrolls upward or resumes after a gap.
-    final capturedTop = _findCapturedTop(next);
+    final capturedTop = replay ? null : _findCapturedTop(next);
     if (capturedTop != null) {
       _viewportTop = capturedTop;
       _previous = Uint8List.fromList(next);
       _previousLocated = true;
+      final heightBeforeReplay = _height;
+      if (!replay && _detachedFrames.isNotEmpty) {
+        final frames = List<Uint8List>.of(_detachedFrames.reversed);
+        _detachedFrames.clear();
+        for (final png in frames) {
+          final image = img.decodePng(png)!;
+          final step = _pushRaw(
+            image.getBytes(order: img.ChannelOrder.rgba),
+            replay: true,
+          );
+          if (step.kind == LongStepKind.noMatch) break;
+        }
+        final prepended = _height - heightBeforeReplay;
+        _viewportTop = capturedTop + prepended;
+        _previous = Uint8List.fromList(next);
+        _previousLocated = true;
+        if (prepended > 0) {
+          return LongStep(
+            LongStepKind.appended,
+            prepended,
+            0,
+            _height,
+            _steps,
+            1,
+            frameDiff,
+            direction: 'recovered-prepend',
+          );
+        }
+      }
       return LongStep(
         LongStepKind.rewound,
         0,
@@ -177,6 +211,26 @@ class LongStitchSession {
       }
     }
 
+    // A scrollbar jump can skip every intermediate row. Once detached, a
+    // coincidental overlap with the tail is not evidence of downward scroll.
+    if (!_previousLocated) {
+      _previous = Uint8List.fromList(next);
+      if (!replay && sourcePng != null) {
+        _detachedFrames.add(Uint8List.fromList(sourcePng));
+        if (_detachedFrames.length > 256) _detachedFrames.removeAt(0);
+      }
+      return LongStep(
+        LongStepKind.noMatch,
+        0,
+        0,
+        _height,
+        _steps,
+        0,
+        frameDiff,
+        direction: 'awaiting-anchor',
+      );
+    }
+
     final minimumOverlap = (_frameHeight ~/ 6).clamp(24, 120);
     final maximumShift = _frameHeight - minimumOverlap;
     var bestShift = 0;
@@ -205,6 +259,9 @@ class LongStitchSession {
     if (bestSupport < 24 || bestShift == 0) {
       _previous = Uint8List.fromList(next);
       _previousLocated = false;
+      if (!replay && sourcePng != null) {
+        _detachedFrames.add(Uint8List.fromList(sourcePng));
+      }
       return LongStep(
         LongStepKind.noMatch,
         0,
@@ -412,6 +469,35 @@ class LongStitchSession {
     if (_viewportTop <= lastTop &&
         _difference(_canvas, frame, _viewportTop, 0, _frameHeight) < 2) {
       return _viewportTop;
+    }
+    // Exact row hashes locate viewports at arbitrary pixel offsets. The old
+    // four-pixel scan misses positions between its probes after a scrollbar
+    // drag, especially when the pointer or page content changes slightly.
+    if (!_previousLocated) {
+      final rowsByHash = <int, List<int>>{};
+      for (var row = 0; row < _height; row++) {
+        final hash = _rowHash(_canvas, row);
+        if (hash != null) rowsByHash.putIfAbsent(hash, () => []).add(row);
+      }
+      final votes = <int, int>{};
+      for (var row = 0; row < _frameHeight; row += 8) {
+        final hash = _rowHash(frame, row);
+        if (hash == null) continue;
+        for (final canvasRow in rowsByHash[hash] ?? const <int>[]) {
+          final top = canvasRow - row;
+          if (top >= 0 && top <= lastTop) {
+            votes[top] = (votes[top] ?? 0) + 1;
+          }
+        }
+      }
+      final ranked = votes.keys.toList()
+        ..sort((a, b) => votes[b]!.compareTo(votes[a]!));
+      for (final top in ranked.take(16)) {
+        if (votes[top]! >= 4 &&
+            _difference(_canvas, frame, top, 0, _frameHeight) < 2) {
+          return top;
+        }
+      }
     }
     for (var top = 0; top <= lastTop; top += 4) {
       if (top == _viewportTop) continue;

@@ -118,7 +118,7 @@ class Annotation {
           strokeWidth * 1.9,
           label.length * strokeWidth * .9,
         );
-        final center = start + Offset(diameter / 2, diameter / 2);
+        final center = start;
         canvas.drawCircle(center, diameter / 2, Paint()..color = color);
         final painter = TextPainter(
           text: TextSpan(

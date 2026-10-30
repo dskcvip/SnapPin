@@ -230,4 +230,28 @@ void main() {
       session.dispose();
     }
   });
+
+  test('scrollbar jump never appends a coincidental tail overlap', () {
+    final session = LongStitchSession.start(_frame(600));
+    try {
+      for (var top = 720; top <= 1800; top += 120) {
+        expect(session.push(_frame(top)).kind, LongStepKind.appended);
+      }
+      final height = session.height;
+      expect(session.push(_frame(0)).kind, LongStepKind.noMatch);
+      for (final top in [120, 240, 360, 480]) {
+        final step = session.push(_frame(top));
+        expect(step.kind, LongStepKind.noMatch, reason: 'top=$top');
+        expect(session.height, height);
+      }
+      final anchored = session.push(_frame(601));
+      expect(anchored.kind, LongStepKind.appended);
+      expect(anchored.direction, 'recovered-prepend');
+      expect(session.height, height + 600);
+      expect(session.push(_frame(721)).kind, LongStepKind.rewound);
+      expect(session.height, height + 600);
+    } finally {
+      session.dispose();
+    }
+  });
 }
