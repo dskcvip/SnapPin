@@ -232,7 +232,7 @@ class MainFlutterWindow: NSWindow {
         let local = CGRect(x: Double(x) - bounds.minX,
                            y: Double(y) - bounds.minY,
                            width: Double(width), height: Double(height))
-        if let image = CGDisplayCreateImageForRect(display, local),
+        if let image = CGDisplayCreateImage(display, rect: local),
            let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) {
           return png
         }
