@@ -1,0 +1,40 @@
+name: Build Flutter macOS DMG
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - codex/flutter-macos
+    tags:
+      - 'flutter-v*'
+
+jobs:
+  dmg:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.6'
+          channel: stable
+          cache: true
+      - name: Check Flutter source
+        run: |
+          flutter pub get
+          flutter analyze --no-fatal-infos
+          flutter test
+      - name: Build macOS app
+        run: flutter build macos --release
+      - name: Sign and package DMG
+        run: |
+          APP='build/macos/Build/Products/Release/SnapPin.app'
+          test -d "$APP"
+          codesign --force --deep --sign - "$APP"
+          codesign --verify --deep --verbose=2 "$APP"
+          mkdir -p dist
+          hdiutil create -volname SnapPin -srcfolder "$APP" -ov -format UDZO dist/SnapPin-Flutter.dmg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: snappin-flutter-macos-dmg
+          path: dist/SnapPin-Flutter.dmg
+          if-no-files-found: error
