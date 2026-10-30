@@ -13,14 +13,14 @@ corresponding React window and CSS files.
 
 | Window / workflow | Reference | Status |
 | --- | --- | --- |
-| Floating ball and menu | `BallWindow`, `MenuWindow` | Partial: 56x56 frameless ball, tray, basic menu; menu items and visual QA remain |
+| Floating ball and menu | `BallWindow`, `MenuWindow` | Implemented: floating ball, tray and shared menu with shortcut conflict warnings; native visual QA remains |
 | Frozen screenshot and selection | `OverlayWindow` | Partial: multi-monitor capture, crop, window hover and click-to-select, eight resize handles, magnifier, color copy; visual and interaction QA remain |
 | Annotation tools and properties | `AnnotationLayer`, `ToolProps` | Partial: all toolbar entries, local sticker assets and Dart effects are wired; interaction and visual QA remain |
 | Image pin, context menu, groups | `PinWindow`, `PinManagerWindow` | Partial: pin/copy/save/scale/opacity/lock, context menu, image processing and groups are wired; visual and interaction QA remain |
 | OCR and QR results | `OcrWindow` | Partial: local Windows OCR / macOS Vision, OCR image-and-text window, Dart multi-code decoding; visual QA remains |
 | Translation | `TranslationWindow` | Partial: local OCR before text-only model translation; visual QA remains |
-| Long screenshot and preview | `LongResultWindow`, `LongPreviewWindow` | Partial: Dart stitching, auto-scroll, preview and result windows; platform and visual QA remain |
-| Settings, shortcuts, models, data | `MainWindow` | Partial: pages and controls wired; visual and workflow QA remain |
+| Long screenshot and preview | `LongResultWindow`, `LongPreviewWindow` | Implemented: manual scroll, background Dart stitching, full resolution output, preview and shared pin viewer; real browser regression remains |
+| Settings, shortcuts, models, data | `MainWindow` | Implemented: Tauri layout and model workflows, suspend/resume during shortcut recording; native visual and workflow QA remain |
 | Tray, single instance, startup | `src-tauri/src/lib.rs` | Partial: tray and shortcuts, Windows single-instance guard; macOS lifecycle and startup QA remain |
 
 System APIs needed for screen capture, window control, shortcuts, and the tray

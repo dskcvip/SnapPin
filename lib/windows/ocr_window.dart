@@ -8,6 +8,29 @@ import 'package:flutter/services.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../window_roles.dart';
+import '../ocr_image_store.dart';
+
+Future<void> showOcrResult(Uint8List png, String text) async {
+  final image = await OcrImageStore.create(png);
+  try {
+    final payload = {'image': image.path, 'text': text};
+    for (final window in await WindowController.getAll()) {
+      if (windowRole(window) == 'ocr') {
+        await window.invokeMethod<void>('openResult', payload);
+        return;
+      }
+    }
+    await WindowController.create(
+      WindowConfiguration(
+        arguments: jsonEncode({'role': 'ocr', ...payload}),
+        hiddenAtLaunch: true,
+      ),
+    );
+  } catch (_) {
+    await OcrImageStore.deleteOwned(image.path);
+    rethrow;
+  }
+}
 
 class OcrWindow extends StatefulWidget {
   const OcrWindow({
@@ -57,11 +80,7 @@ class _OcrWindowState extends State<OcrWindow> {
   }
 
   Future<void> _deleteImage(String path) async {
-    try {
-      await File(path).parent.delete(recursive: true);
-    } on FileSystemException {
-      // The temporary image may already have been removed by the OS.
-    }
+    await OcrImageStore.deleteOwned(path);
   }
 
   Future<void> _copyAll() async {

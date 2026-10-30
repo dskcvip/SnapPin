@@ -13,6 +13,8 @@ import 'package:screen_retriever/screen_retriever.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../capture_bridge.dart';
+import 'capture_exit_dialog.dart';
+import 'ocr_window.dart' show showOcrResult;
 import '../app_log.dart';
 import '../image_save.dart';
 import '../capture_image.dart';
@@ -94,6 +96,8 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
   bool _ocrBusy = false;
   bool _transBusy = false;
   bool _longMode = false;
+  bool _confirmingExit = false;
+  DialogRoute<CaptureExitDecision>? _exitRoute;
 
   @override
   void initState() {
@@ -426,33 +430,7 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
         Size(_display.width, _display.height),
       );
       final text = await _recognizeLocally(bytes);
-      final directory = await Directory.systemTemp.createTemp('snappin-ocr-');
-      final imagePath =
-          '${directory.path}${Platform.pathSeparator}selection.png';
-      await File(imagePath).writeAsBytes(bytes);
-      try {
-        final payload = {'image': imagePath, 'text': text};
-        WindowController? existing;
-        for (final window in await WindowController.getAll()) {
-          if (windowRole(window) == 'ocr') {
-            existing = window;
-            break;
-          }
-        }
-        if (existing != null) {
-          await existing.invokeMethod<void>('openResult', payload);
-        } else {
-          await WindowController.create(
-            WindowConfiguration(
-              arguments: jsonEncode({'role': 'ocr', ...payload}),
-              hiddenAtLaunch: true,
-            ),
-          );
-        }
-      } catch (_) {
-        await directory.delete(recursive: true);
-        rethrow;
-      }
+      await showOcrResult(bytes, text);
       await _close();
     } catch (error) {
       if (mounted) setState(() => _ocrText = '识别失败：$error');
@@ -530,6 +508,45 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
     setState(() => _annotations.add(_redo.removeLast()));
   }
 
+  Future<void> _requestExit() async {
+    if (_closing || _confirmingExit) return;
+    _confirmingExit = true;
+    final preference = CaptureExitPreference();
+    try {
+      if (!await preference.shouldAsk()) {
+        AppLog.write('capture-exit', 'confirmed-by-preference');
+        if (mounted && !_closing) await _close();
+        return;
+      }
+      if (!mounted || _closing) return;
+      AppLog.write('capture-exit-confirm-open');
+      final route = DialogRoute<CaptureExitDecision>(
+        context: context,
+        barrierDismissible: false,
+        barrierColor: Colors.transparent,
+        builder: (_) => const CaptureExitDialog(),
+      );
+      _exitRoute = route;
+      final decision = await Navigator.of(context).push(route);
+      _exitRoute = null;
+      AppLog.write(
+        'capture-exit-confirm-result',
+        'exit=${decision?.exit ?? false} dontAsk=${decision?.dontAskAgain ?? false}',
+      );
+      if (decision?.exit != true || !mounted || _closing) return;
+      if (decision!.dontAskAgain) {
+        try {
+          await preference.stopAsking();
+        } catch (error) {
+          AppLog.write('capture-exit-preference-failed', error);
+        }
+      }
+      if (mounted && !_closing) await _close();
+    } finally {
+      _confirmingExit = false;
+    }
+  }
+
   Future<void> _close() async {
     if (_closing) return;
     _closing = true;
@@ -550,6 +567,10 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
 
   Future<void> _closeSelf() async {
     _closing = true;
+    final exitRoute = _exitRoute;
+    if (exitRoute != null && exitRoute.isActive)
+      Navigator.of(context).removeRoute(exitRoute);
+    _exitRoute = null;
     _finishTextEditor(commit: false);
     _hideStickerFlyout();
     if (_longMode) await windowManager.setIgnoreMouseEvents(false);
@@ -680,13 +701,13 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
         autofocus: true,
         onKeyEvent: (_, event) {
           if (event is! KeyDownEvent) return KeyEventResult.ignored;
+          if (_editingText != null) return KeyEventResult.ignored;
           if (event.logicalKey == LogicalKeyboardKey.escape) {
-            _close();
+            _requestExit();
             return KeyEventResult.handled;
           }
           if (event.logicalKey == LogicalKeyboardKey.enter &&
               selection != null) {
-            if (_editingText != null) return KeyEventResult.ignored;
             _copy();
             return KeyEventResult.handled;
           }
@@ -1450,6 +1471,10 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
                 },
                 onKeyEvent: (_, event) {
                   if (event is! KeyDownEvent) return KeyEventResult.ignored;
+                  final composing = controller.value.composing;
+                  if (composing.isValid && !composing.isCollapsed) {
+                    return KeyEventResult.ignored;
+                  }
                   if (event.logicalKey == LogicalKeyboardKey.escape) {
                     _finishTextEditor(commit: false);
                     return KeyEventResult.handled;

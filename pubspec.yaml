@@ -47,6 +47,10 @@ dependencies:
   ffi: ^2.1.4
   zxing_lib: 1.1.4
 
+dependency_overrides:
+  hotkey_manager_windows:
+    path: third_party/hotkey_manager_windows
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

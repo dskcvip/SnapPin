@@ -3,16 +3,20 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 
 import '../app_config.dart';
+import '../app_log.dart';
 import '../translation_service.dart';
+import 'settings_icons.dart';
 
 class ModelsSettings extends StatefulWidget {
   const ModelsSettings({
     super.key,
     required this.config,
     required this.onChanged,
+    this.savedConfig,
   });
 
   final AppConfig config;
+  final AppConfig? savedConfig;
   final ValueChanged<AppConfig> onChanged;
 
   @override
@@ -61,11 +65,14 @@ const List<_Preset> _presets = [
 
 class _ModelsSettingsState extends State<ModelsSettings> {
   String? _hovered;
+  String? _focused;
   String? _testing;
   String? _result;
   bool _testOk = false;
 
   Future<void> _edit([TranslationModel? current]) async {
+    AppLog.write('model-editor-open', current == null ? 'new' : 'edit');
+    setState(() => _result = null);
     final name = TextEditingController(text: current?.name ?? '');
     final note = TextEditingController(text: current?.note ?? '');
     final base = TextEditingController(
@@ -121,16 +128,36 @@ class _ModelsSettingsState extends State<ModelsSettings> {
                     child: TextField(
                       controller: controller,
                       obscureText: obscure,
+                      textAlignVertical: TextAlignVertical.center,
                       onChanged: (_) => validate(),
-                      style: const TextStyle(fontSize: 13),
+                      style: const TextStyle(
+                        fontSize: 13,
+                        height: 1.2,
+                        color: Color(0xff1f2329),
+                      ),
                       decoration: InputDecoration(
                         hintText: hint,
+                        constraints: const BoxConstraints.tightFor(height: 32),
                         isDense: true,
                         contentPadding: const EdgeInsets.symmetric(
                           horizontal: 10,
+                          vertical: 7,
                         ),
                         border: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(8),
+                          borderSide: const BorderSide(
+                            color: Color(0xffe2e4e8),
+                          ),
+                        ),
+                        enabledBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(8),
+                          borderSide: const BorderSide(
+                            color: Color(0xffe2e4e8),
+                          ),
+                        ),
+                        focusedBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(8),
+                          borderSide: BorderSide(color: widget.config.color),
                         ),
                       ),
                     ),
@@ -141,14 +168,33 @@ class _ModelsSettingsState extends State<ModelsSettings> {
           );
 
           return Dialog(
-            backgroundColor: Colors.white,
+            key: const ValueKey('model-editor-dialog'),
+            elevation: 0,
+            backgroundColor: Colors.transparent,
+            insetPadding: const EdgeInsets.all(24),
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(14),
             ),
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 460, maxHeight: 520),
+            child: Container(
+              key: const ValueKey('model-editor-surface'),
+              width: 460,
+              constraints: const BoxConstraints(maxHeight: 592),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(14),
+                boxShadow: const [
+                  BoxShadow(
+                    color: Color(0x2e0f172a),
+                    blurRadius: 48,
+                    offset: Offset(0, 18),
+                  ),
+                ],
+              ),
               child: Padding(
-                padding: const EdgeInsets.fromLTRB(22, 20, 22, 18),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 22,
+                  vertical: 20,
+                ),
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -157,6 +203,7 @@ class _ModelsSettingsState extends State<ModelsSettings> {
                       current == null ? '添加模型' : '编辑模型',
                       style: const TextStyle(
                         fontSize: 15,
+                        height: 1.2,
                         fontWeight: FontWeight.w600,
                       ),
                     ),
@@ -266,7 +313,7 @@ class _ModelsSettingsState extends State<ModelsSettings> {
                           onPressed: () => Navigator.pop(dialogContext, false),
                           child: const Text('取消'),
                         ),
-                        const SizedBox(width: 8),
+                        const SizedBox(width: 10),
                         FilledButton(
                           onPressed: valid
                               ? () => Navigator.pop(dialogContext, true)
@@ -284,15 +331,19 @@ class _ModelsSettingsState extends State<ModelsSettings> {
       ),
     );
 
-    if (accepted == true) {
+    AppLog.write(
+      'model-editor-result',
+      accepted == true ? 'confirm' : 'cancel',
+    );
+    if (accepted == true && mounted) {
       final updated = TranslationModel(
         id: current?.id ?? 'm${DateTime.now().microsecondsSinceEpoch}',
-        name: name.text.trim(),
-        note: note.text.trim(),
-        baseUrl: base.text.trim(),
+        name: name.text,
+        note: note.text,
+        baseUrl: base.text,
         apiKey: key.text,
-        model: model.text.trim(),
-        keyUrl: keyUrl.text.trim(),
+        model: model.text,
+        keyUrl: keyUrl.text,
       );
       final models = [...widget.config.translationModels];
       final index = models.indexWhere((entry) => entry.id == updated.id);
@@ -303,6 +354,7 @@ class _ModelsSettingsState extends State<ModelsSettings> {
       }
       widget.onChanged(widget.config.copyWith(translationModels: models));
     }
+    await Future<void>.delayed(const Duration(milliseconds: 220));
     for (final controller in [name, note, base, key, model, keyUrl]) {
       controller.dispose();
     }
@@ -314,17 +366,30 @@ class _ModelsSettingsState extends State<ModelsSettings> {
       _result = null;
     });
     try {
-      await TranslationService.translate('你好', model, 'English');
+      final saved = widget.savedConfig ?? await ConfigStore.load();
+      final candidates = saved.translationModels.where(
+        (entry) => entry.id == model.id,
+      );
+      if (candidates.isEmpty) throw const FormatException('找不到这个模型（可能已被删除）');
+      AppLog.write('model-connection-test-start');
+      await TranslationService.testConnection(candidates.first);
+      AppLog.write('model-connection-test-success');
       if (mounted)
         setState(() {
           _testOk = true;
           _result = '连接成功：端点与 API Key 均可用';
         });
     } catch (error) {
+      AppLog.write(
+        'model-connection-test-failed',
+        error is FormatException ? error.message : error.runtimeType,
+      );
       if (mounted)
         setState(() {
           _testOk = false;
-          _result = error.toString();
+          _result = error is FormatException
+              ? error.message.toString()
+              : error.toString();
         });
     } finally {
       if (mounted) setState(() => _testing = null);
@@ -332,7 +397,11 @@ class _ModelsSettingsState extends State<ModelsSettings> {
   }
 
   Future<void> _openKeyUrl(String url) async {
-    await Process.start(Platform.isMacOS ? 'open' : 'explorer.exe', [url]);
+    try {
+      await Process.start(Platform.isMacOS ? 'open' : 'explorer.exe', [url]);
+    } catch (error) {
+      AppLog.write('model-key-url-open-failed', error.runtimeType);
+    }
   }
 
   @override
@@ -342,25 +411,45 @@ class _ModelsSettingsState extends State<ModelsSettings> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Expanded(
-              child: Text(
-                '自定义模型',
-                style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '自定义模型',
+                    style: TextStyle(
+                      fontSize: 15,
+                      height: 1.2,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  SizedBox(height: 6),
+                  SizedBox(
+                    width: 420,
+                    height: 38.4,
+                    child: Text(
+                      '模型写入本地 config.json，API Key 只存在本机；列表第一个为当前启用的模型。',
+                      style: TextStyle(
+                        fontSize: 12,
+                        height: 1.6,
+                        color: Color(0xff8a919f),
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ),
+            const SizedBox(width: 16),
             OutlinedButton(onPressed: () => _edit(), child: const Text('添加模型')),
           ],
-        ),
-        const SizedBox(height: 6),
-        const Text(
-          '模型写入本地 config.json，API Key 只存在本机；列表第一个为当前启用的模型。',
-          style: TextStyle(fontSize: 12, color: Color(0xff8a919f)),
         ),
         const SizedBox(height: 16),
         Container(
           width: double.infinity,
-          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+          key: const ValueKey('model-list-card'),
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 18),
           decoration: BoxDecoration(
             border: Border.all(color: const Color(0xffeceef1)),
             borderRadius: BorderRadius.circular(12),
@@ -377,7 +466,11 @@ class _ModelsSettingsState extends State<ModelsSettings> {
                   ),
                 ),
               for (var index = 0; index < models.length; index++)
-                _modelRow(models[index], index == 0),
+                _modelRow(
+                  models[index],
+                  index == 0,
+                  last: index == models.length - 1,
+                ),
               if (_result != null && _testing == null)
                 Container(
                   width: double.infinity,
@@ -417,128 +510,183 @@ class _ModelsSettingsState extends State<ModelsSettings> {
     );
   }
 
-  Widget _modelRow(TranslationModel model, bool active) => MouseRegion(
+  Widget _modelRow(
+    TranslationModel model,
+    bool active, {
+    bool last = false,
+  }) => MouseRegion(
     onEnter: (_) => setState(() => _hovered = model.id),
     onExit: (_) => setState(() => _hovered = null),
-    child: Container(
-      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 12),
-      decoration: const BoxDecoration(
-        border: Border(bottom: BorderSide(color: Color(0xfff5f6f7))),
-      ),
-      child: Row(
-        children: [
-          Container(
-            width: 28,
-            height: 28,
-            alignment: Alignment.center,
-            decoration: BoxDecoration(
-              color: const Color(0xffeef0f3),
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: Text(
-              model.name.isEmpty ? '?' : model.name.substring(0, 1),
-              style: const TextStyle(
-                fontSize: 13,
-                fontWeight: FontWeight.w600,
-                color: Color(0xff4e5566),
-              ),
-            ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Flexible(
-                      child: Text(
-                        model.name.isEmpty ? '（未命名）' : model.name,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(fontSize: 13),
-                      ),
-                    ),
-                    if (active) ...[
-                      const SizedBox(width: 6),
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 6,
-                          vertical: 1,
-                        ),
-                        decoration: BoxDecoration(
-                          color: const Color(0xffeaf6ff),
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                        child: const Text(
-                          '使用中',
-                          style: TextStyle(
-                            fontSize: 11,
-                            color: Color(0xff1677ff),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ],
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  [
-                        model.note,
-                        model.model,
-                      ].where((value) => value.isNotEmpty).join(' · ').isEmpty
-                      ? model.baseUrl
-                      : [
-                          model.note,
-                          model.model,
-                        ].where((value) => value.isNotEmpty).join(' · '),
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    fontSize: 12,
-                    color: Color(0xff9aa0ab),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          AnimatedOpacity(
-            opacity: _hovered == model.id || _testing == model.id ? 1 : 0,
-            duration: const Duration(milliseconds: 120),
-            child: TextButton(
-              onPressed: _testing == null ? () => _test(model) : null,
-              style: TextButton.styleFrom(
-                backgroundColor: const Color(0xff1f2329),
-                foregroundColor: Colors.white,
-                minimumSize: const Size(0, 26),
-                padding: const EdgeInsets.symmetric(horizontal: 10),
+    child: Focus(
+      onFocusChange: (focused) =>
+          setState(() => _focused = focused ? model.id : null),
+      child: Container(
+        key: ValueKey('model-row-${model.id}'),
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 12),
+        decoration: BoxDecoration(
+          border: last
+              ? null
+              : const Border(bottom: BorderSide(color: Color(0xfff5f6f7))),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 28,
+              height: 28,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: const Color(0xffeef0f3),
+                borderRadius: BorderRadius.circular(8),
               ),
               child: Text(
-                _testing == model.id ? '测试中…' : '测试连接',
-                style: const TextStyle(fontSize: 12),
+                model.name.isEmpty ? '?' : model.name.substring(0, 1),
+                style: const TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: Color(0xff4e5566),
+                ),
               ),
             ),
-          ),
-          IconButton(
-            tooltip: '编辑',
-            onPressed: () => _edit(model),
-            icon: const Icon(Icons.edit_outlined, size: 16),
-          ),
-          IconButton(
-            tooltip: '获取 API Key 的网页',
-            onPressed: model.keyUrl.isEmpty
-                ? null
-                : () => _openKeyUrl(model.keyUrl),
-            icon: const Icon(Icons.link, size: 16),
-          ),
-          IconButton(
-            tooltip: '删除',
-            onPressed: () => widget.onChanged(
-              widget.config.copyWith(
-                translationModels: modelsWithout(model.id),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  SizedBox(
+                    height: 16,
+                    child: Row(
+                      children: [
+                        Flexible(
+                          child: Text(
+                            model.name.isEmpty ? '（未命名）' : model.name,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(fontSize: 13, height: 1.2),
+                          ),
+                        ),
+                        if (active) ...[
+                          const SizedBox(width: 6),
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 6,
+                              vertical: 1,
+                            ),
+                            decoration: BoxDecoration(
+                              color: const Color(0xffeaf6ff),
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: const Text(
+                              '使用中',
+                              style: TextStyle(
+                                fontSize: 11,
+                                height: 1.2,
+                                color: Color(0xff1677ff),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    [
+                          model.note,
+                          model.model,
+                        ].where((value) => value.isNotEmpty).join(' · ').isEmpty
+                        ? model.baseUrl
+                        : [
+                            model.note,
+                            model.model,
+                          ].where((value) => value.isNotEmpty).join(' · '),
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 12,
+                      height: 1.2,
+                      color: Color(0xff9aa0ab),
+                    ),
+                  ),
+                ],
               ),
             ),
-            icon: const Icon(Icons.delete_outline, size: 16),
-          ),
-        ],
+            IgnorePointer(
+              ignoring:
+                  _hovered != model.id &&
+                  _focused != model.id &&
+                  _testing != model.id,
+              child: AnimatedOpacity(
+                opacity:
+                    _hovered == model.id ||
+                        _focused == model.id ||
+                        _testing == model.id
+                    ? 1
+                    : 0,
+                duration: const Duration(milliseconds: 120),
+                child: TextButton(
+                  onPressed: _testing == null ? () => _test(model) : null,
+                  style: TextButton.styleFrom(
+                    backgroundColor: const Color(0xff1f2329),
+                    foregroundColor: Colors.white,
+                    minimumSize: const Size(0, 26),
+                    padding: const EdgeInsets.symmetric(horizontal: 10),
+                  ),
+                  child: Text(
+                    _testing != null ? '测试中…' : '测试连接',
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(width: 2),
+            IconButton(
+              visualDensity: VisualDensity.standard,
+              style: const ButtonStyle(
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+              tooltip: '编辑',
+              onPressed: () => _edit(model),
+              constraints: const BoxConstraints.tightFor(width: 26, height: 26),
+              padding: EdgeInsets.zero,
+              icon: settingsIcon('pencil', size: 15),
+            ),
+            const SizedBox(width: 2),
+            IconButton(
+              visualDensity: VisualDensity.standard,
+              style: const ButtonStyle(
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+              tooltip: '获取 API Key 的网页',
+              onPressed: model.keyUrl.isEmpty
+                  ? null
+                  : () => _openKeyUrl(model.keyUrl),
+              constraints: const BoxConstraints.tightFor(width: 26, height: 26),
+              padding: EdgeInsets.zero,
+              icon: settingsIcon(
+                'link',
+                size: 15,
+                color: model.keyUrl.isEmpty
+                    ? const Color(0x668a919f)
+                    : const Color(0xff8a919f),
+              ),
+            ),
+            const SizedBox(width: 2),
+            IconButton(
+              visualDensity: VisualDensity.standard,
+              style: const ButtonStyle(
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+              hoverColor: const Color(0xfffdecec),
+              tooltip: '删除',
+              onPressed: () => widget.onChanged(
+                widget.config.copyWith(
+                  translationModels: modelsWithout(model.id),
+                ),
+              ),
+              constraints: const BoxConstraints.tightFor(width: 26, height: 26),
+              padding: EdgeInsets.zero,
+              icon: settingsIcon('trash', size: 15),
+            ),
+          ],
+        ),
       ),
     ),
   );

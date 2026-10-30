@@ -48,6 +48,9 @@ class _LongPreviewWindowState extends State<LongPreviewWindow> {
             _height = progress['height'] as int;
             _warning = progress['warning'] as bool;
             _message = progress['message'] as String? ?? _message;
+            if (progress['finishing'] is bool) {
+              _busy = progress['finishing'] as bool;
+            }
             final thumbPath = progress['thumbPath'];
             if (thumbPath is String) _thumbPath = thumbPath;
           });
@@ -136,7 +139,14 @@ class _LongPreviewWindowState extends State<LongPreviewWindow> {
                     color: Color(0xff34454a),
                   ),
                 ),
-                const Spacer(),
+                const SizedBox(width: 8),
+                const Expanded(
+                  child: Text(
+                    '滚动鼠标选择截图区域',
+                    maxLines: 1,
+                    style: TextStyle(fontSize: 11, color: Color(0xff54666c)),
+                  ),
+                ),
                 _icon(Icons.close, '取消长截图', () => _send('longCancel')),
                 const SizedBox(width: 7),
                 _icon(

@@ -229,10 +229,17 @@ class MainFlutterWindow: NSWindow {
       let displayRect = bounds
       let region = CGRect(x: x, y: y, width: width, height: height)
       if displayRect.contains(region) {
-        let local = CGRect(x: Double(x) - bounds.minX,
-                           y: Double(y) - bounds.minY,
-                           width: Double(width), height: Double(height))
-        if let image = CGDisplayCreateImage(display, rect: local),
+        // Capture in native pixels, then convert the logical selection explicitly.
+        // Passing a point-space rect into display image APIs is ambiguous on Retina.
+        guard let fullImage = CGDisplayCreateImage(display) else { continue }
+        let scaleX = Double(fullImage.width) / Double(bounds.width)
+        let scaleY = Double(fullImage.height) / Double(bounds.height)
+        let left = ((Double(x) - Double(bounds.minX)) * scaleX).rounded()
+        let top = ((Double(y) - Double(bounds.minY)) * scaleY).rounded()
+        let right = ((Double(x + width) - Double(bounds.minX)) * scaleX).rounded()
+        let bottom = ((Double(y + height) - Double(bounds.minY)) * scaleY).rounded()
+        let local = CGRect(x: left, y: top, width: right - left, height: bottom - top)
+        if let image = fullImage.cropping(to: local),
            let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) {
           return png
         }

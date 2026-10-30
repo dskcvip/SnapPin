@@ -42,13 +42,17 @@ HotKey parseShortcut(String spec) {
 }
 
 String? shortcutKeyLabel(KeyDownEvent event) {
-  final label = event.logicalKey.keyLabel;
-  if (label.isEmpty ||
-      label.toLowerCase().contains('control') ||
-      label.toLowerCase().contains('shift') ||
-      label.toLowerCase().contains('alt') ||
-      label.toLowerCase().contains('meta')) {
-    return null;
+  // Match Tauri's KeyboardEvent.code: Shift+1 must remain "1", not "!".
+  final usage = event.physicalKey.usbHidUsage;
+  if (usage >= 0x70004 && usage <= 0x7001d) {
+    return String.fromCharCode('A'.codeUnitAt(0) + usage - 0x70004);
   }
-  return label.toUpperCase();
+  if (usage >= 0x7001e && usage <= 0x70026) {
+    return '${usage - 0x7001e + 1}';
+  }
+  if (usage == 0x70027) return '0';
+  if (usage >= 0x7003a && usage <= 0x70045) {
+    return 'F${usage - 0x7003a + 1}';
+  }
+  return null;
 }

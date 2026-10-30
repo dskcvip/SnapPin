@@ -68,6 +68,22 @@ void main() {
     await tester.pump();
 
     expect(find.byType(TextField), findsOneWidget);
+    tester.testTextInput.updateEditingValue(
+      const TextEditingValue(
+        text: '中文',
+        selection: TextSelection.collapsed(offset: 2),
+        composing: TextRange(start: 0, end: 2),
+      ),
+    );
+    await tester.pump();
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pump();
+    expect(
+      find.byType(TextField),
+      findsOneWidget,
+      reason: 'Escape while composing belongs to the input method',
+    );
+    expect(find.text('确认退出截图？'), findsNothing);
     await tester.enterText(find.byType(TextField), '测试文字');
     await tester.sendKeyEvent(LogicalKeyboardKey.enter);
     await tester.pump();

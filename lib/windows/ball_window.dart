@@ -15,12 +15,14 @@ import 'package:tray_manager/tray_manager.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../capture_bridge.dart';
+import 'app_menu_metrics.dart';
 import '../app_config.dart';
 import '../app_log.dart';
 import '../ocr_bridge.dart';
 import '../translation_service.dart';
 import '../shortcuts.dart';
 import '../long_stitch.dart';
+import '../long_stitch_worker.dart';
 
 class BallWindow extends StatefulWidget {
   const BallWindow({super.key, required this.controller, required this.config});
@@ -45,10 +47,11 @@ class _BallWindowState extends State<BallWindow>
   bool _previewingSettings = false;
   Future<WindowController>? _menuFuture;
   Future<List<WindowController>>? _overlayFuture;
-  LongStitchSession? _longSession;
+  LongStitchWorker? _longSession;
   Timer? _longTimer;
   bool _longSampling = false;
   bool _longStopping = false;
+  bool _longStarting = false;
   Map<String, dynamic>? _longRegion;
   WindowController? _longPreview;
   Directory? _longPreviewDirectory;
@@ -59,6 +62,8 @@ class _BallWindowState extends State<BallWindow>
   bool _longWarningShown = false;
   DateTime _longLastThumbnail = DateTime.fromMillisecondsSinceEpoch(0);
   final List<String> _hotkeyWarnings = [];
+  bool _hotkeysSuspended = false;
+  Future<void> _hotkeyOperation = Future<void>.value();
 
   @override
   void initState() {
@@ -102,6 +107,8 @@ class _BallWindowState extends State<BallWindow>
             exit(0);
         }
       }
+      if (call.method == 'suspendHotkeys') await _setHotkeysSuspended(true);
+      if (call.method == 'resumeHotkeys') await _setHotkeysSuspended(false);
       if (call.method == 'applySettings') {
         final config = AppConfig.fromJson(
           Map<String, dynamic>.from(
@@ -166,7 +173,32 @@ class _BallWindowState extends State<BallWindow>
     }
   }
 
-  Future<void> _registerHotkey() async {
+  Future<void> _queueHotkeyOperation(Future<void> Function() operation) {
+    final next = _hotkeyOperation
+        .catchError((Object error) {
+          AppLog.write('hotkey-operation-failed', error);
+        })
+        .then((_) => operation());
+    _hotkeyOperation = next;
+    return next;
+  }
+
+  Future<void> _setHotkeysSuspended(bool suspended) =>
+      _queueHotkeyOperation(() async {
+        _hotkeysSuspended = suspended;
+        if (suspended) {
+          await hotKeyManager.unregisterAll();
+          AppLog.write('hotkeys-suspended', 'settings-recording');
+        } else {
+          await _registerHotkeyNow();
+          AppLog.write('hotkeys-resumed', 'settings-recording');
+        }
+      });
+
+  Future<void> _registerHotkey() => _queueHotkeyOperation(_registerHotkeyNow);
+
+  Future<void> _registerHotkeyNow() async {
+    if (_hotkeysSuspended) return;
     try {
       _hotkeyWarnings.clear();
       final capture = parseShortcut(_config.shortcutCapture);
@@ -176,29 +208,31 @@ class _BallWindowState extends State<BallWindow>
         await hotKeyManager.register(
           capture,
           keyDownHandler: (_) {
+            if (_hotkeysSuspended) return;
             AppLog.write('hotkey-trigger', 'capture');
             _capture();
           },
         );
       } catch (error) {
         AppLog.write('hotkey-registration-failed', 'capture: $error');
-        _hotkeyWarnings.add('${_config.shortcutCapture} 截图快捷键不可用');
+        _hotkeyWarnings.add('截图快捷键');
       }
       try {
         await hotKeyManager.register(
           pin,
           keyDownHandler: (_) {
+            if (_hotkeysSuspended) return;
             AppLog.write('hotkey-trigger', 'pin-clipboard');
             _pinClipboard();
           },
         );
       } catch (error) {
         AppLog.write('hotkey-registration-failed', 'pin-clipboard: $error');
-        _hotkeyWarnings.add('${_config.shortcutPinClipboard} 贴图快捷键不可用');
+        _hotkeyWarnings.add('贴图快捷键');
       }
       AppLog.write(
         'hotkey-registration-complete',
-        '${_config.shortcutCapture}, ${_config.shortcutPinClipboard}',
+        'capture=${_config.shortcutCapture} pin=${_config.shortcutPinClipboard} failed=${_hotkeyWarnings.join(',')}',
       );
     } catch (error) {
       AppLog.write('hotkey-registration-failed', error);
@@ -541,18 +575,21 @@ class _BallWindowState extends State<BallWindow>
   }
 
   Future<void> _startLongCapture(Map<String, dynamic> region) async {
-    if (_longSession != null) throw StateError('长截图正在进行');
+    if (_longStarting || _longStopping || _longSession != null) {
+      throw StateError('长截图正在进行');
+    }
     final started = DateTime.now();
     final x = region['x'] as int;
     final y = region['y'] as int;
     final width = region['width'] as int;
     final height = region['height'] as int;
     if (width < 20 || height < 80) throw StateError('长截图选区太小');
+    _longStarting = true;
     try {
       final hiddenToolbars = await CaptureBridge.suppressInputToolbar(true);
       AppLog.write('long-input-toolbar-hidden', 'count=$hiddenToolbars');
       final first = await CaptureBridge.captureRegion(x, y, width, height);
-      _longSession = LongStitchSession.start(first);
+      _longSession = await LongStitchWorker.start(first);
       AppLog.write(
         'long-first-frame',
         'requested=${width}x$height actual=${_longSession!.width}x${_longSession!.height} bytes=${first.length}',
@@ -566,20 +603,20 @@ class _BallWindowState extends State<BallWindow>
         'snappin-long-preview-',
       );
       _longRegion = region;
+      final logicalX = (region['logicalX'] as num).toDouble();
+      final logicalY = (region['logicalY'] as num).toDouble();
+      final logicalWidth = (region['logicalWidth'] as num).toDouble();
       final displays = await screenRetriever.getAllDisplays();
       final display =
           displays.where((item) {
             final origin = item.visiblePosition ?? Offset.zero;
             return (origin & (item.visibleSize ?? item.size)).contains(
-              Offset(x.toDouble(), y.toDouble()),
+              Offset(logicalX, logicalY),
             );
           }).firstOrNull ??
           await screenRetriever.getPrimaryDisplay();
       final bounds = display.visiblePosition ?? Offset.zero;
       final size = display.visibleSize ?? display.size;
-      final logicalX = (region['logicalX'] as num).toDouble();
-      final logicalY = (region['logicalY'] as num).toDouble();
-      final logicalWidth = (region['logicalWidth'] as num).toDouble();
       final previewX = (logicalX + logicalWidth + 12).clamp(
         bounds.dx,
         bounds.dx + size.width - 344,
@@ -592,7 +629,7 @@ class _BallWindowState extends State<BallWindow>
               'role': 'long-preview',
               'x': previewX,
               'y': previewY,
-              'height': height,
+              'height': _longSession!.height,
             }),
             hiddenAtLaunch: true,
           ),
@@ -602,12 +639,12 @@ class _BallWindowState extends State<BallWindow>
         await _longPreview!.invokeMethod<void>('openPreview', {
           'x': previewX,
           'y': previewY,
-          'height': height,
+          'height': _longSession!.height,
         });
         AppLog.write('long-preview-reused');
       }
       await _sendLongProgress({
-        'height': height,
+        'height': _longSession!.height,
         'steps': 0,
         'warning': false,
         'thumbPath': await _writeLongThumb(),
@@ -627,6 +664,8 @@ class _BallWindowState extends State<BallWindow>
       AppLog.write('long-start-failed', '$error\n$stack');
       await _cancelLongCapture();
       rethrow;
+    } finally {
+      _longStarting = false;
     }
   }
 
@@ -655,7 +694,7 @@ class _BallWindowState extends State<BallWindow>
           .difference(captureStarted)
           .inMilliseconds;
       final stitchStarted = DateTime.now();
-      final step = _longSession!.push(frame);
+      final step = await _longSession!.push(frame);
       final stitchMs = DateTime.now().difference(stitchStarted).inMilliseconds;
       if (step.kind == LongStepKind.still) {
         _longStillSamples++;
@@ -731,10 +770,6 @@ class _BallWindowState extends State<BallWindow>
           });
         }
       }
-      if (step.steps >= 3600) {
-        AppLog.write('long-step-limit', 'steps=${step.steps}');
-        unawaited(_finishLongCapture(reason: 'step-limit'));
-      }
     } on LongCaptureLimitException catch (error) {
       AppLog.write(
         'long-memory-limit',
@@ -743,7 +778,7 @@ class _BallWindowState extends State<BallWindow>
       unawaited(_finishLongCapture(reason: 'memory-limit'));
     } catch (error, stack) {
       AppLog.write('long-sample-failed', '$error\n$stack');
-      unawaited(Future<void>.delayed(Duration.zero, _cancelLongCapture));
+      unawaited(_finishLongCapture(reason: 'capture-error'));
     } finally {
       if (previewHidden) {
         try {
@@ -774,7 +809,7 @@ class _BallWindowState extends State<BallWindow>
     if (directory == null || session == null) throw StateError('长截图预览不可用');
     final path =
         '${directory.path}${Platform.pathSeparator}thumb-${_longPreviewSequence++}.png';
-    await File(path).writeAsBytes(session.previewPng());
+    await File(path).writeAsBytes(await session.previewPng());
     return path;
   }
 
@@ -790,11 +825,20 @@ class _BallWindowState extends State<BallWindow>
     while (_longSampling) {
       await Future<void>.delayed(const Duration(milliseconds: 20));
     }
+    var saved = false;
     try {
       final session = _longSession!;
+      await _sendLongProgress({
+        'height': session.height,
+        'steps': session.steps,
+        'warning': false,
+        'finishing': true,
+        'message': '正在生成长截图…',
+      });
       final directory = await Directory.systemTemp.createTemp('snappin-long-');
       final path = '${directory.path}${Platform.pathSeparator}long.png';
       await session.savePng(File(path));
+      saved = true;
       AppLog.write('long-result-saved', path);
       final width = session.width;
       final height = session.height;
@@ -824,19 +868,34 @@ class _BallWindowState extends State<BallWindow>
       AppLog.write('long-finished', '${width}x$height path=$path');
     } catch (error, stack) {
       AppLog.write('long-finish-failed', '$error\n$stack');
-      rethrow;
+      if (!saved) {
+        try {
+          await _sendLongProgress({
+            'height': _longSession!.height,
+            'steps': _longSession!.steps,
+            'warning': true,
+            'finishing': false,
+            'message': '生成失败，已保留截图内容；请再次点击完成重试',
+          });
+        } catch (previewError) {
+          AppLog.write('long-finish-feedback-failed', previewError);
+        }
+      }
     } finally {
-      _longSession?.dispose();
-      _longSession = null;
-      _lastLongStepKind = null;
-      _longRegion = null;
+      if (saved) {
+        _longSession?.dispose();
+        _longSession = null;
+        _lastLongStepKind = null;
+        _longRegion = null;
+        await _unregisterLongEscape();
+        await _restoreLongInputToolbar();
+      }
       _longStopping = false;
-      await _unregisterLongEscape();
-      await _restoreLongInputToolbar();
     }
   }
 
   Future<void> _cancelLongCapture() async {
+    if (_longStopping) return;
     _longTimer?.cancel();
     _longTimer = null;
     _longStopping = true;
@@ -847,17 +906,24 @@ class _BallWindowState extends State<BallWindow>
     _longSession = null;
     _lastLongStepKind = null;
     _longRegion = null;
-    await _unregisterLongEscape();
-    await _restoreLongInputToolbar();
-    await _closeLongPreview();
-    unawaited(_cleanupLongThumbnails());
-    await _closeCaptureOverlays();
-    _longStopping = false;
-    AppLog.write('long-cancelled');
+    try {
+      await _unregisterLongEscape();
+      await _restoreLongInputToolbar();
+      await _closeLongPreview();
+      unawaited(_cleanupLongThumbnails());
+      await _closeCaptureOverlays();
+      AppLog.write('long-cancelled');
+    } finally {
+      _longStopping = false;
+    }
   }
 
   Future<void> _unregisterLongEscape() async {
-    await CaptureBridge.setLongEscapeEnabled(false);
+    try {
+      await CaptureBridge.setLongEscapeEnabled(false);
+    } catch (error) {
+      AppLog.write('long-escape-unregister-failed', error);
+    }
   }
 
   Future<void> _restoreLongInputToolbar() async {
@@ -1024,7 +1090,7 @@ class _BallWindowState extends State<BallWindow>
       final left = (anchor.dx - (cursor == null ? 218 : 18))
           .clamp(origin.dx, origin.dx + size.width - 260)
           .toDouble();
-      final menuHeight = 312 + (_hotkeyWarnings.isEmpty ? 0 : 30);
+      final menuHeight = appMenuHeight(_hotkeyWarnings);
       final top = anchor.dy
           .clamp(origin.dy, origin.dy + size.height - menuHeight)
           .toDouble();

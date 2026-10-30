@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ffi' show Abi;
 
 import 'package:desktop_multi_window/desktop_multi_window.dart';
 import 'package:flutter/material.dart';
@@ -11,10 +12,16 @@ import '../app_log.dart';
 import '../window_roles.dart';
 import '../shortcuts.dart';
 import 'models_settings.dart';
+import 'settings_icons.dart';
 
 class SettingsWindow extends StatefulWidget {
-  const SettingsWindow({super.key, required this.controller});
+  const SettingsWindow({
+    super.key,
+    required this.controller,
+    this.initialConfig,
+  });
   final WindowController controller;
+  final AppConfig? initialConfig;
 
   @override
   State<SettingsWindow> createState() => _SettingsWindowState();
@@ -26,6 +33,10 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
   String _page = '通用';
   String _keyQuery = '';
   String? _recording;
+  String? _requestedRecording;
+  int _recordingRevision = 0;
+  bool _disposing = false;
+  Future<void> _recordingOperation = Future<void>.value();
   bool _saving = false;
   bool _dirty = false;
   bool _closeArmed = false;
@@ -45,25 +56,80 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
       }
       return null;
     });
-    ConfigStore.load().then((config) {
-      if (mounted)
-        setState(() {
-          _config = config;
-          _savedConfig = config;
+    (widget.initialConfig == null
+            ? ConfigStore.load()
+            : Future.value(widget.initialConfig!))
+        .then((config) {
+          if (mounted)
+            setState(() {
+              _config = config;
+              _savedConfig = config;
+            });
         });
-    });
   }
 
   @override
   void dispose() {
+    _disposing = true;
+    _setRecording(null);
     windowManager.removeListener(this);
     super.dispose();
+  }
+
+  @override
+  void onWindowBlur() => _setRecording(null);
+
+  @override
+  void onWindowMinimize() => _setRecording(null);
+
+  void _setRecording(String? field) {
+    if (field == null && _requestedRecording == null && _recording == null)
+      return;
+    _requestedRecording = field;
+    final revision = ++_recordingRevision;
+    if (field == null && mounted && !_disposing)
+      setState(() => _recording = null);
+    _recordingOperation = _recordingOperation
+        .catchError((Object error) {
+          AppLog.write('settings-recording-failed', error);
+        })
+        .then((_) async {
+          if (field != null &&
+              (!mounted || _disposing || revision != _recordingRevision))
+            return;
+          final ball = await findBallWindow();
+          if (field != null &&
+              (!mounted || _disposing || revision != _recordingRevision))
+            return;
+          await ball?.invokeMethod<void>(
+            field == null ? 'resumeHotkeys' : 'suspendHotkeys',
+          );
+          if (field != null &&
+              mounted &&
+              !_disposing &&
+              revision == _recordingRevision) {
+            setState(() => _recording = field);
+          }
+          AppLog.write('settings-recording', field ?? 'stopped');
+        })
+        .catchError((Object error) async {
+          _requestedRecording = null;
+          if (mounted && !_disposing) setState(() => _recording = null);
+          AppLog.write('settings-recording-failed', error);
+          try {
+            final ball = await findBallWindow();
+            await ball?.invokeMethod<void>('resumeHotkeys');
+          } catch (resumeError) {
+            AppLog.write('settings-hotkeys-resume-failed', resumeError);
+          }
+        });
   }
 
   @override
   void onWindowClose() => _requestClose();
 
   Future<void> _requestClose() async {
+    _setRecording(null);
     if (_closing || _saving) return;
     AppLog.write('settings-close-request', 'dirty=$_dirty armed=$_closeArmed');
     if (_dirty && !_closeArmed) {
@@ -76,6 +142,8 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
   Future<void> _discardAndClose() async {
     if (_closing) return;
     _closing = true;
+    _setRecording(null);
+    await _recordingOperation;
     if (_dirty && _savedConfig != null) {
       try {
         await _preview(_savedConfig!);
@@ -301,7 +369,7 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
     children: [
       SizedBox(
         width: 52,
-        child: Text(label, style: const TextStyle(fontSize: 12)),
+        child: Text(label, style: const TextStyle(fontSize: 13)),
       ),
       Expanded(
         child: Slider(value: value, max: max, onChanged: onChanged),
@@ -324,7 +392,11 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(8),
             ),
-            textStyle: const TextStyle(fontSize: 13),
+            textStyle: Theme.of(context).textTheme.bodyMedium!
+                .copyWith(fontSize: 13),
+            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            disabledBackgroundColor: config.color.withValues(alpha: .55),
+            disabledForegroundColor: Colors.white,
           ),
         ),
         outlinedButtonTheme: OutlinedButtonThemeData(
@@ -337,7 +409,9 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(8),
             ),
-            textStyle: const TextStyle(fontSize: 13),
+            textStyle: Theme.of(context).textTheme.bodyMedium!
+                .copyWith(fontSize: 13),
+            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
           ),
         ),
         textButtonTheme: TextButtonThemeData(
@@ -349,7 +423,9 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(8),
             ),
-            textStyle: const TextStyle(fontSize: 13),
+            textStyle: Theme.of(context).textTheme.bodyMedium!
+                .copyWith(fontSize: 13),
+            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
           ),
         ),
       ),
@@ -367,7 +443,7 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
             return KeyEventResult.ignored;
           }
           if (event.logicalKey == LogicalKeyboardKey.escape) {
-            setState(() => _recording = null);
+            _setRecording(null);
             return KeyEventResult.handled;
           }
           final keyboard = HardwareKeyboard.instance;
@@ -386,12 +462,13 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
                 ? config.copyWith(shortcutCapture: shortcut)
                 : config.copyWith(shortcutPinClipboard: shortcut),
           );
-          setState(() => _recording = null);
+          _setRecording(null);
           return KeyEventResult.handled;
         },
         child: Stack(
           children: [
             Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 Container(
                   width: 208,
@@ -399,7 +476,7 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
                   padding: const EdgeInsets.fromLTRB(10, 12, 10, 10),
                   child: Column(
                     children: [
-                      const SizedBox(height: 10),
+                      const SizedBox(height: 8),
                       const Align(
                         alignment: Alignment.centerLeft,
                         child: Padding(
@@ -453,7 +530,11 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
                         '快捷键' => _shortcuts(config),
                         '模型' => Column(
                           children: [
-                            ModelsSettings(config: config, onChanged: _patch),
+                            ModelsSettings(
+                              config: config,
+                              savedConfig: _savedConfig,
+                              onChanged: _patch,
+                            ),
                             const SizedBox(height: 18),
                             _saveButton(),
                           ],
@@ -506,7 +587,8 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
                           style: FilledButton.styleFrom(
                             minimumSize: const Size(0, 26),
                             padding: const EdgeInsets.symmetric(horizontal: 11),
-                            textStyle: const TextStyle(fontSize: 12),
+                            textStyle: Theme.of(context).textTheme.bodyMedium!
+                                .copyWith(fontSize: 12),
                             shape: RoundedRectangleBorder(
                               borderRadius: BorderRadius.circular(6),
                             ),
@@ -521,7 +603,8 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
                             side: const BorderSide(color: Color(0xffe6c48c)),
                             minimumSize: const Size(0, 26),
                             padding: const EdgeInsets.symmetric(horizontal: 11),
-                            textStyle: const TextStyle(fontSize: 12),
+                            textStyle: Theme.of(context).textTheme.bodyMedium!
+                                .copyWith(fontSize: 12),
                             shape: RoundedRectangleBorder(
                               borderRadius: BorderRadius.circular(6),
                             ),
@@ -535,7 +618,8 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
                             foregroundColor: const Color(0x8c0f172a),
                             minimumSize: const Size(0, 26),
                             padding: const EdgeInsets.symmetric(horizontal: 11),
-                            textStyle: const TextStyle(fontSize: 12),
+                            textStyle: Theme.of(context).textTheme.bodyMedium!
+                                .copyWith(fontSize: 12),
                           ),
                           child: const Text('取消'),
                         ),
@@ -568,7 +652,7 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
         padding: EdgeInsets.only(bottom: 16),
         child: Text(
           '外观、悬浮球与翻译目标语言等常规项。',
-          style: TextStyle(fontSize: 12, color: Color(0xff8a919f)),
+          style: TextStyle(fontSize: 12, height: 1.6, color: Color(0xff8a919f)),
         ),
       ),
       _section('', [
@@ -616,6 +700,7 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
           '${config.ballSize}px',
           divisions: 20,
         ),
+        const SizedBox(height: 14),
         _slider(
           '悬浮球不透明度',
           config.ballOpacity * 100,
@@ -626,7 +711,7 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
           '${(config.ballOpacity * 100).round()}%',
           divisions: 17,
         ),
-        const SizedBox(height: 12),
+        const SizedBox(height: 14),
         Row(
           children: [
             const SizedBox(
@@ -642,13 +727,22 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
                 height: 32,
                 child: TextFormField(
                   initialValue: config.targetLang,
+                  textAlignVertical: TextAlignVertical.center,
                   style: const TextStyle(fontSize: 13),
                   decoration: InputDecoration(
                     isDense: true,
                     hintText: '中文',
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 10),
+                    constraints: const BoxConstraints.tightFor(height: 32),
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 7,
+                    ),
                     border: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(8),
+                    ),
+                    enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(8),
+                      borderSide: const BorderSide(color: Color(0xffe2e4e8)),
                     ),
                   ),
                   onChanged: (value) =>
@@ -656,23 +750,24 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
                 ),
               ),
             ),
-            const SizedBox(width: 10),
+            const SizedBox(width: 14),
             const Text(
               '写进提示词，如 中文 / 英文 / 日文',
               style: TextStyle(fontSize: 12, color: Color(0xff9aa0ab)),
             ),
           ],
         ),
+        const SizedBox(height: 14),
       ]),
       const SizedBox(height: 16),
       _section('动作', [
         const Text(
           '常用入口，和托盘菜单一致。',
-          style: TextStyle(fontSize: 12, color: Color(0xff8a919f)),
+          style: TextStyle(fontSize: 12, height: 1.6, color: Color(0xff8a919f)),
         ),
-        const SizedBox(height: 12),
+        const SizedBox(height: 10),
         Wrap(
-          spacing: 8,
+          spacing: 10,
           runSpacing: 8,
           children: [
             FilledButton(
@@ -727,14 +822,26 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
             height: 30,
             child: TextField(
               onChanged: (value) => setState(() => _keyQuery = value),
-              decoration: const InputDecoration(
+              style: const TextStyle(fontSize: 13),
+              textAlignVertical: TextAlignVertical.center,
+              decoration: InputDecoration(
                 hintText: '搜索命令',
-                prefixIcon: Icon(Icons.search, size: 15),
+                prefixIcon: Padding(
+                  padding: const EdgeInsets.only(left: 10, right: 7),
+                  child: settingsIcon('search', size: 13),
+                ),
+                prefixIconConstraints: const BoxConstraints.tightFor(
+                  width: 30,
+                  height: 30,
+                ),
                 filled: true,
                 fillColor: Color(0xfff2f3f5),
-                border: OutlineInputBorder(borderSide: BorderSide.none),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(8),
+                  borderSide: BorderSide.none,
+                ),
                 isDense: true,
-                contentPadding: EdgeInsets.zero,
+                contentPadding: const EdgeInsets.symmetric(vertical: 7),
               ),
             ),
           ),
@@ -742,8 +849,8 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
           OutlinedButton(
             onPressed: () => _patch(
               config.copyWith(
-                shortcutCapture: 'Ctrl+1',
-                shortcutPinClipboard: 'Ctrl+2',
+                shortcutCapture: Platform.isMacOS ? 'Super+1' : 'Ctrl+1',
+                shortcutPinClipboard: Platform.isMacOS ? 'Super+2' : 'Ctrl+2',
               ),
             ),
             child: const Text('全部恢复默认'),
@@ -753,39 +860,55 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
       const SizedBox(height: 16),
       Container(
         width: double.infinity,
-        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 18),
         decoration: BoxDecoration(
           border: Border.all(color: const Color(0xffeceef1)),
           borderRadius: BorderRadius.circular(12),
         ),
         child: Column(
           children: [
-            const Row(
-              children: [
-                Expanded(
-                  flex: 4,
-                  child: Text(
-                    '命令',
-                    style: TextStyle(fontSize: 12, color: Color(0xff8a919f)),
-                  ),
+            const SizedBox(
+              height: 35,
+              child: Padding(
+                padding: EdgeInsets.symmetric(horizontal: 12),
+                child: Row(
+                  children: [
+                    Expanded(
+                      flex: 65,
+                      child: Text(
+                        '命令',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Color(0xff8a919f),
+                        ),
+                      ),
+                    ),
+                    Expanded(
+                      flex: 35,
+                      child: Text(
+                        '按键绑定',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Color(0xff8a919f),
+                        ),
+                      ),
+                    ),
+                    SizedBox(
+                      width: 56,
+                      child: Text(
+                        '操作',
+                        textAlign: TextAlign.right,
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Color(0xff8a919f),
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
-                Expanded(
-                  flex: 3,
-                  child: Text(
-                    '按键绑定',
-                    style: TextStyle(fontSize: 12, color: Color(0xff8a919f)),
-                  ),
-                ),
-                SizedBox(
-                  width: 36,
-                  child: Text(
-                    '操作',
-                    style: TextStyle(fontSize: 12, color: Color(0xff8a919f)),
-                  ),
-                ),
-              ],
+              ),
             ),
-            const Divider(height: 20, color: Color(0xfff0f1f3)),
+            const Divider(height: 1, thickness: 1, color: Color(0xfff0f1f3)),
             for (final row in [
               ('开始截图', config.shortcutCapture, 'capture'),
               ('剪贴板贴图', config.shortcutPinClipboard, 'pin'),
@@ -795,8 +918,30 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
               ('调整贴图不透明度', 'Alt+滚轮', ''),
               ('选区取色', 'C', ''),
             ])
-              if (row.$1.toLowerCase().contains(_keyQuery.toLowerCase()))
+              if (row.$1.toLowerCase().contains(_keyQuery.trim().toLowerCase()))
                 _shortcutRow(row.$1, row.$2, row.$3.isEmpty ? null : row.$3),
+            if (![
+              '开始截图',
+              '剪贴板贴图',
+              '复制选区 / 确认',
+              '取消截图 / 关闭贴图',
+              '缩放贴图',
+              '调整贴图不透明度',
+              '选区取色',
+            ].any((label) => label.contains(_keyQuery.trim())))
+              Padding(
+                padding: const EdgeInsets.only(top: 10),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    '没有匹配「${_keyQuery.trim()}」的命令。',
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: Color(0xff9aa0ab),
+                    ),
+                  ),
+                ),
+              ),
           ],
         ),
       ),
@@ -806,18 +951,24 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
   );
 
   Widget _shortcutRow(String label, String value, String? field) => Container(
-    height: 46,
-    decoration: const BoxDecoration(
-      border: Border(bottom: BorderSide(color: Color(0xfff0f1f3))),
+    height: field == null ? 39 : 48,
+    padding: const EdgeInsets.symmetric(horizontal: 12),
+    decoration: BoxDecoration(
+      border: label == '选区取色'
+          ? null
+          : const Border(bottom: BorderSide(color: Color(0xfff5f6f7))),
     ),
     child: Row(
       children: [
         Expanded(
-          flex: 4,
-          child: Text(label, style: const TextStyle(fontSize: 12)),
+          flex: 65,
+          child: Text(
+            label,
+            style: const TextStyle(fontSize: 13, color: Color(0xff1f2329)),
+          ),
         ),
         Expanded(
-          flex: 3,
+          flex: 35,
           child: field == null
               ? Text(
                   value,
@@ -829,7 +980,9 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
               : Align(
                   alignment: Alignment.centerLeft,
                   child: OutlinedButton(
-                    onPressed: () => setState(() => _recording = field),
+                    onPressed: () => _setRecording(
+                      _requestedRecording == field ? null : field,
+                    ),
                     style: OutlinedButton.styleFrom(
                       foregroundColor: _recording == field
                           ? _config!.color
@@ -847,14 +1000,15 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(6),
                       ),
-                      textStyle: const TextStyle(fontSize: 12),
+                      textStyle: Theme.of(context).textTheme.bodyMedium!
+                          .copyWith(fontSize: 12),
                     ),
                     child: Text(_recording == field ? '按下新组合键…' : value),
                   ),
                 ),
         ),
         SizedBox(
-          width: 36,
+          width: 56,
           child: field == null
               ? null
               : IconButton(
@@ -875,7 +1029,9 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
                             ),
                     );
                   },
-                  icon: const Icon(Icons.delete_outline, size: 16),
+                  alignment: Alignment.centerRight,
+                  padding: EdgeInsets.zero,
+                  icon: settingsIcon('trash', size: 15),
                 ),
         ),
       ],
@@ -889,15 +1045,15 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
       const Padding(
         padding: EdgeInsets.only(bottom: 16),
         child: Text(
-          '配置与日志的存储位置。',
-          style: TextStyle(fontSize: 12, color: Color(0xff8a919f)),
+          '配置、日志与 OCR 模型的落点。删了配置会回默认值，不影响使用。',
+          style: TextStyle(fontSize: 12, height: 1.6, color: Color(0xff8a919f)),
         ),
       ),
-      _section('本地数据', [
+      _section('', [
         _dataRow('配置文件', ConfigStore.file.path, 'config.json'),
         _dataRow(
           '运行日志',
-          AppLog.path.isEmpty ? '' : File(AppLog.path).parent.path,
+          '记录应用运行与问题排查信息',
           '打开日志',
           onTap: () => _ballAction('open-log'),
         ),
@@ -911,8 +1067,9 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
         _dataRow(
           '版本',
           '${Platform.isMacOS ? 'macOS' : 'Windows'} · '
-              '${Platform.version.split(' ').first}',
+              '${Abi.current().toString().split('_').last == 'x64' ? 'x86_64' : Abi.current().toString().split('_').last}',
           'v0.1.31',
+          last: true,
         ),
       ]),
     ],
@@ -932,7 +1089,21 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
           child: Row(
             children: [
               const Expanded(
-                child: Text('当前版本  v0.1.31', style: TextStyle(fontSize: 13)),
+                child: Text.rich(
+                  TextSpan(
+                    text: '当前版本 ',
+                    children: [
+                      TextSpan(
+                        text: 'v0.1.31',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Color(0xff697586),
+                        ),
+                      ),
+                    ],
+                  ),
+                  style: TextStyle(fontSize: 13),
+                ),
               ),
               _aboutButton(
                 '检查更新',
@@ -968,7 +1139,7 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
       padding: const EdgeInsets.symmetric(horizontal: 12),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
     ),
-    child: Text(label, style: const TextStyle(fontSize: 12)),
+    child: Text(label, style: const TextStyle(fontSize: 13)),
   );
 
   Widget _dataRow(
@@ -976,11 +1147,14 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
     String detail,
     String trailing, {
     VoidCallback? onTap,
+    bool last = false,
   }) => Container(
     constraints: const BoxConstraints(minHeight: 58),
-    padding: const EdgeInsets.symmetric(vertical: 8),
-    decoration: const BoxDecoration(
-      border: Border(bottom: BorderSide(color: Color(0xfff0f1f3))),
+    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 13),
+    decoration: BoxDecoration(
+      border: last
+          ? null
+          : const Border(bottom: BorderSide(color: Color(0xfff5f6f7))),
     ),
     child: Row(
       children: [
@@ -989,10 +1163,10 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(title, style: const TextStyle(fontSize: 13)),
-              const SizedBox(height: 4),
+              const SizedBox(height: 3),
               Text(
                 detail,
-                style: const TextStyle(fontSize: 12, color: Color(0xff8a919f)),
+                style: const TextStyle(fontSize: 12, color: Color(0xff9aa0ab)),
                 softWrap: true,
               ),
             ],
@@ -1000,9 +1174,20 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
         ),
         const SizedBox(width: 12),
         onTap == null
-            ? Text(
-                trailing,
-                style: const TextStyle(fontSize: 12, color: Color(0xff8a919f)),
+            ? Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                decoration: BoxDecoration(
+                  color: const Color(0xfff7f8fa),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: Text(
+                  trailing,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontFamily: 'Consolas',
+                    color: Color(0xff4e5566),
+                  ),
+                ),
               )
             : OutlinedButton(onPressed: onTap, child: Text(trailing)),
       ],
@@ -1019,10 +1204,14 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
   }
 
   Widget _heading(String title) => Padding(
-    padding: const EdgeInsets.only(bottom: 10),
+    padding: const EdgeInsets.only(bottom: 6),
     child: Text(
       title,
-      style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+      style: const TextStyle(
+        fontSize: 15,
+        height: 1.2,
+        fontWeight: FontWeight.w600,
+      ),
     ),
   );
 
@@ -1033,16 +1222,31 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
       borderRadius: BorderRadius.circular(8),
       child: InkWell(
         borderRadius: BorderRadius.circular(8),
-        onTap: () => setState(() => _page = label),
+        onTap: () {
+          _setRecording(null);
+          setState(() => _page = label);
+        },
         child: Row(
           children: [
             const SizedBox(width: 10),
-            Icon(icon, size: 16, color: const Color(0xff8a919f)),
+            settingsIcon(
+              switch (label) {
+                '通用' => 'general',
+                '快捷键' => 'keys',
+                '模型' => 'model',
+                '数据管理' => 'data',
+                _ => 'about',
+              },
+              color: _page == label
+                  ? const Color(0xff4e5566)
+                  : const Color(0xff8a919f),
+            ),
             const SizedBox(width: 9),
             Text(
               label,
               style: TextStyle(
                 fontSize: 13,
+                fontWeight: _page == label ? FontWeight.w500 : FontWeight.w400,
                 color: _page == label
                     ? const Color(0xff1f2329)
                     : const Color(0xff4e5566),
@@ -1067,9 +1271,13 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
         if (title.isNotEmpty) ...[
           Text(
             title,
-            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+            style: const TextStyle(
+              fontSize: 15,
+              height: 1.2,
+              fontWeight: FontWeight.w600,
+            ),
           ),
-          const SizedBox(height: 16),
+          const SizedBox(height: 6),
         ],
         ...children,
       ],
@@ -1084,29 +1292,94 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
     ValueChanged<double> change,
     String display, {
     int? divisions,
-  }) => Row(
-    children: [
-      SizedBox(
-        width: 120,
-        child: Text(label, style: const TextStyle(fontSize: 13)),
-      ),
-      Expanded(
-        child: Slider(
-          value: value,
-          min: min,
-          max: max,
-          divisions: divisions,
-          onChanged: change,
+  }) => SizedBox(
+    height: 20,
+    child: Row(
+      children: [
+        SizedBox(
+          width: 120,
+          child: Text(
+            label,
+            style: const TextStyle(fontSize: 13, color: Color(0xff4e5566)),
+          ),
         ),
-      ),
-      SizedBox(
-        width: 46,
-        child: Text(
+        const SizedBox(width: 14),
+        Expanded(
+          child: SliderTheme(
+            data: SliderTheme.of(context).copyWith(
+              trackHeight: 6,
+              activeTrackColor: const Color(0xff3478ff),
+              inactiveTrackColor: const Color(0xffefefef),
+              thumbColor: const Color(0xff3478ff),
+              thumbShape: const RoundSliderThumbShape(
+                enabledThumbRadius: 7.5,
+                elevation: 0,
+                pressedElevation: 0,
+              ),
+              overlayShape: SliderComponentShape.noOverlay,
+              tickMarkShape: SliderTickMarkShape.noTickMark,
+              trackShape: const _NativeRangeTrack(),
+            ),
+            child: Slider(
+              padding: const EdgeInsets.symmetric(horizontal: 2),
+              value: value,
+              min: min,
+              max: max,
+              divisions: divisions,
+              onChanged: change,
+            ),
+          ),
+        ),
+        const SizedBox(width: 14),
+        Text(
           display,
-          style: const TextStyle(fontSize: 12),
+          style: const TextStyle(fontSize: 12, color: Color(0xff9aa0ab)),
           textAlign: TextAlign.right,
         ),
-      ),
-    ],
+      ],
+    ),
   );
+}
+
+class _NativeRangeTrack extends RoundedRectSliderTrackShape {
+  const _NativeRangeTrack();
+  @override
+  void paint(
+    PaintingContext context,
+    Offset offset, {
+    required RenderBox parentBox,
+    required SliderThemeData sliderTheme,
+    required Animation<double> enableAnimation,
+    required Offset thumbCenter,
+    Offset? secondaryOffset,
+    bool isDiscrete = false,
+    bool isEnabled = false,
+    required TextDirection textDirection,
+    double additionalActiveTrackHeight = 0,
+  }) {
+    final rect = getPreferredRect(
+      parentBox: parentBox,
+      offset: offset,
+      sliderTheme: sliderTheme,
+      isEnabled: isEnabled,
+      isDiscrete: isDiscrete,
+    );
+    final rounded = RRect.fromRectAndRadius(rect, const Radius.circular(3));
+    final canvas = context.canvas;
+    canvas.drawRRect(rounded, Paint()..color = const Color(0xffefefef));
+    canvas.drawRRect(
+      rounded,
+      Paint()
+        ..color = const Color(0xffaaaaaa)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1,
+    );
+    canvas.save();
+    canvas.clipRRect(rounded);
+    canvas.drawRect(
+      Rect.fromLTRB(rect.left, rect.top, thumbCenter.dx, rect.bottom),
+      Paint()..color = const Color(0xff3478ff),
+    );
+    canvas.restore();
+  }
 }

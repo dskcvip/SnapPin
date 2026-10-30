@@ -6,11 +6,21 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:image/image.dart' as img;
 import 'package:snappin_flutter/windows/pin_window.dart';
+import 'package:snappin_flutter/windows/image_pixels.dart';
+import 'package:snappin_flutter/windows/viewer_sticker_toolbar.dart';
 
 void main() {
   testWidgets('pin viewer switches between original, fit, and edit modes', (
     tester,
   ) async {
+    const manager = MethodChannel('window_manager');
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+          const MethodChannel('mixin.one/desktop_multi_window/channels'),
+          (call) async => null,
+        );
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(manager, (call) async => null);
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(
           const MethodChannel('mixin.one/desktop_multi_window'),
@@ -65,6 +75,50 @@ void main() {
       await tester.pump();
       expect(find.text('完成'), findsOneWidget);
       expect(find.byTooltip('矩形'), findsOneWidget);
+      await tester.tap(find.byTooltip('贴纸'));
+      await tester.pumpAndSettle();
+      expect(find.byType(ViewerStickerToolbar), findsOneWidget);
+      expect(find.text('🚀'), findsOneWidget);
+      await tester.tap(find.text('🚀'));
+      await tester.tapAt(tester.getCenter(find.byType(ImagePixels)));
+      await tester.pump();
+      await tester.tap(find.byTooltip('文字'));
+      await tester.pump();
+      await tester.tapAt(
+        tester.getCenter(find.byType(ImagePixels)) + const Offset(0, 40),
+      );
+      await tester.pump();
+      expect(find.byType(AlertDialog), findsNothing);
+      expect(find.byType(TextField), findsOneWidget);
+      await tester.enterText(find.byType(TextField), '行内输入');
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pump();
+      expect(find.byType(TextField), findsOneWidget);
+      await tester.tap(find.byTooltip('关闭'));
+      await tester.pumpAndSettle();
+      expect(find.text('有未保存的修改'), findsOneWidget);
+      await tester.tap(find.text('继续编辑'));
+      await tester.pumpAndSettle();
+      expect(find.text('完成'), findsOneWidget);
+      await tester.tap(find.text('完成'));
+      await tester.pump();
+      expect(find.text('保存修改中'), findsOneWidget);
+      var saved = false;
+      for (var i = 0; i < 150; i++) {
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 20)),
+        );
+        await tester.pump();
+        saved = directory.listSync().any(
+          (file) => file.path.contains('viewer-edit-'),
+        );
+        if (saved && find.text('保存修改中').evaluate().isEmpty) break;
+      }
+      expect(saved, isTrue, reason: 'Edited image was not saved');
+      await tester.pumpAndSettle();
+      expect(find.text('保存修改中'), findsNothing);
+      expect(find.text('修改已保存'), findsOneWidget);
+      expect(tester.takeException(), isNull);
     } finally {
       await tester.pumpWidget(const SizedBox.shrink());
       await FileImage(file).evict();

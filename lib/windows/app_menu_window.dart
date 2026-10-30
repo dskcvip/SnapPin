@@ -6,12 +6,18 @@ import 'package:flutter/services.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../app_log.dart';
+import 'app_menu_metrics.dart';
 import '../window_roles.dart';
 
 class AppMenuWindow extends StatefulWidget {
-  const AppMenuWindow({super.key, required this.controller});
+  const AppMenuWindow({
+    super.key,
+    required this.controller,
+    this.initialWarnings = const [],
+  });
 
   final WindowController controller;
+  final List<String> initialWarnings;
 
   @override
   State<AppMenuWindow> createState() => _AppMenuWindowState();
@@ -26,6 +32,7 @@ class _AppMenuWindowState extends State<AppMenuWindow> with WindowListener {
   @override
   void initState() {
     super.initState();
+    _warnings = widget.initialWarnings;
     windowManager.addListener(this);
     widget.controller.setWindowMethodHandler((call) async {
       if (call.method == 'closeSelf') {
@@ -40,7 +47,7 @@ class _AppMenuWindowState extends State<AppMenuWindow> with WindowListener {
           _warnings = warnings;
         });
         await windowManager.setSize(
-          Size(260, 312 + (warnings.isEmpty ? 0 : 30)),
+          Size(appMenuWidth, appMenuHeight(warnings)),
         );
         await windowManager.setPosition(
           Offset(
@@ -112,9 +119,9 @@ class _AppMenuWindowState extends State<AppMenuWindow> with WindowListener {
           child: Container(
             decoration: BoxDecoration(
               color: Colors.white,
-              border: Border.all(color: const Color(0x140f172a)),
               borderRadius: BorderRadius.circular(12),
               boxShadow: const [
+                BoxShadow(color: Color(0x140f172a), spreadRadius: 1),
                 BoxShadow(
                   color: Color(0x2e0f172a),
                   blurRadius: 16,
@@ -127,20 +134,21 @@ class _AppMenuWindowState extends State<AppMenuWindow> with WindowListener {
                 ),
               ],
             ),
-            padding: const EdgeInsets.symmetric(vertical: 6),
+            padding: const EdgeInsets.all(6),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
                 if (_warnings.isNotEmpty)
                   Container(
-                    height: 30,
+                    height: appMenuWarningHeight,
                     alignment: Alignment.centerLeft,
                     padding: const EdgeInsets.symmetric(horizontal: 10),
                     child: Text(
-                      '${_warnings.join(' / ')} 已被其他程序占用',
-                      overflow: TextOverflow.ellipsis,
+                      appMenuWarningText(_warnings),
+                      softWrap: true,
                       style: const TextStyle(
                         fontSize: 12,
+                        height: 1.4,
                         color: Color(0xffc2410c),
                       ),
                     ),

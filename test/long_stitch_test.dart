@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:image/image.dart' as img;
 import 'package:snappin_flutter/long_stitch.dart';
+import 'package:snappin_flutter/long_stitch_worker.dart';
 
 Uint8List _frame(int top) {
   final image = img.Image(width: 160, height: 600);
@@ -254,4 +255,105 @@ void main() {
       session.dispose();
     }
   });
+
+  test(
+    'jump below canvas recovers the skipped tail without moving the anchor',
+    () async {
+      final session = LongStitchSession.start(_frame(600));
+      final directory = await Directory.systemTemp.createTemp(
+        'snappin-reconnect-',
+      );
+      try {
+        for (var top = 720; top <= 1800; top += 120) {
+          session.push(_frame(top));
+        }
+        expect(session.push(_frame(3000)).kind, LongStepKind.noMatch);
+        for (var top = 2880; top > 1800; top -= 120) {
+          expect(session.push(_frame(top)).kind, LongStepKind.noMatch);
+        }
+        final recovery = session.push(_frame(1800));
+        expect(recovery.direction, 'recovered-append');
+        expect(session.height, 3000);
+        // Continue beyond the original top after reconnecting below the canvas.
+        for (var top = 1680; top >= 0; top -= 120) {
+          session.push(_frame(top));
+        }
+        expect(session.height, 3600);
+        final file = await session.savePng(
+          File('${directory.path}/result.png'),
+        );
+        final output = img.decodePng(await file.readAsBytes())!;
+        for (final top in [0, 600, 1800, 2400, 3000]) {
+          final original = img.decodePng(_frame(top))!;
+          for (final row in [0, 100, 599]) {
+            final actual = output.getPixel(25, top + row);
+            final expected = original.getPixel(25, row);
+            expect(
+              [actual.r, actual.g, actual.b],
+              [expected.r, expected.g, expected.b],
+              reason: 'global row=${top + row}',
+            );
+          }
+        }
+      } finally {
+        session.dispose();
+        await directory.delete(recursive: true);
+      }
+    },
+  );
+
+  test('background stitch worker exports original pixels and remains usable after bad input', () async {
+    final directory = await Directory.systemTemp.createTemp('snappin-worker-');
+    final worker = await LongStitchWorker.start(_frame(0));
+    try {
+      expect(worker.width, 160);
+      expect(worker.height, 600);
+      expect((await worker.push(_frame(120))).kind, LongStepKind.appended);
+      expect(worker.height, 720);
+      await expectLater(worker.push(Uint8List(0)), throwsStateError);
+      expect((await worker.push(_frame(240))).kind, LongStepKind.appended);
+      expect(worker.height, 840);
+      final preview = img.decodePng(await worker.previewPng())!;
+      expect(preview.height, lessThan(worker.height));
+      final file = await worker.savePng(File('${directory.path}/worker.png'));
+      final result = img.decodePng(await file.readAsBytes())!;
+      expect(result.width, 160);
+      expect(result.height, 840);
+      expect(
+        result.getPixel(30, 839).r,
+        img.decodePng(_frame(240))!.getPixel(30, 599).r,
+      );
+    } finally {
+      worker.dispose();
+      await directory.delete(recursive: true);
+    }
+    await expectLater(worker.previewPng(), throwsStateError);
+  });
+
+  test(
+    'background memory limit preserves the last full resolution image',
+    () async {
+      final worker = await LongStitchWorker.start(
+        _frame(0),
+        maxCanvasBytes: 160 * 720 * 4,
+      );
+      final directory = await Directory.systemTemp.createTemp(
+        'snappin-worker-limit-',
+      );
+      try {
+        await worker.push(_frame(120));
+        await expectLater(
+          worker.push(_frame(240)),
+          throwsA(isA<LongCaptureLimitException>()),
+        );
+        final file = await worker.savePng(
+          File('${directory.path}/retained.png'),
+        );
+        expect(img.decodePng(await file.readAsBytes())!.height, 720);
+      } finally {
+        worker.dispose();
+        await directory.delete(recursive: true);
+      }
+    },
+  );
 }

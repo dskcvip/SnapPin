@@ -8,16 +8,21 @@ import 'package:desktop_multi_window/desktop_multi_window.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 import 'package:pasteboard/pasteboard.dart';
 import 'package:screen_retriever/screen_retriever.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../pin_edits.dart';
 import '../annotation.dart';
-import '../capture_image.dart';
+import '../annotated_image.dart';
 import '../image_save.dart';
 import '../app_log.dart';
+import '../window_roles.dart';
+import 'ocr_window.dart' show showOcrResult;
 import 'image_pixels.dart';
+import 'mosaic_preview.dart';
+import 'viewer_sticker_toolbar.dart';
 
 class PinWindow extends StatefulWidget {
   const PinWindow({
@@ -63,6 +68,18 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
   Rect? _cropRect;
   Offset? _cropStart;
   final TextEditingController _textInput = TextEditingController();
+  final FocusNode _textFocus = FocusNode();
+  Offset? _textPoint;
+  MosaicPreview? _mosaicPreview;
+  bool _allowClose = false;
+  bool _closePromptOpen = false;
+  bool _unsavedEdits = false;
+  String _sticker = '✅';
+  double _stickerSize = 48;
+  Color _stickerColor = const Color(0xff111827);
+  ui.Picture? _stickerPicture;
+  Size? _stickerPictureSize;
+  final List<ui.Picture> _stickerPictures = [];
 
   @override
   void initState() {
@@ -72,6 +89,8 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
     _editSourceSize = widget.baseSize;
     _displayPath = widget.path;
     _sourceBytes = File(widget.path).readAsBytes();
+    unawaited(windowManager.setPreventClose(true));
+    unawaited(_loadMosaicPreview());
     widget.controller.setWindowMethodHandler((call) async {
       switch (call.method) {
         case 'getPinInfo':
@@ -102,7 +121,7 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
           await windowManager.show();
           await windowManager.focus();
         case 'closePin':
-          unawaited(Future<void>.delayed(Duration.zero, windowManager.close));
+          unawaited(_requestClose());
         case 'setPinGroup':
           if (mounted) {
             final group = (call.arguments as String).trim();
@@ -130,11 +149,85 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
     windowManager.removeListener(this);
     _passTimer?.cancel();
     _textInput.dispose();
+    _textFocus.dispose();
+    for (final picture in _stickerPictures) {
+      picture.dispose();
+    }
     if (_displayPath != widget.path) {
       final path = _displayPath;
       unawaited(File(path).delete().catchError((_) => File(path)));
     }
     super.dispose();
+  }
+
+  Future<void> _loadMosaicPreview() async {
+    final path = _displayPath;
+    try {
+      final preview = await MosaicPreview.load(path);
+      if (mounted && path == _displayPath)
+        setState(() => _mosaicPreview = preview);
+    } catch (error) {
+      AppLog.write('pin-mosaic-preview-failed', error);
+    }
+  }
+
+  @override
+  void onWindowClose() {
+    if (!_allowClose) unawaited(_requestClose());
+  }
+
+  Future<void> _requestClose() async {
+    if (_editing || _closePromptOpen || _allowClose) return;
+    _closePromptOpen = true;
+    try {
+      final dirty =
+          _unsavedEdits ||
+          _marks.isNotEmpty ||
+          _draftMark != null ||
+          _cropRect != null ||
+          (_textPoint != null && _textInput.text.isNotEmpty);
+      if (dirty) {
+        final choice = await showDialog<String>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('有未保存的修改'),
+            content: const Text('是否保存修改后退出？'),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, 'cancel'),
+                child: const Text('继续编辑'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(context, 'discard'),
+                child: const Text('不保存'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(context, 'save'),
+                child: const Text('保存并关闭'),
+              ),
+            ],
+          ),
+        );
+        AppLog.write('pin-close-unsaved', choice ?? 'cancel');
+        if (choice == null || choice == 'cancel' || !mounted) return;
+        if (choice == 'save') {
+          if (_viewerEditing) await _completeViewerEdit();
+          if (_viewerEditing || !mounted || !await _save()) return;
+        }
+      }
+      _allowClose = true;
+      await windowManager.setPreventClose(false);
+      await windowManager.close();
+    } catch (error, stack) {
+      _allowClose = false;
+      await windowManager.setPreventClose(true);
+      AppLog.write('pin-close-failed', '$error\n$stack');
+      if (mounted)
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('关闭失败，请重试')));
+    } finally {
+      _closePromptOpen = false;
+    }
   }
 
   @override
@@ -182,7 +275,7 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
       case 'save':
         await _save();
       case 'close':
-        unawaited(Future<void>.delayed(Duration.zero, windowManager.close));
+        unawaited(_requestClose());
       case 'topmost':
         await _toggleTopmost();
       case 'lock':
@@ -233,8 +326,9 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
       default:
         return;
     }
-    _editing = true;
+    setState(() => _editing = true);
     try {
+      await WidgetsBinding.instance.endOfFrame;
       final bytes = await renderPinEdits(await _sourceBytes, next);
       final path =
           '${File(widget.path).parent.path}${Platform.pathSeparator}'
@@ -245,13 +339,18 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
       _baseSize = next.quarterTurns.isOdd
           ? Size(_editSourceSize.height, _editSourceSize.width)
           : _editSourceSize;
-      if (mounted) setState(() => _displayPath = path);
+      if (mounted)
+        setState(() {
+          _displayPath = path;
+          _unsavedEdits = true;
+        });
+      unawaited(_loadMosaicPreview());
       await _resizeForEdit();
       if (oldPath != widget.path) {
         unawaited(File(oldPath).delete().catchError((_) => File(oldPath)));
       }
     } finally {
-      _editing = false;
+      if (mounted) setState(() => _editing = false);
     }
   }
 
@@ -270,23 +369,26 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
   }
 
   Future<void> _completeViewerEdit() async {
+    _finishText();
     if (_marks.isEmpty && _cropRect == null) {
       setState(() => _viewerEditing = false);
       return;
     }
     if (_editing) return;
-    _editing = true;
+    setState(() => _editing = true);
     try {
-      final codec = await ui.instantiateImageCodec(
-        await File(_displayPath).readAsBytes(),
-      );
-      final frame = await codec.getNextFrame();
-      final source = frame.image;
+      await WidgetsBinding.instance.endOfFrame;
       final crop =
           _cropRect ?? Rect.fromLTWH(0, 0, _baseSize.width, _baseSize.height);
-      final bytes = await cropSelection(source, crop, _baseSize, _marks);
-      source.dispose();
-      codec.dispose();
+      AppLog.write(
+        'pin-viewer-edit-render',
+        'source=${_baseSize.width}x${_baseSize.height} crop=$crop marks=${_marks.length} mode=tiles',
+      );
+      final bytes = await renderAnnotatedImage(
+        await File(_displayPath).readAsBytes(),
+        crop,
+        _marks,
+      );
       final path =
           '${File(widget.path).parent.path}${Platform.pathSeparator}'
           'viewer-edit-${DateTime.now().microsecondsSinceEpoch}.png';
@@ -303,6 +405,7 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
         _cropRect = null;
         _editTool = null;
         _cropMode = false;
+        _unsavedEdits = true;
       });
       if (oldPath != widget.path) {
         unawaited(File(oldPath).delete().catchError((_) => File(oldPath)));
@@ -311,6 +414,14 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
         'pin-viewer-edit-saved',
         '${_baseSize.width}x${_baseSize.height}',
       );
+      unawaited(_loadMosaicPreview());
+      if (mounted)
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('修改已保存'),
+            duration: Duration(seconds: 2),
+          ),
+        );
     } catch (error, stack) {
       AppLog.write('pin-viewer-edit-failed', '$error\n$stack');
       if (mounted) {
@@ -318,7 +429,7 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
             .showSnackBar(SnackBar(content: Text('编辑失败：$error')));
       }
     } finally {
-      _editing = false;
+      if (mounted) setState(() => _editing = false);
     }
   }
 
@@ -375,8 +486,10 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
   Future<void> _copy() async =>
       Pasteboard.writeImage(await File(_displayPath).readAsBytes());
 
-  Future<void> _save() async {
-    await saveImage(await File(_displayPath).readAsBytes());
+  Future<bool> _save() async {
+    final saved = await saveImage(await File(_displayPath).readAsBytes());
+    if (saved && mounted) setState(() => _unsavedEdits = false);
+    return saved;
   }
 
   void _startMark(Offset point) {
@@ -394,9 +507,15 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
       () => _draftMark = Annotation(
         tool: tool,
         points: [point],
-        color: const Color(0xffed3030),
-        strokeWidth: tool == AnnotationTool.sticker ? 36 : 3,
-        text: tool == AnnotationTool.sticker ? '😊' : null,
+        color: tool == AnnotationTool.sticker
+            ? _stickerColor
+            : const Color(0xffed3030),
+        strokeWidth: tool == AnnotationTool.sticker ? _stickerSize : 3,
+        text: tool == AnnotationTool.sticker ? _sticker : null,
+        stickerPicture: tool == AnnotationTool.sticker ? _stickerPicture : null,
+        stickerPictureSize: tool == AnnotationTool.sticker
+            ? _stickerPictureSize
+            : null,
         parameter: tool == AnnotationTool.mosaic ? 12 : 0,
       ),
     );
@@ -419,6 +538,8 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
         strokeWidth: draft.strokeWidth,
         text: draft.text,
         parameter: draft.parameter,
+        stickerPicture: draft.stickerPicture,
+        stickerPictureSize: draft.stickerPictureSize,
       ),
     );
   }
@@ -437,60 +558,80 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
     });
   }
 
-  Future<void> _insertText(Offset point) async {
-    _textInput.clear();
-    final value = await showDialog<String>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('添加文字'),
-        content: TextField(controller: _textInput, autofocus: true),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('取消'),
+  void _insertText(Offset point) {
+    _finishText();
+    setState(() {
+      _textInput.clear();
+      _textPoint = point;
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _textFocus.requestFocus();
+    });
+  }
+
+  void _finishText({bool commit = true}) {
+    final point = _textPoint;
+    if (point == null) return;
+    setState(() {
+      if (commit && _textInput.text.trim().isNotEmpty) {
+        _marks.add(
+          Annotation(
+            tool: AnnotationTool.text,
+            points: [point],
+            color: const Color(0xffed3030),
+            strokeWidth: 24,
+            text: _textInput.text,
           ),
-          TextButton(
-            onPressed: () => Navigator.pop(context, _textInput.text),
-            child: const Text('确定'),
-          ),
-        ],
-      ),
-    );
-    if (value == null || value.trim().isEmpty || !mounted) return;
-    setState(
-      () => _marks.add(
-        Annotation(
-          tool: AnnotationTool.text,
-          points: [point],
-          color: const Color(0xffed3030),
-          strokeWidth: 24,
-          text: value.trim(),
-        ),
-      ),
-    );
+        );
+        _undoneMarks.clear();
+      }
+      _textPoint = null;
+    });
+  }
+
+  void _undoViewerMark() {
+    if (_editing || _marks.isEmpty) return;
+    setState(() => _undoneMarks.add(_marks.removeLast()));
+  }
+
+  void _redoViewerMark() {
+    if (_editing || _undoneMarks.isEmpty) return;
+    setState(() => _marks.add(_undoneMarks.removeLast()));
+  }
+
+  Future<void> _selectSticker(
+    String glyph,
+    String? svg,
+    double size,
+    Color color,
+  ) async {
+    final picture = svg == null
+        ? null
+        : await vg.loadPicture(
+            SvgStringLoader(svg, theme: SvgTheme(currentColor: color)),
+            context,
+          );
+    if (!mounted) {
+      picture?.picture.dispose();
+      return;
+    }
+    if (picture != null) _stickerPictures.add(picture.picture);
+    setState(() {
+      _sticker = glyph;
+      _stickerSize = size;
+      _stickerColor = color;
+      _stickerPicture = picture?.picture;
+      _stickerPictureSize = picture?.size;
+    });
   }
 
   Future<void> _recognizePinText() async {
     try {
-      final ball = await WindowController.getAll();
-      final target = ball
-          .where((window) => window.arguments.isEmpty)
-          .firstOrNull;
+      final target = await findBallWindow();
       if (target == null) throw StateError('主窗口不可用');
-      final text = await target.invokeMethod<String>(
-        'recognizeText',
-        await File(_displayPath).readAsBytes(),
-      );
-      await WindowController.create(
-        WindowConfiguration(
-          arguments: jsonEncode({
-            'role': 'ocr',
-            'image': _displayPath,
-            'text': text ?? '',
-          }),
-          hiddenAtLaunch: true,
-        ),
-      );
+      final bytes = await File(_displayPath).readAsBytes();
+      final text = await target.invokeMethod<String>('recognizeText', bytes);
+      await showOcrResult(bytes, text ?? '');
     } catch (error) {
       AppLog.write('pin-ocr-failed', error);
       if (mounted)
@@ -711,11 +852,7 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
           _viewerIcon(
             Icons.undo,
             '撤销',
-            _marks.isEmpty
-                ? null
-                : () => setState(() {
-                    _undoneMarks.add(_marks.removeLast());
-                  }),
+            _marks.isEmpty ? null : _undoViewerMark,
           ),
           _viewerIcon(Icons.file_download_outlined, '保存', () async {
             await _completeViewerEdit();
@@ -724,11 +861,7 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
           _viewerIcon(
             Icons.redo,
             '恢复',
-            _undoneMarks.isEmpty
-                ? null
-                : () => setState(() {
-                    _marks.add(_undoneMarks.removeLast());
-                  }),
+            _undoneMarks.isEmpty ? null : _redoViewerMark,
           ),
         ],
         Expanded(
@@ -797,7 +930,7 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
           _maximized ? '还原' : '最大化',
           _toggleMaximized,
         ),
-        _viewerIcon(Icons.close, '关闭', windowManager.close),
+        _viewerIcon(Icons.close, '关闭', _requestClose),
       ],
     ),
   );
@@ -821,8 +954,19 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
               _fit = !_fit;
               _scale = 1;
             }),
-      onTapUp: _viewerEditing && _editTool == AnnotationTool.text
-          ? (details) => _insertText(sourcePoint(details.localPosition))
+      onTapUp:
+          _viewerEditing &&
+              (_editTool == AnnotationTool.text ||
+                  _editTool == AnnotationTool.sticker)
+          ? (details) {
+              final point = sourcePoint(details.localPosition);
+              if (_editTool == AnnotationTool.text) {
+                _insertText(point);
+              } else {
+                _startMark(point);
+                _endMark();
+              }
+            }
           : null,
       onPanStart: _viewerEditing && _editTool != AnnotationTool.text
           ? (details) => _startMark(sourcePoint(details.localPosition))
@@ -856,6 +1000,61 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
                       draft: _draftMark,
                       crop: _cropRect,
                       sourceSize: _baseSize,
+                      mosaicPreview: _mosaicPreview,
+                    ),
+                  ),
+                ),
+              ),
+            if (_textPoint != null)
+              Positioned(
+                left: _textPoint!.dx * scale,
+                top: _textPoint!.dy * scale,
+                child: CustomPaint(
+                  painter: _InlineTextBorder(),
+                  child: SizedBox(
+                    width: math.max(
+                      100,
+                      math.min(320, imageWidth - _textPoint!.dx * scale),
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.all(3),
+                      child: Focus(
+                        onKeyEvent: (_, event) {
+                          if (event is! KeyDownEvent)
+                            return KeyEventResult.ignored;
+                          final composing = _textInput.value.composing;
+                          if (composing.isValid && !composing.isCollapsed) {
+                            return KeyEventResult.ignored;
+                          }
+                          if (event.logicalKey == LogicalKeyboardKey.escape) {
+                            _finishText(commit: false);
+                            return KeyEventResult.handled;
+                          }
+                          if (event.logicalKey == LogicalKeyboardKey.enter &&
+                              (HardwareKeyboard.instance.isControlPressed ||
+                                  HardwareKeyboard.instance.isMetaPressed)) {
+                            _finishText();
+                            return KeyEventResult.handled;
+                          }
+                          return KeyEventResult.ignored;
+                        },
+                        child: TextField(
+                          controller: _textInput,
+                          focusNode: _textFocus,
+                          autofocus: true,
+                          maxLines: null,
+                          keyboardType: TextInputType.multiline,
+                          style: TextStyle(
+                            fontSize: 24 * scale,
+                            color: const Color(0xffed3030),
+                            height: 1.32,
+                          ),
+                          decoration: const InputDecoration.collapsed(
+                            hintText: '',
+                          ),
+                          onTapOutside: (_) => _finishText(),
+                        ),
+                      ),
                     ),
                   ),
                 ),
@@ -887,11 +1086,34 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
     autofocus: true,
     onKeyEvent: (_, event) {
       if (event is! KeyDownEvent) return KeyEventResult.ignored;
+      if (_textPoint != null ||
+          FocusManager.instance.primaryFocus?.context
+                  ?.findAncestorStateOfType<EditableTextState>() !=
+              null)
+        return KeyEventResult.ignored;
+      if (_editing) return KeyEventResult.handled;
+      final modifier =
+          HardwareKeyboard.instance.isControlPressed ||
+          HardwareKeyboard.instance.isMetaPressed;
+      if (_viewerEditing &&
+          modifier &&
+          event.logicalKey == LogicalKeyboardKey.keyZ) {
+        HardwareKeyboard.instance.isShiftPressed
+            ? _redoViewerMark()
+            : _undoViewerMark();
+        return KeyEventResult.handled;
+      }
+      if (_viewerEditing &&
+          modifier &&
+          event.logicalKey == LogicalKeyboardKey.keyY) {
+        _redoViewerMark();
+        return KeyEventResult.handled;
+      }
       if (event.logicalKey == LogicalKeyboardKey.escape) {
         if (_viewerEditing)
           setState(() => _viewerEditing = false);
         else
-          windowManager.close();
+          _requestClose();
         return KeyEventResult.handled;
       }
       if (event.logicalKey == LogicalKeyboardKey.keyT) {
@@ -929,6 +1151,8 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
           Column(
             children: [
               if (_toolbar) _viewerToolbar(),
+              if (_viewerEditing && _editTool == AnnotationTool.sticker)
+                ViewerStickerToolbar(onSelected: _selectSticker),
               Expanded(
                 child: LayoutBuilder(
                   builder: (_, bounds) => _viewerImage(bounds),
@@ -954,6 +1178,32 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
                 ),
               ),
             ),
+          if (_editing) ...[
+            const Positioned.fill(
+              child: ModalBarrier(dismissible: false, color: Color(0x33000000)),
+            ),
+            const Positioned.fill(
+              child: Center(
+                child: Card(
+                  child: Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 28, vertical: 22),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
+                        SizedBox(width: 12),
+                        Text('保存修改中', style: TextStyle(fontSize: 14)),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
         ],
       ),
     ),
@@ -966,12 +1216,14 @@ class _PinMarksPainter extends CustomPainter {
     required this.draft,
     required this.crop,
     required this.sourceSize,
+    this.mosaicPreview,
   });
 
   final List<Annotation> marks;
   final Annotation? draft;
   final Rect? crop;
   final Size sourceSize;
+  final MosaicPreview? mosaicPreview;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -980,10 +1232,18 @@ class _PinMarksPainter extends CustomPainter {
       size.width / sourceSize.width,
       size.height / sourceSize.height,
     );
-    for (final mark in marks) {
-      mark.paint(canvas);
+    for (final mark in [...marks, if (draft != null) draft!]) {
+      if (mark.tool == AnnotationTool.mosaic && mosaicPreview != null) {
+        mosaicPreview!.paint(
+          canvas,
+          Rect.fromPoints(mark.points.first, mark.points.last),
+          sourceSize,
+          mark.parameter,
+        );
+      } else {
+        mark.paint(canvas);
+      }
     }
-    draft?.paint(canvas);
     if (crop != null) {
       canvas.drawRect(
         crop!,
@@ -998,4 +1258,40 @@ class _PinMarksPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _PinMarksPainter oldDelegate) => true;
+}
+
+class _InlineTextBorder extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final brush = Paint()
+      ..color = const Color(0xff167cde)
+      ..strokeWidth = 1;
+    for (var x = 0.0; x < size.width; x += 8) {
+      canvas.drawLine(
+        Offset(x, 0),
+        Offset(math.min(x + 4, size.width), 0),
+        brush,
+      );
+      canvas.drawLine(
+        Offset(x, size.height),
+        Offset(math.min(x + 4, size.width), size.height),
+        brush,
+      );
+    }
+    for (var y = 0.0; y < size.height; y += 8) {
+      canvas.drawLine(
+        Offset(0, y),
+        Offset(0, math.min(y + 4, size.height)),
+        brush,
+      );
+      canvas.drawLine(
+        Offset(size.width, y),
+        Offset(size.width, math.min(y + 4, size.height)),
+        brush,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _InlineTextBorder oldDelegate) => false;
 }

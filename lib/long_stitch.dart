@@ -52,6 +52,7 @@ class LongStitchSession {
   int _steps = 1;
   int _stillCount = 0;
   int _viewportTop = 0;
+  int _origin = 0;
   bool _previousLocated = true;
   final List<Uint8List> _detachedFrames = [];
 
@@ -123,6 +124,7 @@ class LongStitchSession {
       _previous = Uint8List.fromList(next);
       _previousLocated = true;
       final heightBeforeReplay = _height;
+      final originBeforeReplay = _origin;
       if (!replay && _detachedFrames.isNotEmpty) {
         final frames = List<Uint8List>.of(_detachedFrames.reversed);
         _detachedFrames.clear();
@@ -134,20 +136,25 @@ class LongStitchSession {
           );
           if (step.kind == LongStepKind.noMatch) break;
         }
-        final prepended = _height - heightBeforeReplay;
+        final added = _height - heightBeforeReplay;
+        final prepended = originBeforeReplay - _origin;
         _viewportTop = capturedTop + prepended;
         _previous = Uint8List.fromList(next);
         _previousLocated = true;
-        if (prepended > 0) {
+        if (added > 0) {
           return LongStep(
             LongStepKind.appended,
-            prepended,
+            added,
             0,
             _height,
             _steps,
             1,
             frameDiff,
-            direction: 'recovered-prepend',
+            direction: prepended == added
+                ? 'recovered-prepend'
+                : prepended == 0
+                ? 'recovered-append'
+                : 'recovered-both',
           );
         }
       }
@@ -180,6 +187,7 @@ class LongStitchSession {
           extended.setRange(prepend * width * 4, extended.length, _canvas, 0);
           _canvas = extended;
           _height += prepend;
+          _origin -= prepend;
         }
         _viewportTop = math.max(0, newTop);
         _previous = Uint8List.fromList(next);
@@ -598,5 +606,6 @@ class LongStitchSession {
   void dispose() {
     _canvas = Uint8List(0);
     _previous = Uint8List(0);
+    _detachedFrames.clear();
   }
 }
