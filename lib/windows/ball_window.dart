@@ -374,7 +374,17 @@ class _BallWindowState extends State<BallWindow>
         }
         final before = await windowManager.isVisible();
         await menu.invokeMethod<void>('smokeToggleBall');
-        if (await windowManager.isVisible() == before) {
+        // macOS window_manager.hide queues orderOut on the main dispatch queue;
+        // its method result acknowledges the request, not the visibility change.
+        var changed = false;
+        for (var attempt = 0; attempt < 80; attempt++) {
+          await Future<void>.delayed(const Duration(milliseconds: 25));
+          if (await windowManager.isVisible() != before) {
+            changed = true;
+            break;
+          }
+        }
+        if (!changed) {
           throw StateError('$button tray menu action did not toggle the ball');
         }
         AppLog.write(
