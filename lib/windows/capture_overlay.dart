@@ -19,6 +19,7 @@ import '../app_log.dart';
 import '../image_save.dart';
 import '../capture_image.dart';
 import '../annotation.dart';
+import '../annotation_preview.dart';
 import '../qr_scan.dart';
 import '../shot_icons.dart';
 import '../window_roles.dart';
@@ -54,6 +55,7 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
   String? _resizeEdge;
   ui.Image? _image;
   ByteData? _pixels;
+  AnnotationPreview? _annotationPreview;
   bool _closing = false;
   DateTime? _lastSelectionClick;
   Offset? _lastSelectionClickPoint;
@@ -86,7 +88,6 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
   bool _stickerSizeOpen = false;
   OverlayEntry? _stickerFlyout;
   final Object _stickerFlyoutGroup = Object();
-  int _badgeNumber = 1;
   bool _qrMode = false;
   Offset? _qrStart;
   Rect? _qrRect;
@@ -148,6 +149,8 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
   }) async {
     _finishTextEditor(commit: false);
     _hideStickerFlyout();
+    _annotationPreview?.dispose();
+    _annotationPreview = null;
     _image?.dispose();
     _image = null;
     _pixels = null;
@@ -206,6 +209,7 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
     final bytes = await File(display.path).readAsBytes();
     final codec = await ui.instantiateImageCodec(bytes);
     final frame = await codec.getNextFrame();
+    codec.dispose();
     final pixels = await frame.image.toByteData(
       format: ui.ImageByteFormat.rawRgba,
     );
@@ -214,8 +218,16 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
       return;
     }
     setState(() {
+      _annotationPreview?.dispose();
       _image = frame.image;
       _pixels = pixels;
+      _annotationPreview = pixels == null
+          ? null
+          : AnnotationPreview(
+              frame.image,
+              pixels,
+              Size(display.width, display.height),
+            );
     });
     AppLog.write(
       'overlay-image-ready',
@@ -229,6 +241,7 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
     _stickerFlyout?.dispose();
     _textController?.dispose();
     _textFocus?.dispose();
+    _annotationPreview?.dispose();
     _image?.dispose();
     for (final picture in _stickerPictures) {
       picture.dispose();
@@ -491,22 +504,38 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
     final selection = _validSelection;
     final source = _image;
     if (selection == null || source == null) throw StateError('No selection');
-    return cropSelection(
+    final watch = Stopwatch()..start();
+    final result = await cropSelection(
       source,
       selection,
       Size(_display.width, _display.height),
       _annotations,
     );
+    AppLog.write(
+      'overlay-export-ready',
+      '${selection.width}x${selection.height} marks=${_annotations.length} '
+          'tools=${_annotations.map((mark) => mark.tool.name).toSet().join(',')} '
+          '${watch.elapsedMilliseconds}ms',
+    );
+    return result;
   }
 
   void _undo() {
     if (_annotations.isEmpty) return;
     setState(() => _redo.add(_annotations.removeLast()));
+    AppLog.write(
+      'overlay-undo',
+      'marks=${_annotations.length} nextBadge=${nextBadgeNumber(_annotations)}',
+    );
   }
 
   void _redoLast() {
     if (_redo.isEmpty) return;
     setState(() => _annotations.add(_redo.removeLast()));
+    AppLog.write(
+      'overlay-redo',
+      'marks=${_annotations.length} nextBadge=${nextBadgeNumber(_annotations)}',
+    );
   }
 
   Future<void> _requestExit() async {
@@ -579,6 +608,8 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
     if (mounted)
       setState(() {
         _currentDisplay = null;
+        _annotationPreview?.dispose();
+        _annotationPreview = null;
         _image?.dispose();
         _image = null;
         _pixels = null;
@@ -753,7 +784,13 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
           child: Stack(
             children: [
               Positioned.fill(
-                child: Image.file(File(_display.path), fit: BoxFit.fill),
+                child: _image == null
+                    ? Image.file(File(_display.path), fit: BoxFit.fill)
+                    : RawImage(
+                        image: _image,
+                        fit: BoxFit.fill,
+                        filterQuality: FilterQuality.none,
+                      ),
               ),
               Positioned.fill(
                 child: Listener(
@@ -841,7 +878,7 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
                               activeTool == AnnotationTool.sticker
                               ? _stickerPictureSize
                               : null,
-                          number: _badgeNumber,
+                          number: nextBadgeNumber(_annotations),
                           parameter: activeTool == AnnotationTool.mosaic
                               ? _mosaicBlock
                               : activeTool == AnnotationTool.spotlight
@@ -948,6 +985,7 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
                       annotations: List.of(_annotations),
                       draft: _draft,
                       qrRect: _qrRect,
+                      preview: _annotationPreview,
                     ),
                   ),
                 ),
@@ -1381,9 +1419,14 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
     }
     setState(() {
       _annotations.add(draft);
-      if (draft.tool == AnnotationTool.badge) _badgeNumber++;
       _redo.clear();
     });
+    AppLog.write(
+      'overlay-annotation-committed',
+      'tool=${draft.tool.name} points=${draft.points.length} '
+          'number=${draft.tool == AnnotationTool.badge ? draft.number : '-'} '
+          'parameter=${draft.parameter} marks=${_annotations.length}',
+    );
   }
 
   void _beginTextEditor(Annotation draft) {
@@ -2264,11 +2307,13 @@ class _SelectionPainter extends CustomPainter {
     required this.annotations,
     required this.draft,
     required this.qrRect,
+    required this.preview,
   });
   final Rect? selection;
   final List<Annotation> annotations;
   final Annotation? draft;
   final Rect? qrRect;
+  final AnnotationPreview? preview;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -2290,6 +2335,17 @@ class _SelectionPainter extends CustomPainter {
         Rect.fromLTRB(rect.right, rect.top, size.width, rect.bottom),
         shade,
       );
+      canvas.save();
+      canvas.clipRect(rect);
+      if (preview != null) {
+        preview!.paint(canvas, annotations, draft);
+      } else {
+        for (final annotation in annotations) {
+          annotation.paint(canvas);
+        }
+        draft?.paint(canvas);
+      }
+      canvas.restore();
       canvas.drawRect(
         rect,
         Paint()
@@ -2297,13 +2353,6 @@ class _SelectionPainter extends CustomPainter {
           ..style = PaintingStyle.stroke
           ..strokeWidth = 2,
       );
-      canvas.save();
-      canvas.clipRect(rect);
-      for (final annotation in annotations) {
-        annotation.paint(canvas);
-      }
-      draft?.paint(canvas);
-      canvas.restore();
       if (qrRect != null) {
         canvas.drawRect(
           qrRect!,
@@ -2319,7 +2368,8 @@ class _SelectionPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant _SelectionPainter old) =>
       old.selection != selection ||
-      old.annotations.length != annotations.length ||
+      old.preview != preview ||
+      old.annotations != annotations ||
       old.draft != draft ||
       old.qrRect != qrRect;
 }

@@ -19,6 +19,12 @@ enum AnnotationTool {
   smartErase,
 }
 
+int nextBadgeNumber(Iterable<Annotation> annotations) =>
+    annotations
+        .where((mark) => mark.tool == AnnotationTool.badge)
+        .fold(0, (largest, mark) => math.max(largest, mark.number ?? 0)) +
+    1;
+
 class Annotation {
   const Annotation({
     required this.tool,

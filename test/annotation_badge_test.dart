@@ -5,6 +5,26 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:snappin_flutter/annotation.dart';
 
 void main() {
+  test(
+    'badge numbering follows retained history after undo, redo and reset',
+    () {
+      Annotation badge(int number) => Annotation(
+        tool: AnnotationTool.badge,
+        points: const [Offset(50, 50)],
+        color: Colors.red,
+        strokeWidth: 20,
+        number: number,
+      );
+      final marks = [badge(1), badge(2), badge(3)];
+      expect(nextBadgeNumber(marks), 4);
+      final undone = marks.removeLast();
+      expect(nextBadgeNumber(marks), 3);
+      marks.add(undone);
+      expect(nextBadgeNumber(marks), 4);
+      marks.clear();
+      expect(nextBadgeNumber(marks), 1);
+    },
+  );
   test('badge is centered on the pointer position', () async {
     const point = Offset(50, 50);
     final recorder = ui.PictureRecorder();

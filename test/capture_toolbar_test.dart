@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:desktop_multi_window/desktop_multi_window.dart';
 import 'package:flutter/material.dart';
@@ -7,6 +8,8 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:image/image.dart' as img;
 import 'package:snappin_flutter/capture_bridge.dart';
+import 'package:snappin_flutter/annotation.dart';
+import 'package:snappin_flutter/capture_image.dart';
 import 'package:snappin_flutter/ocr_image_store.dart';
 import 'package:snappin_flutter/windows/capture_overlay.dart';
 import 'package:zxing_lib/qrcode.dart';
@@ -191,6 +194,53 @@ class _Session {
 }
 
 void main() {
+  testWidgets('badge toolbar fills undo gaps and branches after redo', (
+    tester,
+  ) async {
+    final session = _Session();
+    await session.open(tester);
+    final sourceBytes = File('${session.directory.path}/source.png')
+        .readAsBytesSync();
+    await session.click(tester, '序号');
+    for (final point in const [
+      Offset(250, 220),
+      Offset(400, 220),
+      Offset(550, 220),
+    ]) {
+      await tester.tapAt(point);
+      await tester.pump();
+    }
+    await session.click(tester, '撤销 (Ctrl+Z)');
+    await session.click(tester, '撤销 (Ctrl+Z)');
+    await session.click(tester, '重做 (Ctrl+Shift+Z / Ctrl+Y)');
+    await tester.tapAt(const Offset(550, 220));
+    await tester.pump();
+    await session.click(tester, '完成并复制 (Enter)');
+    final expected = await tester.runAsync(() async {
+      final codec = await ui.instantiateImageCodec(sourceBytes);
+      final source = (await codec.getNextFrame()).image;
+      codec.dispose();
+      final result = await cropSelection(
+        source,
+        const Rect.fromLTWH(100, 100, 1000, 500),
+        const Size(1400, 900),
+        [
+          for (var n = 1; n <= 3; n++)
+            Annotation(
+              tool: AnnotationTool.badge,
+              points: [Offset(100 + n * 150.0, 220)],
+              color: const Color(0xffe62d2d),
+              strokeWidth: 16,
+              number: n,
+            ),
+        ],
+      );
+      source.dispose();
+      return result;
+    });
+    expect(session.copied, expected);
+    expect(tester.takeException(), isNull);
+  });
   for (final tool in [
     '矩形',
     '椭圆',

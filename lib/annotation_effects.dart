@@ -56,23 +56,35 @@ class AnnotationEffects {
         }
       case AnnotationEffect.spotlight:
         final dim = parameter.round().clamp(0, 255);
-        final r = math.max(0, radius);
+        if (regionWidth <= 0 || regionHeight <= 0 || dim == 0) return output;
+        final r = math
+            .max(
+              0,
+              math.min(radius, math.min(regionWidth ~/ 2, regionHeight ~/ 2)),
+            )
+            .toDouble();
+        final cx = x + regionWidth / 2;
+        final cy = y + regionHeight / 2;
+        final hx = regionWidth / 2 - r;
+        final hy = regionHeight / 2 - r;
         for (var py = 0; py < height; py++) {
           for (var px = 0; px < width; px++) {
-            final dx = px < left
-                ? left - px
-                : px >= right
-                ? px - right + 1
-                : 0;
-            final dy = py < top
-                ? top - py
-                : py >= bottom
-                ? py - bottom + 1
-                : 0;
-            if (dx * dx + dy * dy <= r * r) continue;
+            final qx = (px + .5 - cx).abs() - hx;
+            final qy = (py + .5 - cy).abs() - hy;
+            final dx = math.max(0.0, qx);
+            final dy = math.max(0.0, qy);
+            final distance =
+                math.sqrt(dx * dx + dy * dy) +
+                math.min(math.max(qx, qy), 0) -
+                r;
+            final strength = distance.clamp(0, 1.5) / 1.5;
+            if (strength == 0) continue;
             final offset = (py * width + px) * 4;
             for (var c = 0; c < 3; c++) {
-              output[offset + c] = image[offset + c] * (255 - dim) ~/ 255;
+              output[offset +
+                  c] = (image[offset + c] * (1 - dim / 255 * strength))
+                  .round()
+                  .clamp(0, 255);
             }
           }
         }
@@ -121,34 +133,90 @@ class AnnotationEffects {
             (left == 0 && top == 0 && right == width && bottom == height)) {
           return output;
         }
-        // Fill from the closest undamaged edge. This is local and deterministic.
-        for (var py = top; py < bottom; py++) {
-          for (var px = left; px < right; px++) {
-            final distances = [
-              px - left + 1,
-              right - px,
-              py - top + 1,
-              bottom - py,
-            ];
-            final nearest = distances.reduce(math.min);
-            final sourceX = nearest == distances[0]
-                ? left - 1
-                : nearest == distances[1]
-                ? right
-                : px;
-            final sourceY = nearest == distances[2]
-                ? top - 1
-                : nearest == distances[3]
-                ? bottom
-                : py;
-            final sx = sourceX.clamp(0, width - 1);
-            final sy = sourceY.clamp(0, height - 1);
-            final target = (py * width + px) * 4;
-            final source = (sy * width + sx) * 4;
-            output.setRange(target, target + 4, base, source);
-          }
-        }
+        _diffuse(output, base, width, height, left, top, right, bottom);
     }
     return output;
+  }
+
+  // Tauri smart_erase_region: seed from the original outside boundary, then
+  // fill one synchronous frontier per round. Newly queued pixels cannot feed
+  // their neighbours until the following round (avoids directional streaks).
+  static void _diffuse(
+    Uint8List output,
+    Uint8List base,
+    int width,
+    int height,
+    int left,
+    int top,
+    int right,
+    int bottom,
+  ) {
+    final rw = right - left;
+    final rh = bottom - top;
+    final state = Uint8List(rw * rh); // 0 unfilled, 1 queued, 2 filled
+    const directions = [(-1, 0), (1, 0), (0, -1), (0, 1)];
+    bool fill(int lx, int ly, {required bool seed}) {
+      var sr = 0, sg = 0, sb = 0, sa = 0, count = 0;
+      for (final (dx, dy) in directions) {
+        final nx = lx + dx;
+        final ny = ly + dy;
+        final outside = nx < 0 || ny < 0 || nx >= rw || ny >= rh;
+        final ax = left + nx;
+        final ay = top + ny;
+        if (ax < 0 || ay < 0 || ax >= width || ay >= height) continue;
+        if (!outside && (seed || state[ny * rw + nx] != 2)) continue;
+        final data = outside ? base : output;
+        final offset = (ay * width + ax) * 4;
+        sr += data[offset];
+        sg += data[offset + 1];
+        sb += data[offset + 2];
+        sa += data[offset + 3];
+        count++;
+      }
+      if (count == 0) return false;
+      final target = ((top + ly) * width + left + lx) * 4;
+      output[target] = sr ~/ count;
+      output[target + 1] = sg ~/ count;
+      output[target + 2] = sb ~/ count;
+      output[target + 3] = sa ~/ count;
+      return true;
+    }
+
+    var frontier = <int>[];
+    for (var ly = 0; ly < rh; ly++) {
+      for (var lx = 0; lx < rw; lx++) {
+        if (lx != 0 && ly != 0 && lx != rw - 1 && ly != rh - 1) continue;
+        if (fill(lx, ly, seed: true)) {
+          final index = ly * rw + lx;
+          state[index] = 2;
+          frontier.add(index);
+        }
+      }
+    }
+    for (var round = 0; round < math.min(rw, rh) ~/ 2 + 2; round++) {
+      if (frontier.isEmpty) break;
+      final next = <int>[];
+      for (final index in frontier) {
+        final lx = index % rw;
+        final ly = index ~/ rw;
+        for (final (dx, dy) in directions) {
+          final nx = lx + dx;
+          final ny = ly + dy;
+          if (nx < 0 || ny < 0 || nx >= rw || ny >= rh) continue;
+          final q = ny * rw + nx;
+          if (state[q] != 0) continue;
+          state[q] = 1;
+          if (fill(nx, ny, seed: false)) {
+            next.add(q);
+          } else {
+            state[q] = 0;
+          }
+        }
+      }
+      for (final index in next) {
+        state[index] = 2;
+      }
+      frontier = next;
+    }
   }
 }
