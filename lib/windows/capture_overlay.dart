@@ -1329,12 +1329,14 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        SizedBox(
-                          height: 96,
-                          child: SingleChildScrollView(
-                            child: Text(
-                              _ocrBusy ? '识别中…' : _ocrText!,
-                              style: const TextStyle(fontSize: 12),
+                        Flexible(
+                          child: SizedBox(
+                            height: 96,
+                            child: SingleChildScrollView(
+                              child: Text(
+                                _ocrBusy ? '识别中…' : _ocrText!,
+                                style: const TextStyle(fontSize: 12),
+                              ),
                             ),
                           ),
                         ),

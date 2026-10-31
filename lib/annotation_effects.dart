@@ -59,8 +59,16 @@ class AnnotationEffects {
         final r = math.max(0, radius);
         for (var py = 0; py < height; py++) {
           for (var px = 0; px < width; px++) {
-            final dx = px < left ? left - px : px >= right ? px - right + 1 : 0;
-            final dy = py < top ? top - py : py >= bottom ? py - bottom + 1 : 0;
+            final dx = px < left
+                ? left - px
+                : px >= right
+                ? px - right + 1
+                : 0;
+            final dy = py < top
+                ? top - py
+                : py >= bottom
+                ? py - bottom + 1
+                : 0;
             if (dx * dx + dy * dy <= r * r) continue;
             final offset = (py * width + px) * 4;
             for (var c = 0; c < 3; c++) {
@@ -70,13 +78,19 @@ class AnnotationEffects {
         }
       case AnnotationEffect.eraser:
         final brush = math.max(1, parameter.round());
-        for (var i = 0; i + 1 < points.length; i += 2) {
-          final cx = points[i].round();
-          final cy = points[i + 1].round();
-          for (var py = math.max(0, cy - brush);
-              py < math.min(height, cy + brush + 1); py++) {
-            for (var px = math.max(0, cx - brush);
-                px < math.min(width, cx + brush + 1); px++) {
+        void restoreAt(double x, double y) {
+          final cx = x.round();
+          final cy = y.round();
+          for (
+            var py = math.max(0, cy - brush);
+            py < math.min(height, cy + brush + 1);
+            py++
+          ) {
+            for (
+              var px = math.max(0, cx - brush);
+              px < math.min(width, cx + brush + 1);
+              px++
+            ) {
               final dx = px - cx;
               final dy = py - cy;
               if (dx * dx + dy * dy > brush * brush) continue;
@@ -85,20 +99,48 @@ class AnnotationEffects {
             }
           }
         }
+        if (points.length >= 2) restoreAt(points[0], points[1]);
+        for (var i = 2; i + 1 < points.length; i += 2) {
+          final startX = points[i - 2];
+          final startY = points[i - 1];
+          final dx = points[i] - startX;
+          final dy = points[i + 1] - startY;
+          // Pointer events can be far apart during a fast drag. Restore the
+          // whole stroke between samples so exported annotations have no gaps.
+          final steps = math.max(
+            1,
+            (math.sqrt(dx * dx + dy * dy) / math.max(1, brush / 2)).ceil(),
+          );
+          for (var step = 1; step <= steps; step++) {
+            restoreAt(startX + dx * step / steps, startY + dy * step / steps);
+          }
+        }
       case AnnotationEffect.smartErase:
-        if (left >= right || top >= bottom ||
+        if (left >= right ||
+            top >= bottom ||
             (left == 0 && top == 0 && right == width && bottom == height)) {
           return output;
         }
         // Fill from the closest undamaged edge. This is local and deterministic.
         for (var py = top; py < bottom; py++) {
           for (var px = left; px < right; px++) {
-            final distances = [px - left + 1, right - px, py - top + 1, bottom - py];
+            final distances = [
+              px - left + 1,
+              right - px,
+              py - top + 1,
+              bottom - py,
+            ];
             final nearest = distances.reduce(math.min);
-            final sourceX = nearest == distances[0] ? left - 1 :
-                nearest == distances[1] ? right : px;
-            final sourceY = nearest == distances[2] ? top - 1 :
-                nearest == distances[3] ? bottom : py;
+            final sourceX = nearest == distances[0]
+                ? left - 1
+                : nearest == distances[1]
+                ? right
+                : px;
+            final sourceY = nearest == distances[2]
+                ? top - 1
+                : nearest == distances[3]
+                ? bottom
+                : py;
             final sx = sourceX.clamp(0, width - 1);
             final sy = sourceY.clamp(0, height - 1);
             final target = (py * width + px) * 4;
