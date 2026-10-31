@@ -7,6 +7,7 @@ import Vision
 class MainFlutterWindow: NSWindow {
   private var captureChannel: FlutterMethodChannel?
   private var ocrChannel: FlutterMethodChannel?
+  private var ocrBusy = false
   private var escapeMonitor: Any?
   private var localEscapeMonitor: Any?
 
@@ -166,7 +167,7 @@ class MainFlutterWindow: NSWindow {
       binaryMessenger: flutterViewController.engine.binaryMessenger
     )
     ocrChannel?.setMethodCallHandler { call, result in
-      guard call.method == "recognizeText" else {
+      guard call.method == "recognizeText" || call.method == "recognizeLayout" else {
         result(FlutterMethodNotImplemented)
         return
       }
@@ -174,6 +175,12 @@ class MainFlutterWindow: NSWindow {
         result(FlutterError(code: "ocr_failed", message: "Invalid image data", details: nil))
         return
       }
+      let wantsLayout = call.method == "recognizeLayout"
+      guard !self.ocrBusy else {
+        result(FlutterError(code: "ocr_busy", message: "文字识别正在进行，请稍后再试", details: nil))
+        return
+      }
+      self.ocrBusy = true
       DispatchQueue.global(qos: .userInitiated).async {
         do {
           let request = VNRecognizeTextRequest()
@@ -194,9 +201,31 @@ class MainFlutterWindow: NSWindow {
           }
           let text = observations.compactMap { $0.topCandidates(1).first?.string }
             .joined(separator: "\n")
-          DispatchQueue.main.async { result(text) }
+          if wantsLayout {
+            guard let image = NSImage(data: bytes),
+                  let representation = image.representations.first else {
+              throw NSError(domain: "SnapPinOCR", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "无法读取原图尺寸"])
+            }
+            let width = Double(representation.pixelsWide)
+            let height = Double(representation.pixelsHigh)
+            let lines: [[String: Any]] = observations.compactMap { observation in
+              guard let candidate = observation.topCandidates(1).first else { return nil }
+              let bounds = observation.boundingBox
+              return ["text": candidate.string, "x": Double(bounds.minX) * width,
+                "y": (1 - Double(bounds.maxY)) * height,
+                "width": Double(bounds.width) * width, "height": Double(bounds.height) * height]
+            }
+            DispatchQueue.main.async {
+              self.ocrBusy = false
+              result(["text": text, "width": width, "height": height, "lines": lines])
+            }
+          } else {
+            DispatchQueue.main.async { self.ocrBusy = false; result(text) }
+          }
         } catch {
           DispatchQueue.main.async {
+            self.ocrBusy = false
             result(FlutterError(code: "ocr_failed", message: error.localizedDescription, details: nil))
           }
         }

@@ -18,6 +18,8 @@ import 'windows/pin_menu_window.dart';
 import 'windows/settings_window.dart';
 import 'windows/translation_window.dart';
 import 'windows/ocr_window.dart';
+import 'ocr_document.dart';
+import 'runtime_smoke.dart';
 import 'windows/long_preview_window.dart';
 import 'windows/capture_toast_window.dart';
 
@@ -40,6 +42,18 @@ Future<void> main(List<String> args) async {
   debugPrint('SnapPin startup: window manager ready');
   final controller = await WindowController.fromCurrentEngine();
   AppLog.write('startup-window-controller', '${startup.elapsedMilliseconds}ms');
+  final runtimeSmoke = Platform.environment['SNAPPIN_RUNTIME_SMOKE'];
+  if (runtimeSmoke != null &&
+      runtimeSmoke.isNotEmpty &&
+      controller.arguments.isEmpty) {
+    try {
+      await runRuntimeSmoke(shutdownDuringOcr: runtimeSmoke == 'shutdown');
+    } catch (error, stack) {
+      AppLog.write('runtime-smoke-failed', '$error\n$stack');
+      exit(1);
+    }
+    return;
+  }
   debugPrint('SnapPin startup: window role ${controller.arguments}');
   final arguments = controller.arguments.isEmpty
       ? <String, dynamic>{'role': 'ball'}
@@ -137,6 +151,7 @@ Future<void> main(List<String> args) async {
         ),
       );
     case 'pin':
+      final topmost = arguments['topmost'] as bool? ?? true;
       final size = Size(
         (arguments['pixelWidth'] as num? ?? arguments['width'] as num)
             .toDouble(),
@@ -144,27 +159,31 @@ Future<void> main(List<String> args) async {
             .toDouble(),
       );
       await windowManager.waitUntilReadyToShow(
-        const WindowOptions(
+        WindowOptions(
           size: Size(1100, 760),
+          title: 'SnapPin - 贴图',
           center: true,
-          alwaysOnTop: true,
+          alwaysOnTop: topmost,
           backgroundColor: Color(0xfff8f8f8),
           titleBarStyle: TitleBarStyle.hidden,
           windowButtonVisibility: false,
         ),
         () async {
           await windowManager.setAsFrameless();
-          await windowManager.setHasShadow(false);
+          await windowManager.setHasShadow(true);
           await windowManager.show();
           await windowManager.focus();
         },
       );
       runApp(
         SnapPinApp(
+          title: 'SnapPin - 贴图',
           child: PinWindow(
             controller: controller,
             path: arguments['path'] as String,
             baseSize: size,
+            initiallyTopmost: topmost,
+            firstTilePath: arguments['firstTilePath'] as String?,
           ),
         ),
       );
@@ -222,7 +241,9 @@ Future<void> main(List<String> args) async {
       await windowManager.waitUntilReadyToShow(
         const WindowOptions(
           size: Size(820, 550),
+          title: 'SnapPin - 文字识别结果',
           center: true,
+          alwaysOnTop: true,
           backgroundColor: Colors.white,
           titleBarStyle: TitleBarStyle.hidden,
           windowButtonVisibility: false,
@@ -235,10 +256,14 @@ Future<void> main(List<String> args) async {
       );
       runApp(
         SnapPinApp(
+          title: 'SnapPin - 文字识别结果',
           child: OcrWindow(
             controller: controller,
             imagePath: arguments['image'] as String,
             text: arguments['text'] as String,
+            document: arguments['document'] is Map
+                ? OcrDocument.fromJson(arguments['document'] as Map)
+                : null,
           ),
         ),
       );
@@ -328,12 +353,13 @@ Future<void> main(List<String> args) async {
 }
 
 class SnapPinApp extends StatelessWidget {
-  const SnapPinApp({super.key, required this.child});
+  const SnapPinApp({super.key, required this.child, this.title = 'SnapPin'});
   final Widget child;
+  final String title;
 
   @override
   Widget build(BuildContext context) => MaterialApp(
-    title: 'SnapPin',
+    title: title,
     debugShowCheckedModeBanner: false,
     theme: ThemeData(
       useMaterial3: false,

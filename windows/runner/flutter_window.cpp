@@ -5,6 +5,8 @@
 #include <dwmapi.h>
 #include <commctrl.h>
 #include <cwchar>
+#include <mutex>
+#include <thread>
 
 #include "flutter/generated_plugin_registrant.h"
 #include "desktop_multi_window/desktop_multi_window_plugin.h"
@@ -15,6 +17,22 @@
 #include "ocr_bridge.h"
 
 void TraceStartup(const char* stage);
+
+struct OcrAsyncJob {
+  std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> reply;
+  flutter::EncodableValue value;
+  std::string error;
+  bool ready = false;
+};
+
+struct OcrAsyncState {
+  std::mutex mutex;
+  bool alive = true;
+  HWND window = nullptr;
+  std::vector<std::shared_ptr<OcrAsyncJob>> jobs;
+};
+
+constexpr UINT kOcrResultReady = WM_APP + 0x534;
 
 namespace {
 BOOL CALLBACK HideInputToolbar(HWND window, LPARAM context) {
@@ -119,6 +137,8 @@ FlutterWindow::FlutterWindow(const flutter::DartProject& project)
     : project_(project) {}
 
 FlutterWindow::~FlutterWindow() {
+  // Also cancel workers if an exit ends the loop before destroying HWND.
+  if (flutter_controller_) OnDestroy();
   RestoreInputToolbars(hidden_input_toolbars_);
 }
 
@@ -229,17 +249,68 @@ bool FlutterWindow::OnCreate() {
   ocr_channel_ = std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
       flutter_controller_->engine()->messenger(), "snappin/ocr",
       &flutter::StandardMethodCodec::GetInstance());
+  ocr_state_ = std::make_shared<OcrAsyncState>();
+  ocr_state_->window = GetHandle();
   ocr_channel_->SetMethodCallHandler(
-      [](const auto& call, auto result) {
-        if (call.method_name() != "recognizeText") {
+      [state = ocr_state_](const auto& call, auto result) {
+        if (call.method_name() != "recognizeText" && call.method_name() != "recognizeLayout") {
           result->NotImplemented();
           return;
         }
+        const auto* argument = call.arguments();
+        const auto* bytes = argument ? std::get_if<std::vector<uint8_t>>(argument) : nullptr;
+        if (!bytes) { result->Error("ocr_failed", "Invalid image data"); return; }
+        const bool layout_requested = call.method_name() == "recognizeLayout";
+        auto job = std::make_shared<OcrAsyncJob>();
+        job->reply = std::move(result);
+        {
+          std::lock_guard<std::mutex> lock(state->mutex);
+          if (!state->jobs.empty()) { job->reply->Error("ocr_busy", "文字识别正在进行，请稍后再试"); return; }
+          state->jobs.push_back(job);
+        }
+        // Copy the incoming bytes: the MethodCall is destroyed when we return.
+        auto work = [state, job, image = *bytes, layout_requested]() {
+        TraceStartup("ocr-worker-start");
         try {
-          const auto& bytes = std::get<std::vector<uint8_t>>(*call.arguments());
-          result->Success(flutter::EncodableValue(RecognizeText(bytes)));
+          if (layout_requested) {
+            OcrLayout layout;
+            const auto text = RecognizeText(image, &layout);
+            flutter::EncodableList lines;
+            for (const auto& line : layout.lines) {
+              lines.emplace_back(flutter::EncodableMap{
+                {flutter::EncodableValue("text"), flutter::EncodableValue(line.text)},
+                {flutter::EncodableValue("x"), flutter::EncodableValue(line.x)},
+                {flutter::EncodableValue("y"), flutter::EncodableValue(line.y)},
+                {flutter::EncodableValue("width"), flutter::EncodableValue(line.width)},
+                {flutter::EncodableValue("height"), flutter::EncodableValue(line.height)}});
+            }
+            job->value = flutter::EncodableValue(flutter::EncodableMap{
+              {flutter::EncodableValue("text"), flutter::EncodableValue(text)},
+              {flutter::EncodableValue("width"), flutter::EncodableValue(static_cast<double>(layout.width))},
+              {flutter::EncodableValue("height"), flutter::EncodableValue(static_cast<double>(layout.height))},
+              {flutter::EncodableValue("lines"), flutter::EncodableValue(lines)}});
+          } else {
+            job->value = flutter::EncodableValue(RecognizeText(image));
+          }
         } catch (const std::exception& error) {
-          result->Error("ocr_failed", error.what());
+          job->error = error.what();
+        } catch (...) {
+          job->error = "Local OCR failed";
+        }
+        std::lock_guard<std::mutex> lock(state->mutex);
+        TraceStartup("ocr-worker-result-ready");
+        if (!state->alive) return;
+        // Return through our Win32 window procedure, on Flutter's platform
+        // thread. No engine wrapper or response is accessed by this worker.
+        job->ready = true;
+        PostMessage(state->window, kOcrResultReady, 0, 0);
+        };
+        try { std::thread(std::move(work)).detach(); }
+        catch (const std::exception& error) {
+          std::lock_guard<std::mutex> lock(state->mutex);
+          state->jobs.clear();
+          job->reply->Error("ocr_failed", error.what());
+          job->reply.reset();
         }
       });
   DesktopMultiWindowSetWindowCreatedCallback([](void* controller) {
@@ -295,6 +366,16 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::OnDestroy() {
+  if (ocr_state_) {
+    std::lock_guard<std::mutex> lock(ocr_state_->mutex);
+    ocr_state_->alive = false;
+    ocr_state_->window = nullptr;
+    for (auto& job : ocr_state_->jobs) {
+      if (job->reply) job->reply->Error("ocr_cancelled", "Application is closing");
+      job->reply.reset();
+    }
+    ocr_state_->jobs.clear();
+  }
   if (tooltip_) {
     DestroyWindow(tooltip_);
     tooltip_ = nullptr;
@@ -316,6 +397,21 @@ LRESULT
 FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               WPARAM const wparam,
                               LPARAM const lparam) noexcept {
+  if (message == kOcrResultReady && ocr_state_) {
+    std::lock_guard<std::mutex> lock(ocr_state_->mutex);
+    if (!ocr_state_->alive) return 0;
+    for (auto it = ocr_state_->jobs.begin(); it != ocr_state_->jobs.end();) {
+      const auto& job = *it;
+      if (!job->ready) { ++it; continue; }
+      TraceStartup("ocr-platform-reply-start");
+      if (job->error.empty()) job->reply->Success(job->value);
+      else job->reply->Error("ocr_failed", job->error);
+      TraceStartup("ocr-platform-reply-sent");
+      job->reply.reset();
+      it = ocr_state_->jobs.erase(it);
+    }
+    return 0;
+  }
   if (message == WM_HOTKEY && wparam == 0x534e && capture_channel_) {
     capture_channel_->InvokeMethod("longEscape", nullptr);
     return 0;

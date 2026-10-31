@@ -14,13 +14,17 @@ void main() {
     tester,
   ) async {
     const manager = MethodChannel('window_manager');
+    final nativeCalls = <MethodCall>[];
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(
           const MethodChannel('mixin.one/desktop_multi_window/channels'),
           (call) async => null,
         );
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(manager, (call) async => null);
+        .setMockMethodCallHandler(manager, (call) async {
+          nativeCalls.add(call);
+          return null;
+        });
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(
           const MethodChannel('mixin.one/desktop_multi_window'),
@@ -47,6 +51,23 @@ void main() {
       );
       expect(find.byTooltip('图片适应窗口大小'), findsOneWidget);
       expect(find.byTooltip('文字识别'), findsOneWidget);
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyY);
+      await tester.pump();
+      expect(
+        nativeCalls
+            .lastWhere((call) => call.method == 'setHasShadow')
+            .arguments,
+        {'hasShadow': false},
+      );
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyY);
+      await tester.pump();
+      expect(
+        nativeCalls
+            .lastWhere((call) => call.method == 'setHasShadow')
+            .arguments,
+        {'hasShadow': true},
+      );
       final more = tester.widget<PopupMenuButton<String>>(
         find.byType(PopupMenuButton<String>),
       );

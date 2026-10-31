@@ -18,6 +18,7 @@ import '../annotation.dart';
 import '../annotated_image.dart';
 import '../image_save.dart';
 import '../app_log.dart';
+import '../ocr_document.dart';
 import '../window_roles.dart';
 import 'ocr_window.dart' show showOcrResult;
 import 'image_pixels.dart';
@@ -30,10 +31,14 @@ class PinWindow extends StatefulWidget {
     required this.controller,
     required this.path,
     required this.baseSize,
+    this.initiallyTopmost = true,
+    this.firstTilePath,
   });
   final WindowController controller;
   final String path;
   final Size baseSize;
+  final bool initiallyTopmost;
+  final String? firstTilePath;
 
   @override
   State<PinWindow> createState() => _PinWindowState();
@@ -42,7 +47,7 @@ class PinWindow extends StatefulWidget {
 class _PinWindowState extends State<PinWindow> with WindowListener {
   double _opacity = 1;
   double _scale = 1;
-  bool _topmost = true;
+  late bool _topmost = widget.initiallyTopmost;
   bool _locked = false;
   bool _shadow = true;
   bool _toolbar = true;
@@ -90,7 +95,6 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
     _displayPath = widget.path;
     _sourceBytes = File(widget.path).readAsBytes();
     unawaited(windowManager.setPreventClose(true));
-    unawaited(_loadMosaicPreview());
     widget.controller.setWindowMethodHandler((call) async {
       switch (call.method) {
         case 'getPinInfo':
@@ -281,7 +285,7 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
       case 'lock':
         if (mounted) setState(() => _locked = !_locked);
       case 'shadow':
-        if (mounted) setState(() => _shadow = !_shadow);
+        await _toggleShadow();
       case 'toolbar':
         if (mounted) setState(() => _toolbar = !_toolbar);
       case 'pass-through':
@@ -437,6 +441,16 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
     final next = !_topmost;
     await windowManager.setAlwaysOnTop(next);
     if (mounted) setState(() => _topmost = next);
+  }
+
+  Future<void> _toggleShadow() async {
+    final next = !_shadow;
+    await windowManager.setHasShadow(next);
+    if (mounted) setState(() => _shadow = next);
+    AppLog.write(
+      'pin-shadow',
+      'window=${widget.controller.windowId} enabled=$next',
+    );
   }
 
   Future<void> _enablePassThrough() async {
@@ -630,8 +644,18 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
       final target = await findBallWindow();
       if (target == null) throw StateError('主窗口不可用');
       final bytes = await File(_displayPath).readAsBytes();
-      final text = await target.invokeMethod<String>('recognizeText', bytes);
-      await showOcrResult(bytes, text ?? '');
+      final layout = await target.invokeMethod<String>(
+        'recognizeLayout',
+        bytes,
+      );
+      final document = layout == null
+          ? OcrDocument(
+              text:
+                  await target.invokeMethod<String>('recognizeText', bytes) ??
+                  '',
+            )
+          : OcrDocument.decode(layout);
+      await showOcrResult(bytes, document.text, document: document);
     } catch (error) {
       AppLog.write('pin-ocr-failed', error);
       if (mounted)
@@ -656,7 +680,7 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
     final result = await Process.run('powershell.exe', [
       '-NoProfile',
       '-Command',
-      "Start-Process -LiteralPath '$quoted' -Verb Print",
+      "Start-Process -FilePath '$quoted' -Verb Print",
     ]);
     if (result.exitCode != 0) throw StateError('${result.stderr}');
   }
@@ -758,11 +782,10 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
             '向右旋转',
             () => _applyEdit('rotate-right'),
           ),
-          _viewerIcon(
-            Icons.edit_outlined,
-            '编辑',
-            () => setState(() => _viewerEditing = true),
-          ),
+          _viewerIcon(Icons.edit_outlined, '编辑', () {
+            if (_mosaicPreview == null) unawaited(_loadMosaicPreview());
+            setState(() => _viewerEditing = true);
+          }),
           _divider(),
           _viewerIcon(
             Icons.document_scanner_outlined,
@@ -985,6 +1008,9 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
             Positioned.fill(
               child: ImagePixels(
                 path: _displayPath,
+                firstTilePath: _displayPath == widget.path
+                    ? widget.firstTilePath
+                    : null,
                 sourceHeight: _baseSize.height.round(),
                 displayWidth: imageWidth,
                 scale: scale,
@@ -1122,6 +1148,14 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
       }
       if (event.logicalKey == LogicalKeyboardKey.keyH) {
         setState(() => _toolbar = !_toolbar);
+        return KeyEventResult.handled;
+      }
+      if (event.logicalKey == LogicalKeyboardKey.keyY && !modifier) {
+        _toggleShadow();
+        return KeyEventResult.handled;
+      }
+      if (event.logicalKey == LogicalKeyboardKey.keyL && !modifier) {
+        setState(() => _locked = !_locked);
         return KeyEventResult.handled;
       }
       return KeyEventResult.ignored;

@@ -313,10 +313,17 @@ void main() {
       await expectLater(worker.push(Uint8List(0)), throwsStateError);
       expect((await worker.push(_frame(240))).kind, LongStepKind.appended);
       expect(worker.height, 840);
+      final firstTile = img.decodePng(await worker.firstTilePng())!;
+      expect((firstTile.width, firstTile.height), (160, 840));
+      expect(
+        firstTile.getPixel(30, 0).r,
+        img.decodePng(_frame(0))!.getPixel(30, 0).r,
+      );
       final preview = img.decodePng(await worker.previewPng())!;
       expect(preview.height, lessThan(worker.height));
       final file = await worker.savePng(File('${directory.path}/worker.png'));
       final result = img.decodePng(await file.readAsBytes())!;
+      expect(firstTile.getBytes(), result.getBytes());
       expect(result.width, 160);
       expect(result.height, 840);
       expect(

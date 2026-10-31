@@ -16,6 +16,8 @@ import '../capture_bridge.dart';
 import 'capture_exit_dialog.dart';
 import 'ocr_window.dart' show showOcrResult;
 import '../app_log.dart';
+import '../ocr_document.dart';
+import '../window_capture_exclusion.dart';
 import '../image_save.dart';
 import '../capture_image.dart';
 import '../annotation.dart';
@@ -437,16 +439,41 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
     final source = _image;
     if (selection == null || source == null || _ocrBusy) return;
     setState(() => _ocrBusy = true);
+    final watch = Stopwatch()..start();
+    AppLog.write(
+      'capture-ocr-start',
+      'window=${widget.controller.windowId} marks=${_annotations.length}',
+    );
     try {
       final bytes = await cropSelection(
         source,
         selection,
         Size(_display.width, _display.height),
       );
-      final text = await _recognizeLocally(bytes);
-      await showOcrResult(bytes, text);
-      await _close();
+      final ball = await findBallWindow();
+      if (ball == null) throw StateError('主窗口不可用，无法进行本地文字识别');
+      final layout = await ball.invokeMethod<String>('recognizeLayout', bytes);
+      final document = layout == null
+          ? OcrDocument(text: await _recognizeLocally(bytes))
+          : OcrDocument.decode(layout);
+      final text = document.text;
+      AppLog.write(
+        'capture-ocr-recognized',
+        'characters=${text.length} ${watch.elapsedMilliseconds}ms',
+      );
+      await _openPin(await _crop(), selection, topmost: false);
+      AppLog.write('capture-ocr-pin-opened', '${watch.elapsedMilliseconds}ms');
+      await showOcrResult(bytes, text, document: document);
+      AppLog.write(
+        'capture-ocr-result-opened',
+        '${watch.elapsedMilliseconds}ms',
+      );
+      await _close(reason: 'ocr-and-pin-results');
     } catch (error) {
+      AppLog.write(
+        'capture-ocr-failed',
+        '${watch.elapsedMilliseconds}ms $error',
+      );
       if (mounted) setState(() => _ocrText = '识别失败：$error');
     } finally {
       if (mounted) setState(() => _ocrBusy = false);
@@ -464,6 +491,10 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
     final source = _image;
     if (selection == null || source == null || _transBusy) return;
     setState(() => _transBusy = true);
+    AppLog.write(
+      'capture-translation-start',
+      'window=${widget.controller.windowId}',
+    );
     try {
       final bytes = await cropSelection(
         source,
@@ -492,8 +523,9 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
           ),
         );
       }
-      await _close();
+      await _close(reason: 'translation-result');
     } catch (error) {
+      AppLog.write('capture-translation-failed', error);
       if (mounted) setState(() => _ocrText = '翻译失败：$error');
     } finally {
       if (mounted) setState(() => _transBusy = false);
@@ -545,7 +577,7 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
     try {
       if (!await preference.shouldAsk()) {
         AppLog.write('capture-exit', 'confirmed-by-preference');
-        if (mounted && !_closing) await _close();
+        if (mounted && !_closing) await _close(reason: 'cancel-preference');
         return;
       }
       if (!mounted || _closing) return;
@@ -571,15 +603,19 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
           AppLog.write('capture-exit-preference-failed', error);
         }
       }
-      if (mounted && !_closing) await _close();
+      if (mounted && !_closing) await _close(reason: 'cancel-confirmed');
     } finally {
       _confirmingExit = false;
     }
   }
 
-  Future<void> _close() async {
+  Future<void> _close({String reason = 'toolbar-cancel'}) async {
     if (_closing) return;
     _closing = true;
+    AppLog.write(
+      'capture-close-start',
+      'reason=$reason window=${widget.controller.windowId} marks=${_annotations.length} longMode=$_longMode',
+    );
     final all = await WindowController.getAll();
     for (final window in all) {
       if (window.windowId == widget.controller.windowId) continue;
@@ -593,6 +629,10 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
       }
     }
     await _closeSelf();
+    AppLog.write(
+      'capture-close-complete',
+      'reason=$reason window=${widget.controller.windowId}',
+    );
   }
 
   Future<void> _closeSelf() async {
@@ -618,11 +658,15 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
       if (display != null) await File(display.path).delete();
     } catch (_) {}
     await windowManager.hide();
+    AppLog.write(
+      'capture-overlay-hidden',
+      'window=${widget.controller.windowId}',
+    );
   }
 
   Future<void> _copy() async {
     await Pasteboard.writeImage(await _crop());
-    await _close();
+    await _close(reason: 'copy-completed');
     try {
       await WindowController.create(
         WindowConfiguration(
@@ -638,19 +682,28 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
 
   Future<void> _save() async {
     if (!await saveImage(await _crop())) return;
-    await _close();
+    await _close(reason: 'save-completed');
   }
 
   Future<void> _pin() async {
     final bytes = await _crop();
+    await _openPin(bytes, _validSelection!);
+    await _close(reason: 'pin-opened');
+  }
+
+  Future<void> _openPin(
+    Uint8List bytes,
+    Rect rect, {
+    bool topmost = true,
+  }) async {
     final directory = await Directory.systemTemp.createTemp('snappin-pin-');
     final path = '${directory.path}${Platform.pathSeparator}pin.png';
     await File(path).writeAsBytes(bytes);
-    final rect = _validSelection!;
     await WindowController.create(
       WindowConfiguration(
         arguments: jsonEncode({
           'role': 'pin',
+          'topmost': topmost,
           'path': path,
           'width': rect.width + 20,
           'height': rect.height + 20,
@@ -662,7 +715,6 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
         hiddenAtLaunch: true,
       ),
     );
-    await _close();
   }
 
   Future<void> _startLongCapture() async {
@@ -676,8 +728,24 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
     }
     setState(() => _longMode = true);
     await windowManager.setIgnoreMouseEvents(true);
-    await Future<void>.delayed(const Duration(milliseconds: 80));
     try {
+      if (Platform.isWindows) {
+        final excluded = await WindowCaptureExclusion.enable(
+          'SnapPin - 截长图边框 - ${widget.controller.windowId}',
+        );
+        AppLog.write(
+          'long-overlay-exclusion',
+          'window=${widget.controller.windowId} enabled=$excluded',
+        );
+        if (!excluded) {
+          await windowManager.hide();
+          AppLog.write(
+            'long-overlay-guide-hidden',
+            'capture exclusion unavailable',
+          );
+        }
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 80));
       final ball = await findBallWindow();
       if (ball == null) throw StateError('主窗口不可用');
       final region = CaptureBridge.longCaptureRegion(display, selection);
@@ -691,6 +759,7 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
       );
     } catch (error) {
       await windowManager.setIgnoreMouseEvents(false);
+      await windowManager.show();
       if (mounted)
         setState(() {
           _longMode = false;
@@ -808,7 +877,7 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
                     );
                     if (event.buttons == 2) {
                       if (_validSelection == null) {
-                        _close();
+                        _close(reason: 'right-click-without-selection');
                       } else {
                         setState(() {
                           _selection = null;
@@ -2382,13 +2451,22 @@ class _LongBorderPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final rect = selection;
     if (rect == null) return;
+    // Keep the guide entirely outside the source region, at every DPI scale.
+    canvas.save();
+    canvas.clipPath(
+      Path()
+        ..fillType = PathFillType.evenOdd
+        ..addRect(Offset.zero & size)
+        ..addRect(rect),
+    );
     canvas.drawRect(
-      rect.deflate(1.5),
+      rect.inflate(1.5),
       Paint()
         ..color = const Color(0xff1688f0)
         ..style = PaintingStyle.stroke
         ..strokeWidth = 3,
     );
+    canvas.restore();
   }
 
   @override

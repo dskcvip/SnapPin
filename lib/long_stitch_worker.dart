@@ -95,6 +95,9 @@ class LongStitchWorker {
   Future<Uint8List> previewPng() async =>
       await _request('preview') as Uint8List;
 
+  Future<Uint8List> firstTilePng() async =>
+      await _request('firstTile') as Uint8List;
+
   Future<File> savePng(File target) async {
     await _request('save', target.path);
     return target;
@@ -134,6 +137,8 @@ class LongStitchWorker {
             result = session!.push(payload as Uint8List);
           case 'preview':
             result = session!.previewPng();
+          case 'firstTile':
+            result = session!.firstTilePng();
           case 'save':
             await session!.savePng(File(payload as String));
             result = null;

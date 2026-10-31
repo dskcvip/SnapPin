@@ -603,6 +603,21 @@ class LongStitchSession {
     return target;
   }
 
+  Uint8List firstTilePng() {
+    final rows = math.min(1024, height);
+    return Uint8List.fromList(
+      img.encodePng(
+        img.Image.fromBytes(
+          width: width,
+          height: rows,
+          bytes: Uint8List.sublistView(_canvas, 0, rows * width * 4).buffer,
+          order: img.ChannelOrder.rgba,
+        ),
+        level: 1,
+      ),
+    );
+  }
+
   void dispose() {
     _canvas = Uint8List(0);
     _previous = Uint8List(0);

@@ -11,6 +11,8 @@
 
 #include "win32_window.h"
 
+struct OcrAsyncState;
+
 // A window that does nothing but host a Flutter view.
 class FlutterWindow : public Win32Window {
  public:
@@ -33,6 +35,7 @@ class FlutterWindow : public Win32Window {
   std::unique_ptr<flutter::FlutterViewController> flutter_controller_;
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> capture_channel_;
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> ocr_channel_;
+  std::shared_ptr<OcrAsyncState> ocr_state_;
   HWND tooltip_ = nullptr;
   bool long_escape_registered_ = false;
   bool suppress_input_toolbar_ = false;

@@ -39,7 +39,11 @@ void TraceStartup(const char* stage) {
 int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
                       _In_ wchar_t *command_line, _In_ int show_command) {
   TraceStartup("entry");
-  HANDLE instance_mutex = CreateMutexW(nullptr, TRUE, L"Local\\SnapPinFlutterSingleInstance");
+  wchar_t smoke_mode[32]{};
+  const bool runtime_smoke = GetEnvironmentVariableW(L"SNAPPIN_RUNTIME_SMOKE", smoke_mode, 32) > 0;
+  const auto mutex_name = runtime_smoke
+      ? L"Local\\SnapPinFlutterRuntimeSmoke" : L"Local\\SnapPinFlutterSingleInstance";
+  HANDLE instance_mutex = CreateMutexW(nullptr, TRUE, mutex_name);
   if (!instance_mutex) {
     return EXIT_FAILURE;
   }

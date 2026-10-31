@@ -144,6 +144,12 @@ class _BallWindowState extends State<BallWindow>
       if (call.method == 'recognizeText') {
         return OcrBridge.recognize(call.arguments as Uint8List);
       }
+      if (call.method == 'recognizeLayout') {
+        return jsonEncode(
+          (await OcrBridge.recognizeLayout(call.arguments as Uint8List))
+              .toJson(),
+        );
+      }
       if (call.method == 'translateText') {
         final config = await ConfigStore.load();
         if (config.translationModels.isEmpty) {
@@ -941,6 +947,17 @@ class _BallWindowState extends State<BallWindow>
       await session.savePng(File(path));
       saved = true;
       AppLog.write('long-result-saved', path);
+      String? firstTilePath;
+      try {
+        final tilePath =
+            '${directory.path}${Platform.pathSeparator}first-tile.png';
+        await File(tilePath).writeAsBytes(await session.firstTilePng());
+        firstTilePath = tilePath;
+        AppLog.write('long-result-first-tile-ready');
+      } catch (error) {
+        // The full-resolution export already succeeded; still open that result.
+        AppLog.write('long-result-first-tile-failed', error);
+      }
       final width = session.width;
       final height = session.height;
       final steps = session.steps;
@@ -954,6 +971,7 @@ class _BallWindowState extends State<BallWindow>
           arguments: jsonEncode({
             'role': 'pin',
             'path': path,
+            'firstTilePath': firstTilePath,
             'width': width,
             'height': height,
             'pixelWidth': width,

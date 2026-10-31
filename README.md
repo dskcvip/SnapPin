@@ -4,6 +4,9 @@ This is the standalone Flutter rewrite of SnapPin. The existing Tauri app in
 `E:\PixPin` is the behavior and visual reference until parity is verified.
 The Flutter application is under construction and is not a replacement build yet.
 
+Current implementation gaps and verification limits are recorded in
+[development-status-20261031.md](docs/development-status-20261031.md).
+
 ## Parity Gate
 
 Each row needs functional, visual, keyboard, multi-monitor, and platform checks

@@ -339,18 +339,32 @@ void main() {
       final session = _Session();
       await session.open(tester);
       await session.click(tester, action);
+      if (action == _long) {
+        for (var i = 0; i < 24; i++) {
+          await tester.pump(const Duration(milliseconds: 50));
+        }
+      }
       if (action == _ocr) {
-        expect(session.created.single['role'], 'ocr');
-        expect(session.created.single['text'], '本地识别文字');
-        expect(
-          File(session.created.single['image'] as String).existsSync(),
-          isTrue,
+        expect(session.created.map((item) => item['role']), ['pin', 'ocr']);
+        final result = session.created.singleWhere(
+          (item) => item['role'] == 'ocr',
         );
+        expect(result['text'], '本地识别文字');
+        expect(File(result['image'] as String).existsSync(), isTrue);
+        final pin = session.created.singleWhere(
+          (item) => item['role'] == 'pin',
+        );
+        final image = img.decodePng(
+          File(pin['path'] as String).readAsBytesSync(),
+        )!;
+        expect(pin['topmost'], isFalse);
+        expect((image.width, image.height), (1000, 500));
       } else if (action == _translate) {
         expect(session.created.single['role'], 'translation');
         expect(session.created.single['source'], '本地识别文字');
       } else if (action == '贴图到屏幕') {
         expect(session.created.single['role'], 'pin');
+        expect(session.created.single['topmost'], isTrue);
         final image = img.decodePng(
           File(session.created.single['path'] as String).readAsBytesSync(),
         )!;
@@ -359,6 +373,30 @@ void main() {
         final image = img.decodePng(File(session.saved).readAsBytesSync())!;
         expect((image.width, image.height), (1000, 500));
       } else if (action == _long) {
+        final border = tester
+            .widgetList<CustomPaint>(find.byType(CustomPaint))
+            .singleWhere(
+              (item) =>
+                  item.painter.runtimeType.toString() == '_LongBorderPainter',
+            );
+        final picture = ui.PictureRecorder();
+        border.painter!.paint(Canvas(picture), const Size(1400, 900));
+        final drawn = picture.endRecording();
+        final pixels = await tester.runAsync(() async {
+          final image = await drawn.toImage(1400, 900);
+          final data = await image.toByteData(
+            format: ui.ImageByteFormat.rawRgba,
+          );
+          image.dispose();
+          return data!;
+        });
+        drawn.dispose();
+        // Capture guides must never paint inside the selected source region.
+        for (final y in [100, 102, 300, 597, 599]) {
+          for (final x in [100, 102, 104, 600, 1097, 1099]) {
+            expect(pixels!.getUint8((y * 1400 + x) * 4 + 3), 0);
+          }
+        }
         final start = session.dispatched.singleWhere(
           (call) => call['method'] == 'longCaptureStart',
         );
@@ -394,6 +432,7 @@ void main() {
     await session.open(tester);
     await session.click(tester, '保存到文件');
     expect(find.byTooltip('矩形'), findsOneWidget);
+    expect(session.created, isEmpty);
     expect(File(session.saved).existsSync(), isFalse);
     await session.click(tester, _ocr);
     expect(find.textContaining('识别失败：'), findsOneWidget);

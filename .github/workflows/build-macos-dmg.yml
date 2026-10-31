@@ -33,6 +33,7 @@ jobs:
           test -d "$APP"
           codesign --force --deep --sign - "$APP"
           codesign --verify --deep --verbose=2 "$APP"
+          bash tool/macos_runtime_smoke.sh "$APP" dist/startup-smoke
           bash tool/macos_startup_smoke.sh "$APP" dist/startup-smoke
           mkdir -p dist/dmg-root
           cp -R "$APP" dist/dmg-root/

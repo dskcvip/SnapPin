@@ -9,11 +9,21 @@ import 'package:window_manager/window_manager.dart';
 
 import '../window_roles.dart';
 import '../ocr_image_store.dart';
+import '../app_log.dart';
+import '../ocr_document.dart';
 
-Future<void> showOcrResult(Uint8List png, String text) async {
+Future<void> showOcrResult(
+  Uint8List png,
+  String text, {
+  OcrDocument? document,
+}) async {
   final image = await OcrImageStore.create(png);
   try {
-    final payload = {'image': image.path, 'text': text};
+    final payload = {
+      'image': image.path,
+      'text': text,
+      if (document != null) 'document': document.toJson(),
+    };
     for (final window in await WindowController.getAll()) {
       if (windowRole(window) == 'ocr') {
         await window.invokeMethod<void>('openResult', payload);
@@ -38,11 +48,13 @@ class OcrWindow extends StatefulWidget {
     required this.controller,
     required this.imagePath,
     required this.text,
+    this.document,
   });
 
   final WindowController controller;
   final String imagePath;
   final String text;
+  final OcrDocument? document;
 
   @override
   State<OcrWindow> createState() => _OcrWindowState();
@@ -50,8 +62,11 @@ class OcrWindow extends StatefulWidget {
 
 class _OcrWindowState extends State<OcrWindow> {
   bool _copied = false;
+  bool _topmost = true;
   late String _imagePath = widget.imagePath;
   late String _text = widget.text;
+  late OcrDocument? _document = widget.document;
+  bool _keepLayout = true;
 
   @override
   void initState() {
@@ -63,9 +78,15 @@ class _OcrWindowState extends State<OcrWindow> {
         setState(() {
           _imagePath = data['image'] as String;
           _text = data['text'] as String;
+          _document = data['document'] is Map
+              ? OcrDocument.fromJson(data['document'] as Map)
+              : null;
+          _keepLayout = true;
           _copied = false;
         });
         if (oldPath != _imagePath) unawaited(_deleteImage(oldPath));
+        await windowManager.setAlwaysOnTop(true);
+        if (mounted) setState(() => _topmost = true);
         await windowManager.show();
         await windowManager.focus();
       }
@@ -92,6 +113,13 @@ class _OcrWindowState extends State<OcrWindow> {
         if (mounted) setState(() => _copied = false);
       }),
     );
+  }
+
+  Future<void> _toggleTopmost() async {
+    final next = !_topmost;
+    await windowManager.setAlwaysOnTop(next);
+    if (mounted) setState(() => _topmost = next);
+    AppLog.write('ocr-topmost', next);
   }
 
   Future<void> _translate() async {
@@ -154,6 +182,26 @@ class _OcrWindowState extends State<OcrWindow> {
                     ),
                   ],
                   const Spacer(),
+                  if (_document?.hasLayout == true)
+                    TextButton(
+                      onPressed: () =>
+                          setState(() => _keepLayout = !_keepLayout),
+                      child: Text(
+                        _keepLayout ? '保留排版' : '纯文本',
+                        style: const TextStyle(fontSize: 12),
+                      ),
+                    ),
+                  IconButton(
+                    tooltip: _topmost ? '取消置顶' : '窗口置顶',
+                    onPressed: _toggleTopmost,
+                    iconSize: 17,
+                    color: _topmost
+                        ? const Color(0xff12a5d8)
+                        : const Color(0xff6b7280),
+                    icon: Icon(
+                      _topmost ? Icons.push_pin : Icons.push_pin_outlined,
+                    ),
+                  ),
                   TextButton(
                     onPressed: windowManager.close,
                     style: TextButton.styleFrom(
@@ -215,23 +263,25 @@ class _OcrWindowState extends State<OcrWindow> {
                 ),
                 Expanded(
                   flex: 58,
-                  child: SingleChildScrollView(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 18,
-                      vertical: 14,
-                    ),
-                    child: SizedBox(
-                      width: double.infinity,
-                      child: SelectableText(
-                        _text.isEmpty ? '没有识别结果。重新截图识别后再来。' : _text,
-                        style: const TextStyle(
-                          fontSize: 13,
-                          height: 1.75,
-                          color: Color(0xff1f2329),
+                  child: _keepLayout && _document?.hasLayout == true
+                      ? OcrLayoutView(document: _document!)
+                      : SingleChildScrollView(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 18,
+                            vertical: 14,
+                          ),
+                          child: SizedBox(
+                            width: double.infinity,
+                            child: SelectableText(
+                              _text.isEmpty ? '没有识别结果。重新截图识别后再来。' : _text,
+                              style: const TextStyle(
+                                fontSize: 13,
+                                height: 1.75,
+                                color: Color(0xff1f2329),
+                              ),
+                            ),
+                          ),
                         ),
-                      ),
-                    ),
-                  ),
                 ),
               ],
             ),

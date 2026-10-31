@@ -22,6 +22,14 @@ add_executable(${BINARY_NAME} WIN32
 # that need different build settings.
 apply_standard_settings(${BINARY_NAME})
 
+# The Flutter template disables standard-library exception handling. Our local
+# WinRT OCR worker uses futures and must propagate decoder errors instead of
+# terminating the process. Keep the plugin/default settings unchanged.
+get_target_property(RUNNER_DEFINITIONS ${BINARY_NAME} COMPILE_DEFINITIONS)
+list(REMOVE_ITEM RUNNER_DEFINITIONS "_HAS_EXCEPTIONS=0")
+set_property(TARGET ${BINARY_NAME} PROPERTY COMPILE_DEFINITIONS "${RUNNER_DEFINITIONS}")
+target_compile_definitions(${BINARY_NAME} PRIVATE "_HAS_EXCEPTIONS=1")
+
 # Add preprocessor definitions for the build version.
 target_compile_definitions(${BINARY_NAME} PRIVATE "FLUTTER_VERSION=\"${FLUTTER_VERSION}\"")
 target_compile_definitions(${BINARY_NAME} PRIVATE "FLUTTER_VERSION_MAJOR=${FLUTTER_VERSION_MAJOR}")
