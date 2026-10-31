@@ -47,6 +47,7 @@ class _BallWindowState extends State<BallWindow>
   bool _previewingSettings = false;
   Future<WindowController>? _menuFuture;
   bool _menuOpening = false;
+  Future<bool>? _trayMenuOperation;
   Future<List<WindowController>>? _overlayFuture;
   LongStitchWorker? _longSession;
   Timer? _longTimer;
@@ -97,7 +98,7 @@ class _BallWindowState extends State<BallWindow>
           case 'pin-clipboard':
             _pinClipboard();
           case 'toggle-ball':
-            _toggleBall();
+            await _toggleBall();
           case 'pin-manager':
             _openPinManager();
           case 'settings':
@@ -105,6 +106,7 @@ class _BallWindowState extends State<BallWindow>
           case 'open-log':
             _openLog();
           case 'quit':
+            AppLog.write('app-quit-requested', 'menu');
             exit(0);
         }
       }
@@ -171,12 +173,21 @@ class _BallWindowState extends State<BallWindow>
           Platform.environment['SNAPPIN_STARTUP_SMOKE'] == '1') {
         final overlaysReady = await _prewarmOverlays();
         final menuReady = await _openMenu();
+        final trayReady = menuReady && await _checkTrayMenuStartup();
         AppLog.write(
-          overlaysReady && menuReady
+          overlaysReady && menuReady && trayReady
               ? 'macos-startup-smoke-ready'
               : 'macos-startup-smoke-failed',
-          'overlays=$overlaysReady menu=$menuReady',
+          'overlays=$overlaysReady menu=$menuReady tray=$trayReady',
         );
+        if (overlaysReady && menuReady && trayReady) {
+          if (!await _openTrayMenu('right')) {
+            throw StateError('Could not reopen tray menu to test quit');
+          }
+          AppLog.write('macos-menu-quit-smoke-start');
+          final menu = await _menuFuture!;
+          await menu.invokeMethod<void>('smokeQuit');
+        }
       } else {
         unawaited(_prewarmOverlays());
       }
@@ -318,20 +329,63 @@ class _BallWindowState extends State<BallWindow>
   }
 
   @override
-  void onTrayIconMouseDown() => _openTrayMenu('left');
+  void onTrayIconMouseDown() {
+    _trayMenuOperation = _openTrayMenu('left');
+  }
 
   @override
-  void onTrayIconRightMouseDown() => _openTrayMenu('right');
+  void onTrayIconRightMouseDown() {
+    _trayMenuOperation = _openTrayMenu('right');
+  }
 
-  Future<void> _openTrayMenu(String button) async {
+  Future<bool> _openTrayMenu(String button) async {
     AppLog.write('tray-click', button);
     try {
       final cursor = await screenRetriever.getCursorScreenPoint();
       if (await _openMenu(cursor: cursor)) {
         AppLog.write('tray-menu-opened', button);
+        return true;
       }
+      AppLog.write('tray-menu-failed', '$button: menu did not open');
     } catch (error, stack) {
       AppLog.write('tray-menu-failed', '$error\n$stack');
+    }
+    return false;
+  }
+
+  // Runs only in the release CI smoke check. Exercise the same Dart callbacks
+  // used by tray_manager, then the menu's real action/IPC path in both directions.
+  Future<bool> _checkTrayMenuStartup() async {
+    try {
+      final bounds = await trayManager.getBounds();
+      if (bounds == null || bounds.width <= 0 || bounds.height <= 0) {
+        throw StateError('Native tray icon has no bounds');
+      }
+      final menu = await _menuFuture!;
+      for (final button in ['left', 'right']) {
+        if (button == 'left') {
+          onTrayIconMouseDown();
+        } else {
+          onTrayIconRightMouseDown();
+        }
+        if (await _trayMenuOperation! != true ||
+            await menu.invokeMethod<bool>('smokeInspect') != true) {
+          throw StateError('$button tray menu is not visible/focused');
+        }
+        final before = await windowManager.isVisible();
+        await menu.invokeMethod<void>('smokeToggleBall');
+        if (await windowManager.isVisible() == before) {
+          throw StateError('$button tray menu action did not toggle the ball');
+        }
+        AppLog.write(
+          'macos-tray-menu-smoke-ready',
+          '$button action=toggle-ball',
+        );
+      }
+      return true;
+    } catch (error, stack) {
+      AppLog.write('macos-tray-menu-smoke-failed', '$error\n$stack');
+      return false;
     }
   }
 

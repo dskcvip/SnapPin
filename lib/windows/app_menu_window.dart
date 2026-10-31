@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:desktop_multi_window/desktop_multi_window.dart';
 import 'package:flutter/material.dart';
@@ -58,6 +59,18 @@ class _AppMenuWindowState extends State<AppMenuWindow> with WindowListener {
         await windowManager.show();
         await windowManager.focus();
         _open = true;
+      } else if (Platform.isMacOS &&
+          Platform.environment['SNAPPIN_STARTUP_SMOKE'] == '1') {
+        if (call.method == 'smokeInspect') {
+          await WidgetsBinding.instance.endOfFrame;
+          return _open &&
+              await windowManager.isVisible() &&
+              await windowManager.isFocused();
+        }
+        if (call.method == 'smokeToggleBall') await _action('toggle-ball');
+        if (call.method == 'smokeQuit') {
+          unawaited(_action('quit'));
+        }
       }
       return null;
     });
