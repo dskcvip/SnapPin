@@ -105,6 +105,7 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
     _currentDisplay = widget.display;
     _windowBounds = widget.prewarmBounds;
     widget.controller.setWindowMethodHandler((call) async {
+      if (call.method == 'prewarmReady') return true;
       if (call.method == 'closeSelf') {
         unawaited(Future<void>.delayed(Duration.zero, _closeSelf));
       } else if (call.method == 'startCapture') {

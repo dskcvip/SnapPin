@@ -46,6 +46,7 @@ class _BallWindowState extends State<BallWindow>
   bool _movingForConfig = false;
   bool _previewingSettings = false;
   Future<WindowController>? _menuFuture;
+  bool _menuOpening = false;
   Future<List<WindowController>>? _overlayFuture;
   LongStitchWorker? _longSession;
   Timer? _longTimer;
@@ -166,7 +167,19 @@ class _BallWindowState extends State<BallWindow>
       if (!mounted) return;
       await windowManager.show();
       AppLog.write('ball-ready');
-      unawaited(_prewarmOverlays());
+      if (Platform.isMacOS &&
+          Platform.environment['SNAPPIN_STARTUP_SMOKE'] == '1') {
+        final overlaysReady = await _prewarmOverlays();
+        final menuReady = await _openMenu();
+        AppLog.write(
+          overlaysReady && menuReady
+              ? 'macos-startup-smoke-ready'
+              : 'macos-startup-smoke-failed',
+          'overlays=$overlaysReady menu=$menuReady',
+        );
+      } else {
+        unawaited(_prewarmOverlays());
+      }
     } catch (error, stack) {
       AppLog.write('ball-startup-failed', '$error\n$stack');
       if (mounted) await windowManager.show();
@@ -314,8 +327,9 @@ class _BallWindowState extends State<BallWindow>
     AppLog.write('tray-click', button);
     try {
       final cursor = await screenRetriever.getCursorScreenPoint();
-      await _openMenu(cursor: cursor);
-      AppLog.write('tray-menu-opened', button);
+      if (await _openMenu(cursor: cursor)) {
+        AppLog.write('tray-menu-opened', button);
+      }
     } catch (error, stack) {
       AppLog.write('tray-menu-failed', '$error\n$stack');
     }
@@ -499,6 +513,12 @@ class _BallWindowState extends State<BallWindow>
       _captureActive = false;
       await windowManager.show();
       if (!mounted) return;
+      if (Platform.isMacOS &&
+          error is PlatformException &&
+          error.code == 'screen_recording_permission_required') {
+        await CaptureBridge.showCapturePermissionHelp();
+        return;
+      }
       ScaffoldMessenger.of(context)
           .showSnackBar(SnackBar(content: Text('截图失败：$error')));
     } finally {
@@ -533,18 +553,35 @@ class _BallWindowState extends State<BallWindow>
       ),
     );
     AppLog.write(
-      'overlays-prewarmed',
+      'overlays-created',
       '${windows.length} windows, ${DateTime.now().difference(started).inMilliseconds}ms',
     );
     return windows;
   }
 
-  Future<void> _prewarmOverlays() async {
+  Future<bool> _prewarmOverlays() async {
     try {
-      await (_overlayFuture ??= _createOverlayPool());
+      final windows = await (_overlayFuture ??= _createOverlayPool());
+      await Future.wait(
+        windows.map((window) async {
+          for (var attempt = 0; attempt < 60; attempt++) {
+            try {
+              if (await window.invokeMethod<bool>('prewarmReady') == true)
+                return;
+            } catch (_) {
+              if (attempt == 59) rethrow;
+            }
+            await Future<void>.delayed(const Duration(milliseconds: 50));
+          }
+          throw StateError('截图子窗口未就绪: ${window.windowId}');
+        }),
+      );
+      AppLog.write('overlays-prewarmed', '${windows.length} engines ready');
+      return true;
     } catch (error) {
       AppLog.write('overlays-prewarm-failed', error);
       _overlayFuture = null;
+      return false;
     }
   }
 
@@ -1072,7 +1109,9 @@ class _BallWindowState extends State<BallWindow>
     return window;
   }
 
-  Future<void> _openMenu({Offset? cursor}) async {
+  Future<bool> _openMenu({Offset? cursor}) async {
+    if (_menuOpening) return false;
+    _menuOpening = true;
     final started = DateTime.now();
     AppLog.write('menu-open-start', cursor == null ? 'ball' : 'tray');
     try {
@@ -1108,7 +1147,7 @@ class _BallWindowState extends State<BallWindow>
             'menu-opened',
             '${DateTime.now().difference(started).inMilliseconds}ms',
           );
-          return;
+          return true;
         } catch (error) {
           if (attempt == 19) rethrow;
           await Future<void>.delayed(const Duration(milliseconds: 50));
@@ -1117,7 +1156,10 @@ class _BallWindowState extends State<BallWindow>
     } catch (error, stack) {
       _menuFuture = null;
       AppLog.write('menu-open-failed', '$error\n$stack');
+    } finally {
+      _menuOpening = false;
     }
+    return false;
   }
 }
 

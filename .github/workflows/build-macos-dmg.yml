@@ -24,13 +24,16 @@ jobs:
           flutter analyze --no-fatal-infos
           flutter test
       - name: Build macOS app
-        run: flutter build macos --release
+        run: |
+          flutter config --no-enable-macos-arm64-only
+          flutter build macos --release
       - name: Sign and package DMG
         run: |
           APP='build/macos/Build/Products/Release/SnapPin.app'
           test -d "$APP"
           codesign --force --deep --sign - "$APP"
           codesign --verify --deep --verbose=2 "$APP"
+          bash tool/macos_startup_smoke.sh "$APP" dist/startup-smoke
           mkdir -p dist/dmg-root
           cp -R "$APP" dist/dmg-root/
           ln -s /Applications dist/dmg-root/Applications
@@ -45,3 +48,9 @@ jobs:
           name: snappin-flutter-macos-dmg
           path: dist/SnapPin-Flutter.dmg
           if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: snappin-macos-startup-logs
+          path: dist/startup-smoke/
+          if-no-files-found: ignore

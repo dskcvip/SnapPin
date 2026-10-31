@@ -11,13 +11,16 @@ class MainFlutterWindow: NSWindow {
   private var localEscapeMonitor: Any?
 
   override func awakeFromNib() {
+    MacStartupLog.write("native-window-awake")
     let flutterViewController = FlutterViewController()
     let windowFrame = self.frame
     self.contentViewController = flutterViewController
     self.setFrame(windowFrame, display: true)
 
     RegisterGeneratedPlugins(registry: flutterViewController)
+    MacStartupLog.write("native-plugins-registered")
     FlutterMultiWindowPlugin.setOnWindowCreatedCallback { controller in
+      MacStartupLog.write("native-child-created")
       RegisterGeneratedPlugins(registry: controller)
       let channel = FlutterMethodChannel(
         name: "snappin/capture", binaryMessenger: controller.engine.binaryMessenger)
@@ -29,6 +32,12 @@ class MainFlutterWindow: NSWindow {
         }
         result(Self.windowSnap(args, excluding: controller?.view.window?.windowNumber))
       }
+      // Hidden prewarmed windows may never receive viewWillAppear on macOS 13.
+      // FlutterViewController normally starts its Dart engine from that callback.
+      // Explicitly start it so the child can register its window channel while hidden.
+      // FlutterEngine documents repeated run calls as safe no-ops.
+      let started = controller.engine.run(withEntrypoint: nil)
+      MacStartupLog.write("native-child-engine-run", "success=\(started)")
     }
 
     captureChannel = FlutterMethodChannel(
@@ -41,8 +50,10 @@ class MainFlutterWindow: NSWindow {
         case "captureDisplays":
           if #available(macOS 10.15, *) {
             guard CGPreflightScreenCaptureAccess() || CGRequestScreenCaptureAccess() else {
-              throw NSError(domain: "SnapPin", code: 1,
-                            userInfo: [NSLocalizedDescriptionKey: "Screen recording permission is required"])
+              MacStartupLog.write("screen-recording-permission-denied")
+              result(FlutterError(code: "screen_recording_permission_required",
+                                  message: "需要屏幕录制权限", details: nil))
+              return
             }
           }
           DispatchQueue.global(qos: .userInitiated).async {
@@ -55,6 +66,18 @@ class MainFlutterWindow: NSWindow {
               }
             }
           }
+        case "showCapturePermissionHelp":
+          let alert = NSAlert()
+          alert.messageText = "需要屏幕录制权限"
+          alert.informativeText = "请在系统设置 → 隐私与安全性 → 屏幕录制中允许 SnapPin。授权后，请退出并重新打开 SnapPin，再开始截图。"
+          alert.addButton(withTitle: "打开系统设置")
+          alert.addButton(withTitle: "取消")
+          let openSettings = alert.runModal() == .alertFirstButtonReturn
+          if openSettings, let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+            NSWorkspace.shared.open(url)
+          }
+          MacStartupLog.write("screen-recording-permission-help", "openSettings=\(openSettings)")
+          result(openSettings)
         case "windowSnap":
           guard let args = call.arguments as? [String: Any] else {
             result(nil)
@@ -181,6 +204,7 @@ class MainFlutterWindow: NSWindow {
     }
 
     super.awakeFromNib()
+    MacStartupLog.write("native-window-ready")
   }
 
   private static func windowSnap(_ args: [String: Any], excluding number: Int?) -> [String: Double]? {

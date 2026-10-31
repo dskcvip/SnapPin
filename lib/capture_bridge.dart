@@ -152,6 +152,12 @@ class CaptureBridge {
         .toList();
   }
 
+  static Future<void> showCapturePermissionHelp() async {
+    if (Platform.isMacOS) {
+      await _channel.invokeMethod<bool>('showCapturePermissionHelp');
+    }
+  }
+
   static Future<Uint8List> captureRegion(
     int x,
     int y,
