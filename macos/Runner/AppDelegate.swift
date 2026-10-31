@@ -3,9 +3,9 @@ import FlutterMacOS
 
 @main
 class AppDelegate: FlutterAppDelegate {
-  override func applicationDidFinishLaunching(_ notification: Notification) {
-    MacStartupLog.write("native-app-launched", ProcessInfo.processInfo.operatingSystemVersionString)
-    super.applicationDidFinishLaunching(notification)
+  override func applicationWillFinishLaunching(_ notification: Notification) {
+    MacStartupLog.write("native-app-launching", ProcessInfo.processInfo.operatingSystemVersionString)
+    super.applicationWillFinishLaunching(notification)
   }
 
   override func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
