@@ -38,6 +38,9 @@ Future<void> main(List<String> args) async {
     return true;
   };
   debugPrint('SnapPin startup: binding ready');
+  if (Platform.isMacOS && args.isEmpty) {
+    await CaptureBridge.mainDartStarted();
+  }
   await windowManager.ensureInitialized();
   AppLog.write('startup-window-manager', '${startup.elapsedMilliseconds}ms');
   debugPrint('SnapPin startup: window manager ready');

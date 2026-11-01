@@ -10,12 +10,10 @@ class AppDelegate: FlutterAppDelegate {
 
   override func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
     MacStartupLog.write("native-app-reopen", "visibleWindows=\(flag)")
-    if let window = mainFlutterWindow {
-      window.deminiaturize(nil)
-      window.makeKeyAndOrderFront(nil)
-      sender.activate(ignoringOtherApps: true)
-    }
-    return true
+    // The main window hosts the ball, not a document. Never expose the nib's
+    // default window while Dart is still configuring its size and appearance.
+    (mainFlutterWindow as? MainFlutterWindow)?.requestBallReopen()
+    return false
   }
 
   override func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

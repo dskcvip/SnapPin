@@ -71,7 +71,7 @@ class _BallWindowState extends State<BallWindow>
   void initState() {
     super.initState();
     _config = widget.config;
-    CaptureBridge.onLongEscape(_finishLongCapture);
+    CaptureBridge.onLongEscape(_finishLongCapture, onReopen: _reopenBall);
     windowManager.addListener(this);
     widget.controller.setWindowMethodHandler((call) async {
       if (call.method == 'captureFinished') {
@@ -178,6 +178,7 @@ class _BallWindowState extends State<BallWindow>
       await _placeBall();
       await Future.wait([_registerHotkey(), _initializeTray()]);
       if (!mounted) return;
+      if (Platform.isMacOS) await CaptureBridge.mainBallReady();
       await windowManager.show();
       AppLog.write('ball-ready');
       if (Platform.isMacOS) {
@@ -192,6 +193,7 @@ class _BallWindowState extends State<BallWindow>
       }
       if (Platform.isMacOS &&
           Platform.environment['SNAPPIN_STARTUP_SMOKE'] == '1') {
+        await _checkNativeStartup();
         final overlaysReady = await _prewarmOverlays();
         final menuReady = await _openMenu();
         final trayReady = menuReady && await _checkTrayMenuStartup();
@@ -216,6 +218,38 @@ class _BallWindowState extends State<BallWindow>
       AppLog.write('ball-startup-failed', '$error\n$stack');
       if (mounted) await windowManager.show();
     }
+  }
+
+  Future<void> _reopenBall() async {
+    if (_capturing || _captureActive || _longSession != null) {
+      AppLog.write('ball-reopen-skipped', 'capture-active');
+      return;
+    }
+    await _placeBall();
+    await windowManager.show();
+    AppLog.write('ball-reopened');
+  }
+
+  Future<void> _checkNativeStartup() async {
+    final status = await CaptureBridge.mainStartupStatus();
+    if (status?['engineStarted'] != true ||
+        status?['dartStarted'] != true ||
+        status?['ballReady'] != true ||
+        status?['visible'] != true ||
+        ((status?['width'] as num?)?.toDouble() ?? 800) > 100 ||
+        ((status?['height'] as num?)?.toDouble() ?? 600) > 100) {
+      throw StateError('Main startup did not configure the ball: $status');
+    }
+    await windowManager.hide();
+    await CaptureBridge.smokeReopen();
+    for (var attempt = 0; attempt < 20; attempt++) {
+      if (await windowManager.isVisible()) {
+        AppLog.write('macos-main-startup-smoke-ready', status);
+        return;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    }
+    throw StateError('Application reopen did not restore the ball');
   }
 
   Future<void> _queueHotkeyOperation(Future<void> Function() operation) {

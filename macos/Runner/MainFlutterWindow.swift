@@ -13,12 +13,18 @@ class MainFlutterWindow: NSWindow {
   private var localEscapeMonitor: Any?
   private var requestedScreenPermission = false
   private var screenPermissionWarningAccepted = false
+  private var dartStarted = false
+  private var ballReady = false
+  private var engineStartSucceeded = false
+  private var reopenPending = false
   // Accessed only on the main thread. Workers receive a value snapshot.
   private static var captureExcludedWindows = Set<CGWindowID>()
   private static var regionSequence = 0
 
   override func awakeFromNib() {
     MacStartupLog.write("native-window-awake")
+    isRestorable = false
+    orderOut(nil)
     let flutterViewController = FlutterViewController()
     let windowFrame = self.frame
     self.contentViewController = flutterViewController
@@ -67,6 +73,31 @@ class MainFlutterWindow: NSWindow {
     captureChannel?.setMethodCallHandler { call, result in
       do {
         switch call.method {
+        case "mainDartStarted":
+          self.dartStarted = true
+          MacStartupLog.write("native-main-dart-started", "visible=\(self.isVisible)")
+          result(nil)
+        case "mainBallReady":
+          self.ballReady = true
+          self.isOpaque = false
+          MacStartupLog.write("native-main-ball-ready", "frame=\(self.frame) visible=\(self.isVisible)")
+          result(nil)
+          if self.reopenPending {
+            self.reopenPending = false
+            self.requestBallReopen()
+          }
+        case "mainStartupStatus":
+          result(["engineStarted": self.engineStartSucceeded,
+                  "dartStarted": self.dartStarted, "ballReady": self.ballReady,
+                  "visible": self.isVisible,
+                  "width": self.frame.width, "height": self.frame.height])
+        case "smokeReopen":
+          guard ProcessInfo.processInfo.environment["SNAPPIN_STARTUP_SMOKE"] == "1" else {
+            result(FlutterMethodNotImplemented)
+            return
+          }
+          self.requestBallReopen()
+          result(nil)
         case "captureDisplays":
           if #available(macOS 10.15, *) {
             let before = CGPreflightScreenCaptureAccess()
@@ -310,7 +341,28 @@ class MainFlutterWindow: NSWindow {
     }
 
     super.awakeFromNib()
+    // Flutter normally starts from viewWillAppear. This background utility
+    // deliberately stays hidden until the ball and tray are ready, so start
+    // the engine explicitly after installing every native method handler.
+    MacStartupLog.write("native-main-engine-run-start", "visible=\(isVisible)")
+    engineStartSucceeded = flutterViewController.engine.run(withEntrypoint: nil)
+    MacStartupLog.write("native-main-engine-run", "success=\(engineStartSucceeded)")
+    DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in
+      guard let self = self, !self.ballReady else { return }
+      MacStartupLog.write("native-main-startup-incomplete",
+        "engineStarted=\(self.engineStartSucceeded) dartStarted=\(self.dartStarted) visible=\(self.isVisible)")
+    }
     MacStartupLog.write("native-window-ready")
+  }
+
+  func requestBallReopen() {
+    guard ballReady else {
+      reopenPending = true
+      MacStartupLog.write("native-ball-reopen-deferred", "dartStarted=\(dartStarted)")
+      return
+    }
+    MacStartupLog.write("native-ball-reopen-requested")
+    captureChannel?.invokeMethod("reopenBall", arguments: nil)
   }
 
   /// Include the actual running bundle and signing requirement in both logs.

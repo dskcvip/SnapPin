@@ -116,9 +116,25 @@ class CaptureBridge {
     );
   }
 
-  static void onLongEscape(Future<void> Function() callback) {
+  static Future<void> mainDartStarted() =>
+      _channel.invokeMethod<void>('mainDartStarted');
+
+  static Future<void> mainBallReady() =>
+      _channel.invokeMethod<void>('mainBallReady');
+
+  static Future<Map<String, dynamic>?> mainStartupStatus() =>
+      _channel.invokeMapMethod<String, dynamic>('mainStartupStatus');
+
+  static Future<void> smokeReopen() =>
+      _channel.invokeMethod<void>('smokeReopen');
+
+  static void onLongEscape(
+    Future<void> Function() callback, {
+    Future<void> Function()? onReopen,
+  }) {
     _channel.setMethodCallHandler((call) async {
       if (call.method == 'longEscape') await callback();
+      if (call.method == 'reopenBall') await onReopen?.call();
     });
   }
 
