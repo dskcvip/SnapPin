@@ -16,7 +16,7 @@ cleanup() {
 }
 trap cleanup EXIT
 for mode in normal shutdown; do
-  SNAPPIN_RUNTIME_SMOKE="$mode" "$executable" >"$report_dir/runtime-$mode.log" 2>&1 &
+  SNAPPIN_RUNTIME_SMOKE="$mode" SNAPPIN_SMOKE_REPORT="$report_dir" "$executable" >"$report_dir/runtime-$mode.log" 2>&1 &
   smoke_pid=$!
   finished=0
   for ((attempt=0; attempt<90; attempt++)); do

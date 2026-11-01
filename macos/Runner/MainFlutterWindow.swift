@@ -505,9 +505,12 @@ class MainFlutterWindow: NSWindow {
     preview.isReleasedWhenClosed = false
     preview.hasShadow = false
     preview.backgroundColor = .magenta
+    preview.contentView = LongCaptureSmokeCoverView(frame: NSRect(origin: .zero, size: rect.size))
     preview.level = .floating
     preview.ignoresMouseEvents = true
     preview.orderFrontRegardless()
+    fixture.display()
+    preview.display()
     _ = setCaptureExcluded(preview, arguments: ["enabled": true, "label": "long-smoke-preview"])
     let region = CGRect(x: rect.minX, y: screen.frame.maxY - rect.maxY,
                         width: rect.width, height: rect.height)
@@ -515,6 +518,11 @@ class MainFlutterWindow: NSWindow {
     let positions = [0, 40, 80, 40, 0, 120]
     var frames: [FlutterStandardTypedData] = []
     var finished = false
+    func saveFrame(_ data: Data, name: String) {
+      if let directory = ProcessInfo.processInfo.environment["SNAPPIN_SMOKE_REPORT"] {
+        try? data.write(to: URL(fileURLWithPath: directory).appendingPathComponent(name))
+      }
+    }
     func finish(_ error: String? = nil) {
       if finished { return }
       finished = true
@@ -535,6 +543,7 @@ class MainFlutterWindow: NSWindow {
         guard fixture.isKeyWindow else { finish("Preview stole keyboard focus"); return }
         let data = try captureRegion(x: Int(region.minX), y: Int(region.minY),
                                      width: Int(region.width), height: Int(region.height), excluding: excluded)
+        saveFrame(data, name: "long-frame-\(index).png")
         guard let bitmap = NSBitmapImageRep(data: data),
               let color = bitmap.colorAt(x: bitmap.pixelsWide / 2, y: bitmap.pixelsHigh / 2)?.usingColorSpace(.deviceRGB),
               !(color.redComponent > 0.8 && color.blueComponent > 0.8 && color.greenComponent < 0.1) else {
@@ -567,6 +576,12 @@ class MainFlutterWindow: NSWindow {
         // prevents a blank/unavailable screen capture from passing the test.
         let control = try captureRegion(x: Int(region.minX), y: Int(region.minY),
                                         width: Int(region.width), height: Int(region.height))
+        saveFrame(control, name: "long-control.png")
+        let windows = (CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] ?? [])
+          .filter { ($0[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == ProcessInfo.processInfo.processIdentifier }
+        let probe = NSBitmapImageRep(data: control)
+        let pixel = probe?.colorAt(x: (probe?.pixelsWide ?? 0) / 2, y: (probe?.pixelsHigh ?? 0) / 2)?.usingColorSpace(.deviceRGB)
+        MacStartupLog.write("long-native-smoke-control", "region=\(region) fixture=\(fixture.windowNumber) visible=\(fixture.isVisible) key=\(fixture.isKeyWindow) preview=\(preview.windowNumber) visible=\(preview.isVisible) pixel=\(String(describing: pixel)) windows=\(windows)")
         guard let bitmap = NSBitmapImageRep(data: control),
               let color = bitmap.colorAt(x: bitmap.pixelsWide / 2, y: bitmap.pixelsHigh / 2)?.usingColorSpace(.deviceRGB),
               color.redComponent > 0.8, color.blueComponent > 0.8, color.greenComponent < 0.1 else {
@@ -664,6 +679,13 @@ class MainFlutterWindow: NSWindow {
 
 private class LongCaptureSmokeWindow: NSWindow {
   override var canBecomeKey: Bool { true }
+}
+
+private class LongCaptureSmokeCoverView: NSView {
+  override func draw(_ dirtyRect: NSRect) {
+    NSColor(deviceRed: 1, green: 0, blue: 1, alpha: 1).setFill()
+    bounds.fill()
+  }
 }
 
 private class LongCaptureSmokeView: NSView {
