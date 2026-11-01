@@ -588,8 +588,8 @@ class MainFlutterWindow: NSWindow {
     }
   }
 
-  private static func smokePixel(_ bitmap: NSBitmapImageRep) -> [UInt] {
-    var pixel = [UInt](repeating: 0, count: bitmap.samplesPerPixel)
+  private static func smokePixel(_ bitmap: NSBitmapImageRep) -> [Int] {
+    var pixel = [Int](repeating: 0, count: bitmap.samplesPerPixel)
     bitmap.getPixel(&pixel, atX: bitmap.pixelsWide / 2, y: bitmap.pixelsHigh / 2)
     return pixel
   }
@@ -600,7 +600,7 @@ class MainFlutterWindow: NSWindow {
     let pixel = smokePixel(bitmap)
     let start = bitmap.bitmapFormat.contains(.alphaFirst) ? 1 : 0
     guard pixel.count >= start + 3, bitmap.bitsPerSample > 0, bitmap.bitsPerSample <= 16 else { return false }
-    let peak = UInt((1 << bitmap.bitsPerSample) - 1)
+    let peak = (1 << bitmap.bitsPerSample) - 1
     return pixel[start] > peak * 9 / 10 && pixel[start + 1] < peak / 10 && pixel[start + 2] > peak * 9 / 10
   }
 
