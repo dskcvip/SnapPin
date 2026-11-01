@@ -18,6 +18,7 @@ for fixture in missing-device missing-queue; do
   output="$report_dir/graphics-$fixture.log"
   SNAPPIN_GRAPHICS_SMOKE="$fixture" "$executable" >"$output" 2>&1 &
   smoke_pid=$!
+  fixture_pid="$smoke_pid"
   finished=0
   for ((attempt=0; attempt<15; attempt++)); do
     if ! kill -0 "$smoke_pid" 2>/dev/null; then
@@ -31,9 +32,14 @@ for fixture in missing-device missing-queue; do
     sleep 1
   done
   [[ "$finished" -eq 1 ]]
-  grep -q 'native-graphics-unavailable' "$output"
-  grep -q 'native-graphics-smoke-ready.*engineCreated=false visible=false buttons=2' "$output"
-  if grep -Eq 'native-plugins-registered|native-main-engine-run-start|startup-binding' "$output"; then
+  # Native logs are written synchronously; the stderr tee may still be draining
+  # when the expected early exit occurs. Check only this fixture's process.
+  native_log="$HOME/Library/Application Support/com.snappin.flutter/logs/snappin-native-$(date +%F).log"
+  observed="$report_dir/graphics-$fixture-native.log"
+  grep "pid=$fixture_pid " "$native_log" >"$observed"
+  grep -q 'native-graphics-unavailable' "$observed"
+  grep -q 'native-graphics-smoke-ready.*engineCreated=false visible=false buttons=2' "$observed"
+  if grep -Eq 'native-plugins-registered|native-main-engine-run-start' "$observed"; then
     cat "$output"
     echo 'Unsupported graphics unexpectedly entered Flutter startup.' >&2
     exit 1
