@@ -295,13 +295,18 @@ class MainFlutterWindow: NSWindow {
     let codeStatus = SecCodeCopySelf([], &code)
     details["signatureStatus"] = Int(codeStatus)
     if let code = code {
+      var staticCode: SecStaticCode?
+      let staticStatus = SecCodeCopyStaticCode(code, [], &staticCode)
+      details["staticCodeStatus"] = Int(staticStatus)
       var requirement: SecRequirement?
-      let status = SecCodeCopyDesignatedRequirement(code, [], &requirement)
-      details["requirementStatus"] = Int(status)
-      if let requirement = requirement {
-        var text: CFString?
-        if SecRequirementCopyString(requirement, [], &text) == errSecSuccess {
-          details["designatedRequirement"] = text as String? ?? ""
+      if let staticCode = staticCode {
+        let status = SecCodeCopyDesignatedRequirement(staticCode, [], &requirement)
+        details["requirementStatus"] = Int(status)
+        if let requirement = requirement {
+          var text: CFString?
+          if SecRequirementCopyString(requirement, [], &text) == errSecSuccess {
+            details["designatedRequirement"] = text as String? ?? ""
+          }
         }
       }
     }
