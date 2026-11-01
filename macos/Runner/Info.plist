@@ -28,5 +28,9 @@
 	<string>MainMenu</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<!-- Use Skia over Metal for both main and child engines. Impeller is the
+	     Flutter 3.47 default, but must not be required for Intel macOS 12. -->
+	<key>FLTEnableImpeller</key>
+	<false/>
 </dict>
 </plist>

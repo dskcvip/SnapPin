@@ -4,6 +4,7 @@ import FlutterMacOS
 import desktop_multi_window
 import Vision
 import Security
+import Metal
 
 class MainFlutterWindow: NSWindow {
   private var captureChannel: FlutterMethodChannel?
@@ -22,7 +23,16 @@ class MainFlutterWindow: NSWindow {
   private static var regionSequence = 0
 
   override func awakeFromNib() {
+    MacStartupLog.installEngineLog()
     MacStartupLog.write("native-window-awake")
+    let devices = MTLCopyAllDevices().map { "\($0.name) lowPower=\($0.isLowPower) removable=\($0.isRemovable)" }
+    #if arch(x86_64)
+    let architecture = "x86_64"
+    #else
+    let architecture = "arm64"
+    #endif
+    MacStartupLog.write("native-startup-environment",
+      "arch=\(architecture) bundle=\(Bundle.main.bundleURL.path) renderer=Skia/Metal metalDevices=\(devices)")
     isRestorable = false
     orderOut(nil)
     let flutterViewController = FlutterViewController()
@@ -347,10 +357,28 @@ class MainFlutterWindow: NSWindow {
     MacStartupLog.write("native-main-engine-run-start", "visible=\(isVisible)")
     engineStartSucceeded = flutterViewController.engine.run(withEntrypoint: nil)
     MacStartupLog.write("native-main-engine-run", "success=\(engineStartSucceeded)")
+    if !engineStartSucceeded {
+      MacStartupLog.write("native-main-engine-start-failed",
+        "metalDevices=\(devices.count); see snappin-engine log for Flutter initialization error")
+    }
     DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in
       guard let self = self, !self.ballReady else { return }
       MacStartupLog.write("native-main-startup-incomplete",
         "engineStarted=\(self.engineStartSucceeded) dartStarted=\(self.dartStarted) visible=\(self.isVisible)")
+      let environment = ProcessInfo.processInfo.environment
+      if !self.dartStarted && environment["SNAPPIN_RUNTIME_SMOKE"] == nil &&
+          environment["SNAPPIN_STARTUP_SMOKE"] == nil {
+        let alert = NSAlert()
+        alert.messageText = "SnapPin 启动失败"
+        alert.informativeText = "图形引擎未能完成启动。错误详情已保存到日志目录中的 snappin-engine 日志。请保留日志以便排查。"
+        alert.addButton(withTitle: "打开日志并退出")
+        alert.addButton(withTitle: "退出")
+        if alert.runModal() == .alertFirstButtonReturn {
+          let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+          NSWorkspace.shared.open(base.appendingPathComponent("com.snappin.flutter/logs", isDirectory: true))
+        }
+        exit(EXIT_FAILURE)
+      }
     }
     MacStartupLog.write("native-window-ready")
   }

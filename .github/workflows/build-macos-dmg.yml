@@ -10,7 +10,16 @@ on:
 
 jobs:
   dmg:
-    runs-on: macos-latest
+    name: macOS ${{ matrix.host }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - host: intel
+            runner: macos-15-intel
+          - host: arm64
+            runner: macos-latest
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: subosito/flutter-action@v2
@@ -33,8 +42,10 @@ jobs:
           test -d "$APP"
           codesign --force --deep --sign - "$APP"
           codesign --verify --deep --verbose=2 "$APP"
+          python3 tool/check_macos_bundle.py "$APP" dist/startup-smoke/bundle-compatibility.json
           bash tool/macos_runtime_smoke.sh "$APP" dist/startup-smoke
           bash tool/macos_startup_smoke.sh "$APP" dist/startup-smoke
+          grep -q 'Using the Skia rendering backend' dist/startup-smoke/console.log
           mkdir -p dist/dmg-root
           cp -R "$APP" dist/dmg-root/
           ln -s /Applications dist/dmg-root/Applications
@@ -46,12 +57,12 @@ jobs:
           hdiutil detach "$MOUNT"
       - uses: actions/upload-artifact@v4
         with:
-          name: snappin-flutter-macos-dmg
+          name: snappin-flutter-macos-dmg-${{ matrix.host }}
           path: dist/SnapPin-Flutter.dmg
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: snappin-macos-startup-logs
+          name: snappin-macos-startup-logs-${{ matrix.host }}
           path: dist/startup-smoke/
           if-no-files-found: ignore

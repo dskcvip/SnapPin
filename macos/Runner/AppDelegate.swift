@@ -1,5 +1,6 @@
 import Cocoa
 import FlutterMacOS
+import Darwin
 
 @main
 class AppDelegate: FlutterAppDelegate {
@@ -26,6 +27,44 @@ class AppDelegate: FlutterAppDelegate {
 }
 
 enum MacStartupLog {
+  private static var enginePipe: Pipe?
+
+  /// Preserve Flutter's own stderr diagnostics, including failures before Dart
+  /// can create its log. Tee to the original stderr so CI keeps its console.
+  static func installEngineLog() {
+    guard enginePipe == nil else { return }
+    do {
+      let manager = FileManager.default
+      let base = manager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+      let directory = base.appendingPathComponent("com.snappin.flutter/logs", isDirectory: true)
+      try manager.createDirectory(at: directory, withIntermediateDirectories: true)
+      let formatter = DateFormatter()
+      formatter.dateFormat = "yyyy-MM-dd"
+      let file = directory.appendingPathComponent(
+        "snappin-engine-\(formatter.string(from: Date()))-\(ProcessInfo.processInfo.processIdentifier).log")
+      guard manager.createFile(atPath: file.path, contents: nil) else { return }
+      let output = try FileHandle(forWritingTo: file)
+      let originalDescriptor = dup(STDERR_FILENO)
+      guard originalDescriptor >= 0 else { return }
+      let original = FileHandle(fileDescriptor: originalDescriptor, closeOnDealloc: true)
+      let pipe = Pipe()
+      guard dup2(pipe.fileHandleForWriting.fileDescriptor, STDERR_FILENO) >= 0 else { return }
+      enginePipe = pipe
+      pipe.fileHandleForReading.readabilityHandler = { handle in
+        let data = handle.availableData
+        guard !data.isEmpty else {
+          handle.readabilityHandler = nil
+          return
+        }
+        do { try output.write(contentsOf: data) } catch { /* Do not log recursively to stderr. */ }
+        do { try original.write(contentsOf: data) } catch { /* Console may have closed. */ }
+      }
+      write("native-engine-log-ready", file.path)
+    } catch {
+      NSLog("SnapPin engine log setup failed: %@", error.localizedDescription)
+    }
+  }
+
   static func write(_ event: String, _ detail: String = "") {
     let line = "\(ISO8601DateFormatter().string(from: Date())) [\(event)] pid=\(ProcessInfo.processInfo.processIdentifier) \(detail)\n"
     NSLog("%@", line)
