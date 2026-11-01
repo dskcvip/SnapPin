@@ -43,6 +43,7 @@ jobs:
           codesign --force --deep --sign - "$APP"
           codesign --verify --deep --verbose=2 "$APP"
           python3 tool/check_macos_bundle.py "$APP" dist/startup-smoke/bundle-compatibility.json
+          bash tool/macos_graphics_smoke.sh "$APP" dist/startup-smoke
           bash tool/macos_runtime_smoke.sh "$APP" dist/startup-smoke
           bash tool/macos_startup_smoke.sh "$APP" dist/startup-smoke
           grep -q 'Using the Skia rendering backend' dist/startup-smoke/console.log

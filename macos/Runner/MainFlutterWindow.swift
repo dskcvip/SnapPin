@@ -18,6 +18,7 @@ class MainFlutterWindow: NSWindow {
   private var ballReady = false
   private var engineStartSucceeded = false
   private var reopenPending = false
+  private var graphicsFailure: String?
   // Accessed only on the main thread. Workers receive a value snapshot.
   private static var captureExcludedWindows = Set<CGWindowID>()
   private static var regionSequence = 0
@@ -35,6 +36,22 @@ class MainFlutterWindow: NSWindow {
       "arch=\(architecture) bundle=\(Bundle.main.bundleURL.path) renderer=Skia/Metal metalDevices=\(devices)")
     isRestorable = false
     orderOut(nil)
+    // FlutterViewController itself requires Metal, even with Skia. Check before
+    // creating it so an unsupported guest never becomes a blank Flutter window.
+    let graphicsSmoke = ProcessInfo.processInfo.environment["SNAPPIN_GRAPHICS_SMOKE"]
+    let device = MTLCreateSystemDefaultDevice()
+    if graphicsSmoke == "missing-device" || device == nil {
+      graphicsFailure = "missing-metal-device"
+    } else if graphicsSmoke == "missing-queue" || device?.makeCommandQueue() == nil {
+      graphicsFailure = "missing-metal-command-queue"
+    }
+    if let failure = graphicsFailure {
+      MacStartupLog.write("native-graphics-unavailable", "reason=\(failure) visible=\(isVisible)")
+      super.awakeFromNib()
+      DispatchQueue.main.async { [weak self] in self?.presentGraphicsFailure() }
+      return
+    }
+    MacStartupLog.write("native-graphics-ready", "defaultDevice=\(device!.name)")
     let flutterViewController = FlutterViewController()
     let windowFrame = self.frame
     self.contentViewController = flutterViewController
@@ -384,6 +401,10 @@ class MainFlutterWindow: NSWindow {
   }
 
   func requestBallReopen() {
+    if let failure = graphicsFailure {
+      MacStartupLog.write("native-ball-reopen-blocked", failure)
+      return
+    }
     guard ballReady else {
       reopenPending = true
       MacStartupLog.write("native-ball-reopen-deferred", "dartStarted=\(dartStarted)")
@@ -391,6 +412,33 @@ class MainFlutterWindow: NSWindow {
     }
     MacStartupLog.write("native-ball-reopen-requested")
     captureChannel?.invokeMethod("reopenBall", arguments: nil)
+  }
+
+  private func presentGraphicsFailure() {
+    guard let failure = graphicsFailure else { return }
+    let alert = NSAlert()
+    alert.alertStyle = .critical
+    alert.messageText = "当前环境无法运行 SnapPin"
+    alert.informativeText = "系统未提供可用的 Metal 图形设备或命令队列，无法启动截图界面。\n\n如果正在虚拟机中运行，请确认虚拟机支持并向 macOS 提供 Metal 图形加速；仅开启 3D 加速不一定支持 Metal。也可以使用支持 Metal 的实体 Mac。\n\n可在‘系统信息 → 图形卡／显示器’中查看 Metal 支持情况。详细信息已保存到日志目录。"
+    alert.addButton(withTitle: "打开日志并退出")
+    alert.addButton(withTitle: "退出")
+    let fixture = ProcessInfo.processInfo.environment["SNAPPIN_GRAPHICS_SMOKE"]
+    if fixture == "missing-device" || fixture == "missing-queue" {
+      // Run the actual preflight and construct the actual native failure UI,
+      // then close without requiring a click on the CI desktop.
+      precondition(!isVisible && contentViewController == nil)
+      precondition(alert.buttons.count == 2 && alert.informativeText.contains("Metal"))
+      MacStartupLog.write("native-graphics-smoke-ready", "reason=\(failure) engineCreated=false visible=false buttons=2")
+      exit(78)
+    }
+    MacStartupLog.write("native-graphics-error-presented", failure)
+    let action = alert.runModal()
+    MacStartupLog.write("native-graphics-error-action", "response=\(action.rawValue); exit")
+    if action == .alertFirstButtonReturn {
+      let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+      NSWorkspace.shared.open(base.appendingPathComponent("com.snappin.flutter/logs", isDirectory: true))
+    }
+    exit(EXIT_FAILURE)
   }
 
   /// Include the actual running bundle and signing requirement in both logs.
