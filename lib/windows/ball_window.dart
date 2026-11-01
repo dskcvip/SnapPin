@@ -824,10 +824,11 @@ class _BallWindowState extends State<BallWindow>
       final stitchMs = DateTime.now().difference(stitchStarted).inMilliseconds;
       if (step.kind == LongStepKind.still) {
         _longStillSamples++;
-        if (_longStillSamples % 20 == 0) {
+        if (step.steps <= 20 || _longStillSamples % 10 == 0) {
           AppLog.write(
             'long-manual-still',
             'samples=$_longStillSamples height=${step.height} steps=${step.steps} '
+                'diff=${step.diff.toStringAsFixed(3)} previewHidden=$previewHidden '
                 'capture=${captureMs}ms stitch=${stitchMs}ms',
           );
         }

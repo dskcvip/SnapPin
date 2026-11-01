@@ -7,6 +7,9 @@ import 'package:window_manager/window_manager.dart';
 
 import 'app_log.dart';
 import 'ocr_bridge.dart';
+import 'long_stitch.dart';
+
+import 'package:image/image.dart' as img;
 
 /// Explicit release verification mode, independent of user configuration,
 /// hotkeys, tray, screen permissions and the normal single-instance mutex.
@@ -23,6 +26,41 @@ Future<void> runRuntimeSmoke({required bool shutdownDuringOcr}) async {
       throw StateError('Native permission diagnostic failed: $status');
     }
     AppLog.write('runtime-smoke-permission-status-ready', status);
+    if (!shutdownDuringOcr) {
+      final capture = await const MethodChannel('snappin/capture')
+          .invokeMapMethod<String, dynamic>('longCaptureSmoke');
+      final frames = (capture!['frames'] as List).cast<Uint8List>();
+      final positions = (capture['positions'] as List).cast<int>();
+      final session = LongStitchSession.start(frames.first);
+      try {
+        final first = img.decodePng(frames.first)!;
+        final scale = first.height / (capture['logicalHeight'] as int);
+        for (var index = 1; index < frames.length; index++) {
+          final step = session.push(frames[index]);
+          final expected =
+              ((positions.take(index + 1).reduce((a, b) => a > b ? a : b) +
+                          (capture['logicalHeight'] as int)) *
+                      scale)
+                  .round();
+          if (step.kind == LongStepKind.noMatch ||
+              (session.height - expected).abs() > 8) {
+            throw StateError(
+              'Native scrolling did not stitch: index=$index '
+              'kind=${step.kind} height=${session.height} expected=$expected',
+            );
+          }
+        }
+        if ((capture['wheelEvents'] as int) < frames.length - 1) {
+          throw StateError('Native wheel events were not delivered');
+        }
+        AppLog.write(
+          'runtime-smoke-long-capture-ready',
+          'frames=${frames.length} output=${session.width}x${session.height} scale=$scale',
+        );
+      } finally {
+        session.dispose();
+      }
+    }
   }
   await windowManager.setAsFrameless();
   for (final value in [true, false, true]) {

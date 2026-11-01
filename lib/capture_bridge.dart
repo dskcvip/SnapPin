@@ -164,6 +164,10 @@ class CaptureBridge {
   static Future<Map<String, dynamic>?> capturePermissionStatus() =>
       _channel.invokeMapMethod<String, dynamic>('capturePermissionStatus');
 
+  static Future<Map<String, dynamic>?> prepareLongCapture(
+    Map<String, dynamic> region,
+  ) => _channel.invokeMapMethod<String, dynamic>('prepareLongCapture', region);
+
   static Future<Uint8List> captureRegion(
     int x,
     int y,

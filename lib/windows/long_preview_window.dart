@@ -61,7 +61,7 @@ class _LongPreviewWindowState extends State<LongPreviewWindow> {
         if (!excluded) await windowManager.hide();
         return !excluded;
       } else if (call.method == 'finishCapture') {
-        await windowManager.show();
+        await WindowCaptureExclusion.showWithoutActivating();
       } else if (call.method == 'openPreview') {
         final args = Map<String, dynamic>.from(call.arguments as Map);
         if (mounted)
@@ -75,7 +75,7 @@ class _LongPreviewWindowState extends State<LongPreviewWindow> {
         await windowManager.setPosition(
           Offset((args['x'] as num).toDouble(), (args['y'] as num).toDouble()),
         );
-        await windowManager.show();
+        await WindowCaptureExclusion.showWithoutActivating();
       }
       return null;
     });

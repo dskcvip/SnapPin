@@ -13,6 +13,9 @@ class MainFlutterWindow: NSWindow {
   private var localEscapeMonitor: Any?
   private var requestedScreenPermission = false
   private var screenPermissionWarningAccepted = false
+  // Accessed only on the main thread. Workers receive a value snapshot.
+  private static var captureExcludedWindows = Set<CGWindowID>()
+  private static var regionSequence = 0
 
   override func awakeFromNib() {
     MacStartupLog.write("native-window-awake")
@@ -29,6 +32,19 @@ class MainFlutterWindow: NSWindow {
       let channel = FlutterMethodChannel(
         name: "snappin/capture", binaryMessenger: controller.engine.binaryMessenger)
       channel.setMethodCallHandler { [weak controller] call, result in
+        if call.method == "setCaptureExcluded" {
+          result(Self.setCaptureExcluded(controller?.view.window, arguments: call.arguments))
+          return
+        }
+        if call.method == "showWithoutActivating" {
+          controller?.view.window?.orderFrontRegardless()
+          result(nil)
+          return
+        }
+        if call.method == "prepareLongCapture" {
+          result(Self.prepareLongCapture(call.arguments))
+          return
+        }
         guard call.method == "windowSnap",
               let args = call.arguments as? [String: Any] else {
           result(FlutterMethodNotImplemented)
@@ -102,6 +118,19 @@ class MainFlutterWindow: NSWindow {
           }
         case "capturePermissionStatus":
           result(Self.capturePermissionDetails())
+        case "setCaptureExcluded":
+          result(Self.setCaptureExcluded(self, arguments: call.arguments))
+        case "showWithoutActivating":
+          self.orderFrontRegardless()
+          result(nil)
+        case "prepareLongCapture":
+          result(Self.prepareLongCapture(call.arguments))
+        case "longCaptureSmoke":
+          guard ProcessInfo.processInfo.environment["SNAPPIN_RUNTIME_SMOKE"] == "normal" else {
+            result(FlutterMethodNotImplemented)
+            return
+          }
+          Self.runLongCaptureSmoke(result: result)
         case "checkAndFixPermissions":
           self.checkAndFixPermissions(result: result)
         case "showCapturePermissionHelp":
@@ -133,9 +162,16 @@ class MainFlutterWindow: NSWindow {
             throw NSError(domain: "SnapPin", code: 5,
                           userInfo: [NSLocalizedDescriptionKey: "Invalid capture region"])
           }
+          let existing = Set(NSApp.windows.compactMap { $0.windowNumber > 0 ? CGWindowID($0.windowNumber) : nil })
+          let excluded = Self.captureExcludedWindows.intersection(existing)
+          Self.regionSequence += 1
+          let sequence = Self.regionSequence
+          if sequence <= 20 || sequence % 20 == 0 {
+            MacStartupLog.write("long-native-capture-start", "sequence=\(sequence) rect=\(x),\(y),\(width),\(height) excluded=\(excluded.sorted()) frontmost=\(NSWorkspace.shared.frontmostApplication?.processIdentifier ?? -1)")
+          }
           DispatchQueue.global(qos: .userInitiated).async {
             do {
-              let image = try Self.captureRegion(x: x, y: y, width: width, height: height)
+              let image = try Self.captureRegion(x: x, y: y, width: width, height: height, excluding: excluded)
               DispatchQueue.main.async { result(FlutterStandardTypedData(bytes: image)) }
             } catch {
               DispatchQueue.main.async {
@@ -412,7 +448,140 @@ class MainFlutterWindow: NSWindow {
     return nil
   }
 
-  private static func captureRegion(x: Int, y: Int, width: Int, height: Int) throws -> Data {
+  private static func setCaptureExcluded(_ window: NSWindow?, arguments: Any?) -> Bool {
+    guard let window = window, window.windowNumber > 0 else { return false }
+    let args = arguments as? [String: Any] ?? [:]
+    let enabled = args["enabled"] as? Bool ?? true
+    let number = CGWindowID(window.windowNumber)
+    if enabled { captureExcludedWindows.insert(number) }
+    else { captureExcludedWindows.remove(number) }
+    MacStartupLog.write("long-native-window-exclusion", "window=\(number) enabled=\(enabled) label=\(args["label"] ?? "")")
+    return true
+  }
+
+  private static func prepareLongCapture(_ arguments: Any?) -> [String: Any] {
+    guard let args = arguments as? [String: Any],
+          let x = args["x"] as? Int, let y = args["y"] as? Int,
+          let width = args["width"] as? Int, let height = args["height"] as? Int,
+          let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+            as? [[String: Any]] else { return ["activated": false, "reason": "no-window-list"] }
+    let point = CGPoint(x: x + width / 2, y: y + height / 2)
+    for info in windows {
+      guard (info[kCGWindowLayer as String] as? Int) == 0,
+            let owner = info[kCGWindowOwnerPID as String] as? NSNumber,
+            owner.int32Value != ProcessInfo.processInfo.processIdentifier,
+            let bounds = info[kCGWindowBounds as String] as? [String: Any],
+            let rect = CGRect(dictionaryRepresentation: bounds as CFDictionary), rect.contains(point),
+            let app = NSRunningApplication(processIdentifier: owner.int32Value) else { continue }
+      let pid = owner.int32Value
+      let activated = app.activate(options: [.activateIgnoringOtherApps])
+      let detail: [String: Any] = ["activated": activated, "pid": Int(pid), "name": app.localizedName ?? "",
+        "window": info[kCGWindowNumber as String] ?? 0]
+      MacStartupLog.write("long-native-target-activation", "\(detail)")
+      return detail
+    }
+    MacStartupLog.write("long-native-target-activation", "no underlying application")
+    return ["activated": false, "reason": "no-underlying-application"]
+  }
+
+  /// Explicit CI-only exercise of the actual WindowServer compositor and wheel
+  /// routing: a transparent-to-input preview covers a scrolling test document.
+  private static func runLongCaptureSmoke(result: @escaping FlutterResult) {
+    guard let screen = NSScreen.screens.first else {
+      result(FlutterError(code: "long_smoke_failed", message: "No test display", details: nil))
+      return
+    }
+    let rect = NSRect(x: screen.visibleFrame.minX + 80, y: screen.visibleFrame.minY + 80,
+                      width: 260, height: 320)
+    let fixture = LongCaptureSmokeWindow(contentRect: rect, styleMask: .borderless,
+                                        backing: .buffered, defer: false)
+    fixture.isReleasedWhenClosed = false
+    fixture.hasShadow = false
+    let view = LongCaptureSmokeView(frame: NSRect(origin: .zero, size: rect.size))
+    fixture.contentView = view
+    fixture.makeKeyAndOrderFront(nil)
+    NSApp.activate(ignoringOtherApps: true)
+    let preview = NSWindow(contentRect: rect, styleMask: .borderless, backing: .buffered, defer: false)
+    preview.isReleasedWhenClosed = false
+    preview.hasShadow = false
+    preview.backgroundColor = .magenta
+    preview.level = .floating
+    preview.ignoresMouseEvents = true
+    preview.orderFrontRegardless()
+    _ = setCaptureExcluded(preview, arguments: ["enabled": true, "label": "long-smoke-preview"])
+    let region = CGRect(x: rect.minX, y: screen.frame.maxY - rect.maxY,
+                        width: rect.width, height: rect.height)
+    let excluded: Set<CGWindowID> = [CGWindowID(preview.windowNumber)]
+    let positions = [0, 40, 80, 40, 0, 120]
+    var frames: [FlutterStandardTypedData] = []
+    var finished = false
+    func finish(_ error: String? = nil) {
+      if finished { return }
+      finished = true
+      captureExcludedWindows.remove(CGWindowID(preview.windowNumber))
+      preview.close()
+      fixture.close()
+      if let error = error {
+        MacStartupLog.write("long-native-smoke-failed", error)
+        result(FlutterError(code: "long_smoke_failed", message: error, details: nil))
+      } else {
+        MacStartupLog.write("long-native-smoke-ready", "frames=\(frames.count) wheelEvents=\(view.scrollEvents) nonactivating=true excluded=true")
+        result(["frames": frames, "positions": positions, "logicalHeight": Int(rect.height),
+                "wheelEvents": view.scrollEvents, "nonactivating": true])
+      }
+    }
+    func sample(_ index: Int) {
+      do {
+        guard fixture.isKeyWindow else { finish("Preview stole keyboard focus"); return }
+        let data = try captureRegion(x: Int(region.minX), y: Int(region.minY),
+                                     width: Int(region.width), height: Int(region.height), excluding: excluded)
+        guard let bitmap = NSBitmapImageRep(data: data),
+              let color = bitmap.colorAt(x: bitmap.pixelsWide / 2, y: bitmap.pixelsHigh / 2)?.usingColorSpace(.deviceRGB),
+              !(color.redComponent > 0.8 && color.blueComponent > 0.8 && color.greenComponent < 0.1) else {
+          finish("Excluded preview leaked into captured frame"); return
+        }
+        frames.append(FlutterStandardTypedData(bytes: data))
+        if index + 1 == positions.count { finish(); return }
+        let target = positions[index + 1]
+        guard let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1,
+                                   wheel1: Int32(view.scrollTop - target), wheel2: 0, wheel3: 0) else {
+          finish("Cannot create wheel test event"); return
+        }
+        event.location = CGPoint(x: region.midX, y: region.midY)
+        event.post(tap: .cghidEventTap)
+        func awaitScroll(_ attempt: Int) {
+          DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            if view.scrollTop == target {
+              view.displayIfNeeded()
+              DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { sample(index + 1) }
+            } else if attempt < 15 { awaitScroll(attempt + 1) }
+            else { finish("Wheel did not reach document: target=\(target) actual=\(view.scrollTop) events=\(view.scrollEvents)") }
+          }
+        }
+        awaitScroll(0)
+      } catch { finish(error.localizedDescription) }
+    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+      do {
+        // A control capture must actually see magenta before exclusion. This
+        // prevents a blank/unavailable screen capture from passing the test.
+        let control = try captureRegion(x: Int(region.minX), y: Int(region.minY),
+                                        width: Int(region.width), height: Int(region.height))
+        guard let bitmap = NSBitmapImageRep(data: control),
+              let color = bitmap.colorAt(x: bitmap.pixelsWide / 2, y: bitmap.pixelsHigh / 2)?.usingColorSpace(.deviceRGB),
+              color.redComponent > 0.8, color.blueComponent > 0.8, color.greenComponent < 0.1 else {
+          finish("Control preview not visible to compositor"); return
+        }
+        sample(0)
+      } catch { finish(error.localizedDescription) }
+    }
+  }
+
+  /// Compose the region from an explicit window list. CoreGraphics window-ID
+  /// arrays use raw pointer-sized IDs with nil callbacks, NOT CFNumber values.
+  /// Keep preview/guide visible without including them or stealing focus.
+  private static func captureRegion(x: Int, y: Int, width: Int, height: Int,
+                                    excluding excluded: Set<CGWindowID> = []) throws -> Data {
     guard width > 0 && height > 0 else {
       throw NSError(domain: "SnapPin", code: 8,
                     userInfo: [NSLocalizedDescriptionKey: "Invalid region size"])
@@ -432,17 +601,14 @@ class MainFlutterWindow: NSWindow {
       let displayRect = bounds
       let region = CGRect(x: x, y: y, width: width, height: height)
       if displayRect.contains(region) {
-        // Capture in native pixels, then convert the logical selection explicitly.
-        // Passing a point-space rect into display image APIs is ambiguous on Retina.
-        guard let fullImage = CGDisplayCreateImage(display) else { continue }
-        let scaleX = Double(fullImage.width) / Double(bounds.width)
-        let scaleY = Double(fullImage.height) / Double(bounds.height)
-        let left = ((Double(x) - Double(bounds.minX)) * scaleX).rounded()
-        let top = ((Double(y) - Double(bounds.minY)) * scaleY).rounded()
-        let right = ((Double(x + width) - Double(bounds.minX)) * scaleX).rounded()
-        let bottom = ((Double(y + height) - Double(bounds.minY)) * scaleY).rounded()
-        let local = CGRect(x: left, y: top, width: right - left, height: bottom - top)
-        if let image = fullImage.cropping(to: local),
+        guard let all = CGWindowListCreate(.optionOnScreenOnly, kCGNullWindowID),
+              let included = CFArrayCreateMutable(kCFAllocatorDefault, 0, nil) else { continue }
+        for index in 0..<CFArrayGetCount(all) {
+          let value = CFArrayGetValueAtIndex(all, index)
+          let number = CGWindowID(UInt(bitPattern: value))
+          if !excluded.contains(number) { CFArrayAppendValue(included, value) }
+        }
+        if let image = CGWindowListCreateImageFromArray(region, included, .bestResolution),
            let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) {
           return png
         }
@@ -490,6 +656,32 @@ class MainFlutterWindow: NSWindow {
         "pixelY": Int((Double(bounds.origin.y) * scale).rounded()),
         "scale": scale,
       ]
+    }
+  }
+}
+
+private class LongCaptureSmokeWindow: NSWindow {
+  override var canBecomeKey: Bool { true }
+}
+
+private class LongCaptureSmokeView: NSView {
+  var scrollTop = 0
+  var scrollEvents = 0
+  override func scrollWheel(with event: NSEvent) {
+    scrollEvents += 1
+    scrollTop = max(0, scrollTop - Int(event.scrollingDeltaY.rounded()))
+    needsDisplay = true
+  }
+  override func draw(_ dirtyRect: NSRect) {
+    for y in 0..<Int(bounds.height) {
+      let row = Int(bounds.height) - 1 - y + scrollTop
+      for x in stride(from: 0, to: Int(bounds.width), by: 4) {
+        let seed = UInt32(truncatingIfNeeded: row &* 1103515245 &+ x &* 12345)
+        NSColor(deviceRed: CGFloat(32 + (seed >> 16) % 168) / 255,
+                green: CGFloat(32 + (seed >> 8) % 168) / 255,
+                blue: CGFloat(32 + seed % 168) / 255, alpha: 1).setFill()
+        NSRect(x: x, y: y, width: 4, height: 1).fill()
+      }
     }
   }
 }

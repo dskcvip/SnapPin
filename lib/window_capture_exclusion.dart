@@ -3,9 +3,34 @@ import 'dart:io';
 
 import 'package:ffi/ffi.dart';
 import 'package:window_manager/window_manager.dart';
+import 'package:flutter/services.dart';
+
+import 'app_log.dart';
 
 class WindowCaptureExclusion {
+  static const _channel = MethodChannel('snappin/capture');
+
+  static Future<void> showWithoutActivating() async {
+    if (Platform.isMacOS) {
+      await _channel.invokeMethod<void>('showWithoutActivating');
+    } else {
+      await windowManager.show();
+    }
+  }
+
   static Future<bool> enable(String title) async {
+    if (Platform.isMacOS) {
+      try {
+        return await _channel.invokeMethod<bool>('setCaptureExcluded', {
+              'enabled': true,
+              'label': title,
+            }) ??
+            false;
+      } catch (error) {
+        AppLog.write('macos-capture-exclusion-failed', error);
+        return false;
+      }
+    }
     if (!Platform.isWindows) return false;
     await windowManager.setTitle(title);
     final user32 = ffi.DynamicLibrary.open('user32.dll');

@@ -20,6 +20,7 @@ import 'windows/translation_window.dart';
 import 'windows/ocr_window.dart';
 import 'ocr_document.dart';
 import 'runtime_smoke.dart';
+import 'window_capture_exclusion.dart';
 import 'windows/long_preview_window.dart';
 import 'windows/capture_toast_window.dart';
 
@@ -94,7 +95,7 @@ Future<void> main(List<String> args) async {
               (arguments['y'] as num).toDouble(),
             ),
           );
-          await windowManager.show();
+          await WindowCaptureExclusion.showWithoutActivating();
         },
       );
       runApp(

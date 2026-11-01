@@ -729,7 +729,7 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
     setState(() => _longMode = true);
     await windowManager.setIgnoreMouseEvents(true);
     try {
-      if (Platform.isWindows) {
+      if (Platform.isWindows || Platform.isMacOS) {
         final excluded = await WindowCaptureExclusion.enable(
           'SnapPin - 截长图边框 - ${widget.controller.windowId}',
         );
@@ -749,6 +749,14 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
       final ball = await findBallWindow();
       if (ball == null) throw StateError('主窗口不可用');
       final region = CaptureBridge.longCaptureRegion(display, selection);
+      if (Platform.isMacOS) {
+        AppLog.write(
+          'long-target-activation',
+          await CaptureBridge.prepareLongCapture(region),
+        );
+        // Let the target's active-window decorations settle before first frame.
+        await Future<void>.delayed(const Duration(milliseconds: 120));
+      }
       AppLog.write(
         'long-region-coordinates',
         'platform=${Platform.operatingSystem} region=$region scale=$scale',
