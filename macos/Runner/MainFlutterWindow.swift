@@ -636,13 +636,9 @@ class MainFlutterWindow: NSWindow {
     preview.contentView = LongCaptureSmokeCoverView(frame: NSRect(origin: .zero, size: rect.size))
     preview.level = .floating
     preview.ignoresMouseEvents = true
-    preview.orderFrontRegardless()
-    fixture.display()
-    preview.display()
-    _ = setCaptureExcluded(preview, arguments: ["enabled": true, "label": "long-smoke-preview"])
     let region = CGRect(x: rect.minX, y: screen.frame.maxY - rect.maxY,
                         width: rect.width, height: rect.height)
-    let excluded: Set<CGWindowID> = [CGWindowID(preview.windowNumber)]
+    var excluded = Set<CGWindowID>()
     let positions = [0, 40, 80, 40, 0, 120]
     var frames: [FlutterStandardTypedData] = []
     var finished = false
@@ -654,7 +650,9 @@ class MainFlutterWindow: NSWindow {
     func finish(_ error: String? = nil) {
       if finished { return }
       finished = true
-      captureExcludedWindows.remove(CGWindowID(preview.windowNumber))
+      if preview.windowNumber > 0 {
+        captureExcludedWindows.remove(CGWindowID(preview.windowNumber))
+      }
       preview.close()
       fixture.close()
       if let error = error {
@@ -696,7 +694,16 @@ class MainFlutterWindow: NSWindow {
         awaitScroll(0)
       } catch { finish(error.localizedDescription) }
     }
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+    func showPreview() {
+      // Establish keyboard focus before showing a floating test window. App
+      // activation is asynchronous, especially on an Intel hosted desktop.
+      // Otherwise activation itself can choose the topmost preview as key.
+      preview.orderFrontRegardless()
+      fixture.display()
+      preview.display()
+      _ = setCaptureExcluded(preview, arguments: ["enabled": true, "label": "long-smoke-preview"])
+      excluded = [CGWindowID(preview.windowNumber)]
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
       do {
         // A control capture must actually see magenta before exclusion. This
         // prevents a blank/unavailable screen capture from passing the test.
@@ -712,8 +719,24 @@ class MainFlutterWindow: NSWindow {
           finish("Control preview not visible to compositor"); return
         }
         sample(0)
-      } catch { finish(error.localizedDescription) }
+        } catch { finish(error.localizedDescription) }
+      }
     }
+    func awaitFixtureFocus(_ attempt: Int) {
+      fixture.makeKeyAndOrderFront(nil)
+      NSApp.activate(ignoringOtherApps: true)
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+        if fixture.isKeyWindow {
+          MacStartupLog.write("long-native-smoke-focus-baseline", "key=true previewVisible=\(preview.isVisible) attempt=\(attempt)")
+          showPreview()
+        } else if attempt < 30 {
+          awaitFixtureFocus(attempt + 1)
+        } else {
+          finish("Test document could not acquire focus before preview was shown")
+        }
+      }
+    }
+    awaitFixtureFocus(0)
   }
 
   private static func smokePixel(_ bitmap: NSBitmapImageRep) -> [Int] {
