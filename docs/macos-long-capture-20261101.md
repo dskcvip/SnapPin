@@ -8,7 +8,8 @@
 
 - 原 `WindowCaptureExclusion` 只支持 Windows。macOS 的预览窗每帧都会 hide/show，而 window_manager 的 macOS show 调用 `makeKeyAndOrderFront` 和 `NSApp.activate`，持续把焦点拉回 SnapPin。
 - macOS 的截图边框没有排除出采集，只调用了忽略鼠标事件。这不能阻止窗口图像进入采集。
-- 两个问题均已修复：macOS 子窗口通过原生通道注册采集排除；采集使用 CoreGraphics 显式窗口 ID 列表，在合成时排除边框及预览窗，保持其可见。使用 bestResolution 保留 Retina 原始像素。
+- macOS 子窗口通过原生通道注册采集排除；采集使用 CoreGraphics 显式窗口 ID 列表，在合成时排除预览窗。使用 bestResolution 保留 Retina 原始像素。
+- 核对 Tauri `commands.rs` 2681 行附近的真机问题说明后，对齐其处理规则：长截图期间全程隐藏全屏选区层，不在帧间重新显示，避免全屏输入表面拦截滚轮；结束后沿用现有关闭和结果显示流程。
 - 窗口 ID 数组按 CoreGraphics 的原始指针大小 ID 格式创建，使用 nil callbacks，不把 ID 包装成 CFNumber。
 - 长图预览首次显示、复用显示和隐藏回退后的恢复均使用 `orderFrontRegardless`，不调用激活应用或切换 key window。
 - 启动长截图时按选区中心查找其他应用的底层窗口，恢复其前台状态，等待活动窗口装饰稳定后采集首帧；这不调用辅助功能授权接口，也不代替用户滚动。

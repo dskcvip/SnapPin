@@ -745,6 +745,12 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
           );
         }
       }
+      if (Platform.isMacOS) {
+        // Same rule as Tauri: keep the full-screen input surface hidden for
+        // the entire manual scroll session, never show it between samples.
+        await windowManager.hide();
+        AppLog.write('long-overlay-guide-hidden', 'macos manual scrolling');
+      }
       await Future<void>.delayed(const Duration(milliseconds: 80));
       final ball = await findBallWindow();
       if (ball == null) throw StateError('主窗口不可用');

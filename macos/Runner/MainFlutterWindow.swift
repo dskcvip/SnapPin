@@ -601,14 +601,16 @@ class MainFlutterWindow: NSWindow {
       let displayRect = bounds
       let region = CGRect(x: x, y: y, width: width, height: height)
       if displayRect.contains(region) {
-        guard let all = CGWindowListCreate(.optionOnScreenOnly, kCGNullWindowID),
+        guard let all = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]],
               let included = CFArrayCreateMutable(kCFAllocatorDefault, 0, nil) else { continue }
-        for index in 0..<CFArrayGetCount(all) {
-          let value = CFArrayGetValueAtIndex(all, index)
-          let number = CGWindowID(UInt(bitPattern: value))
-          if !excluded.contains(number) { CFArrayAppendValue(included, value) }
+        for info in all {
+          guard let value = info[kCGWindowNumber as String] as? NSNumber else { continue }
+          let number = value.uint32Value
+          if !excluded.contains(number) {
+            CFArrayAppendValue(included, UnsafeRawPointer(bitPattern: UInt(number)))
+          }
         }
-        if let image = CGWindowListCreateImageFromArray(region, included, .bestResolution),
+        if let image = CGImage(windowListFromArrayScreenBounds: region, windowArray: included, imageOption: .bestResolution),
            let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) {
           return png
         }
