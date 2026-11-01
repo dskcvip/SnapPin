@@ -501,7 +501,7 @@ class MainFlutterWindow: NSWindow {
     fixture.contentView = view
     fixture.makeKeyAndOrderFront(nil)
     NSApp.activate(ignoringOtherApps: true)
-    let preview = NSWindow(contentRect: rect, styleMask: .borderless, backing: .buffered, defer: false)
+    let preview = LongCaptureSmokeWindow(contentRect: rect, styleMask: .borderless, backing: .buffered, defer: false)
     preview.isReleasedWhenClosed = false
     preview.hasShadow = false
     preview.backgroundColor = .magenta
@@ -544,9 +544,7 @@ class MainFlutterWindow: NSWindow {
         let data = try captureRegion(x: Int(region.minX), y: Int(region.minY),
                                      width: Int(region.width), height: Int(region.height), excluding: excluded)
         saveFrame(data, name: "long-frame-\(index).png")
-        guard let bitmap = NSBitmapImageRep(data: data),
-              let color = bitmap.colorAt(x: bitmap.pixelsWide / 2, y: bitmap.pixelsHigh / 2)?.usingColorSpace(.deviceRGB),
-              !(color.redComponent > 0.8 && color.blueComponent > 0.8 && color.greenComponent < 0.1) else {
+        guard let bitmap = NSBitmapImageRep(data: data), !smokeCoverVisible(bitmap) else {
           finish("Excluded preview leaked into captured frame"); return
         }
         frames.append(FlutterStandardTypedData(bytes: data))
@@ -580,16 +578,30 @@ class MainFlutterWindow: NSWindow {
         let windows = (CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] ?? [])
           .filter { ($0[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == ProcessInfo.processInfo.processIdentifier }
         let probe = NSBitmapImageRep(data: control)
-        let pixel = probe?.colorAt(x: (probe?.pixelsWide ?? 0) / 2, y: (probe?.pixelsHigh ?? 0) / 2)?.usingColorSpace(.deviceRGB)
+        let pixel = probe.map { smokePixel($0) } ?? []
         MacStartupLog.write("long-native-smoke-control", "region=\(region) fixture=\(fixture.windowNumber) visible=\(fixture.isVisible) key=\(fixture.isKeyWindow) preview=\(preview.windowNumber) visible=\(preview.isVisible) pixel=\(String(describing: pixel)) windows=\(windows)")
-        guard let bitmap = NSBitmapImageRep(data: control),
-              let color = bitmap.colorAt(x: bitmap.pixelsWide / 2, y: bitmap.pixelsHigh / 2)?.usingColorSpace(.deviceRGB),
-              color.redComponent > 0.8, color.blueComponent > 0.8, color.greenComponent < 0.1 else {
+        guard let bitmap = NSBitmapImageRep(data: control), smokeCoverVisible(bitmap) else {
           finish("Control preview not visible to compositor"); return
         }
         sample(0)
       } catch { finish(error.localizedDescription) }
     }
+  }
+
+  private static func smokePixel(_ bitmap: NSBitmapImageRep) -> [UInt] {
+    var pixel = [UInt](repeating: 0, count: bitmap.samplesPerPixel)
+    bitmap.getPixel(&pixel, atX: bitmap.pixelsWide / 2, y: bitmap.pixelsHigh / 2)
+    return pixel
+  }
+
+  private static func smokeCoverVisible(_ bitmap: NSBitmapImageRep) -> Bool {
+    // Compare encoded PNG samples, not device-profile-converted NSColor values.
+    // On the CI display, RGB(255,0,255) becomes device green ~=0.25.
+    let pixel = smokePixel(bitmap)
+    let start = bitmap.bitmapFormat.contains(.alphaFirst) ? 1 : 0
+    guard pixel.count >= start + 3, bitmap.bitsPerSample > 0, bitmap.bitsPerSample <= 16 else { return false }
+    let peak = UInt((1 << bitmap.bitsPerSample) - 1)
+    return pixel[start] > peak * 9 / 10 && pixel[start + 1] < peak / 10 && pixel[start + 2] > peak * 9 / 10
   }
 
   /// Compose the region from an explicit window list. CoreGraphics window-ID
