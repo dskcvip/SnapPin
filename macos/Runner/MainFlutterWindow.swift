@@ -3,6 +3,7 @@ import ApplicationServices
 import FlutterMacOS
 import desktop_multi_window
 import Vision
+import Security
 
 class MainFlutterWindow: NSWindow {
   private var captureChannel: FlutterMethodChannel?
@@ -10,6 +11,8 @@ class MainFlutterWindow: NSWindow {
   private var ocrBusy = false
   private var escapeMonitor: Any?
   private var localEscapeMonitor: Any?
+  private var requestedScreenPermission = false
+  private var screenPermissionWarningAccepted = false
 
   override func awakeFromNib() {
     MacStartupLog.write("native-window-awake")
@@ -50,16 +53,46 @@ class MainFlutterWindow: NSWindow {
         switch call.method {
         case "captureDisplays":
           if #available(macOS 10.15, *) {
-            guard CGPreflightScreenCaptureAccess() || CGRequestScreenCaptureAccess() else {
-              MacStartupLog.write("screen-recording-permission-denied")
-              result(FlutterError(code: "screen_recording_permission_required",
-                                  message: "需要屏幕录制权限", details: nil))
-              return
+            let before = CGPreflightScreenCaptureAccess()
+            var requestGranted = false
+            if !before && !self.requestedScreenPermission {
+              self.requestedScreenPermission = true
+              requestGranted = CGRequestScreenCaptureAccess()
+            }
+            let after = CGPreflightScreenCaptureAccess()
+            let details = Self.capturePermissionDetails()
+            MacStartupLog.write("screen-recording-permission-check",
+                                "before=\(before) requestGranted=\(requestGranted) after=\(after) details=\(details)")
+            if !before && !requestGranted && !after && !self.screenPermissionWarningAccepted {
+              // Match Tauri's mac_capture_gate: macOS 13 may report false even
+              // when CGDisplayCreateImage can capture other applications. The OS
+              // still enforces access; do not treat preflight as a hard gate.
+              let alert = NSAlert()
+              alert.messageText = "屏幕录制权限检查"
+              alert.informativeText = "系统报告 SnapPin 没有‘屏幕录制’权限，但 macOS 13 的检测可能误报。\n\n可以继续截图。如果截图能看到其他窗口，忽略此提示即可，本次运行不再提醒。若只有桌面壁纸，请从托盘或悬浮球菜单打开‘权限检查…’，重置旧授权并按提示重新授权。"
+              alert.addButton(withTitle: "继续截图")
+              alert.addButton(withTitle: "权限检查…")
+              alert.addButton(withTitle: "取消")
+              let choice = alert.runModal()
+              MacStartupLog.write("screen-recording-warning-action", "response=\(choice.rawValue)")
+              if choice == .alertFirstButtonReturn {
+                self.screenPermissionWarningAccepted = true
+                MacStartupLog.write("screen-recording-preflight-override", "user=continue; OS capture restrictions remain active")
+              } else if choice == .alertSecondButtonReturn {
+                self.checkAndFixPermissions { _ in
+                  result(FlutterError(code: "capture_cancelled", message: "已打开权限检查，未开始截图", details: details))
+                }
+                return
+              } else {
+                result(FlutterError(code: "capture_cancelled", message: "已取消截图", details: details))
+                return
+              }
             }
           }
           DispatchQueue.global(qos: .userInitiated).async {
             do {
               let displays = try Self.captureDisplays()
+              MacStartupLog.write("capture-displays-native-ready", "count=\(displays.count); image creation does not prove other-window access")
               DispatchQueue.main.async { result(displays) }
             } catch {
               DispatchQueue.main.async {
@@ -67,10 +100,18 @@ class MainFlutterWindow: NSWindow {
               }
             }
           }
+        case "capturePermissionStatus":
+          result(Self.capturePermissionDetails())
+        case "checkAndFixPermissions":
+          self.checkAndFixPermissions(result: result)
         case "showCapturePermissionHelp":
           let alert = NSAlert()
           alert.messageText = "需要屏幕录制权限"
-          alert.informativeText = "请在系统设置 → 隐私与安全性 → 屏幕录制中允许 SnapPin。授权后，请退出并重新打开 SnapPin，再开始截图。"
+          let appPath = Bundle.main.bundleURL.path
+          let temporaryLaunch = appPath.hasPrefix("/Volumes/") || appPath.contains("/AppTranslocation/")
+          alert.informativeText = (temporaryLaunch
+            ? "当前正在安装镜像或临时路径中运行。请先退出，将 SnapPin 拖到‘应用程序’，推出安装镜像，再从‘应用程序’打开。\n\n"
+            : "") + "请在系统设置 → 隐私与安全性 → 屏幕录制中允许 SnapPin。\n\n如果已经开启仍提示，请选中旧的 SnapPin 条目，点减号移除，再点加号添加‘应用程序’中的 SnapPin。完成后从托盘菜单退出，再重新打开；关闭窗口不会退出程序。"
           alert.addButton(withTitle: "打开系统设置")
           alert.addButton(withTitle: "取消")
           let openSettings = alert.runModal() == .alertFirstButtonReturn
@@ -234,6 +275,110 @@ class MainFlutterWindow: NSWindow {
 
     super.awakeFromNib()
     MacStartupLog.write("native-window-ready")
+  }
+
+  /// Include the actual running bundle and signing requirement in both logs.
+  /// A checked TCC entry for an older build is not proof this process is trusted.
+  private static func capturePermissionDetails() -> [String: Any] {
+    var details: [String: Any] = [
+      "bundleId": Bundle.main.bundleIdentifier ?? "",
+      "bundlePath": Bundle.main.bundleURL.path,
+      "executablePath": Bundle.main.executableURL?.path ?? "",
+      "pid": Int(ProcessInfo.processInfo.processIdentifier),
+      "os": ProcessInfo.processInfo.operatingSystemVersionString,
+      "accessibilityGranted": AXIsProcessTrusted(),
+    ]
+    if #available(macOS 10.15, *) {
+      details["preflightGranted"] = CGPreflightScreenCaptureAccess()
+    }
+    var code: SecCode?
+    let codeStatus = SecCodeCopySelf([], &code)
+    details["signatureStatus"] = Int(codeStatus)
+    if let code = code {
+      var requirement: SecRequirement?
+      let status = SecCodeCopyDesignatedRequirement(code, [], &requirement)
+      details["requirementStatus"] = Int(status)
+      if let requirement = requirement {
+        var text: CFString?
+        if SecRequirementCopyString(requirement, [], &text) == errSecSuccess {
+          details["designatedRequirement"] = text as String? ?? ""
+        }
+      }
+    }
+    return details
+  }
+
+  private func checkAndFixPermissions(result: @escaping FlutterResult) {
+    let details = Self.capturePermissionDetails()
+    MacStartupLog.write("permission-check", "\(details)")
+    let screen = details["preflightGranted"] as? Bool ?? true
+    let accessibility = details["accessibilityGranted"] as? Bool ?? false
+    let mark: (Bool) -> String = { $0 ? "✓ 已授权" : "✗ 系统报告未授权" }
+    let alert = NSAlert()
+    alert.messageText = screen && accessibility ? "权限检查：全部就绪" : "权限检查"
+    alert.informativeText = "屏幕录制：\(mark(screen))\n（截图用；macOS 13 可能误报，可尝试继续截图）\n\n辅助功能：\(mark(accessibility))\n（长截图自动滚动用）\n\n当前为临时签名版本。升级后旧授权可能‘勾着但无效’，可用‘重置授权’清除本应用的两项旧记录，再重新授权。\n\n请将 SnapPin 放入‘应用程序’后运行，不要直接从安装镜像打开。"
+    if screen && accessibility {
+      alert.addButton(withTitle: "好")
+      alert.runModal()
+      result(["action": "ready", "status": details])
+      return
+    }
+    alert.addButton(withTitle: "去系统设置")
+    alert.addButton(withTitle: "重置授权")
+    alert.addButton(withTitle: "取消")
+    switch alert.runModal() {
+    case .alertFirstButtonReturn:
+      let pane = screen ? "Privacy_Accessibility" : "Privacy_ScreenCapture"
+      let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(pane)")!
+      let opened = NSWorkspace.shared.open(url)
+      MacStartupLog.write("permission-settings-open", "pane=\(pane) opened=\(opened)")
+      result(["action": "settings", "opened": opened, "status": details])
+    case .alertSecondButtonReturn:
+      // Only an explicit click resets TCC, only for this running bundle ID.
+      // Do not reset all applications or change privacy database files.
+      guard let identifier = Bundle.main.bundleIdentifier, !identifier.isEmpty else {
+        result(FlutterError(code: "permission_reset_failed", message: "无法读取应用标识，未重置授权", details: details))
+        return
+      }
+      MacStartupLog.write("permission-reset-start", "bundleId=\(identifier)")
+      DispatchQueue.global(qos: .userInitiated).async {
+        var outcomes: [String: Any] = [:]
+        var succeeded = true
+        for service in ["ScreenCapture", "Accessibility"] {
+          let process = Process()
+          process.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
+          process.arguments = ["reset", service, identifier]
+          let output = Pipe()
+          process.standardOutput = output
+          process.standardError = output
+          do {
+            try process.run()
+            let data = output.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            let message = String(data: data, encoding: .utf8) ?? ""
+            outcomes[service] = ["exitCode": Int(process.terminationStatus), "output": message]
+            if process.terminationStatus != 0 { succeeded = false }
+          } catch {
+            succeeded = false
+            outcomes[service] = ["error": error.localizedDescription]
+          }
+        }
+        let resetResults = outcomes
+        let resetSucceeded = succeeded
+        DispatchQueue.main.async {
+          MacStartupLog.write("permission-reset-finished", "bundleId=\(identifier) results=\(resetResults)")
+          let notice = NSAlert()
+          notice.messageText = resetSucceeded ? "已重置权限" : "部分授权重置失败"
+          notice.informativeText = (resetSucceeded ? "本应用的屏幕录制和辅助功能旧授权记录都已清除。" : "请在终端执行：\ntccutil reset ScreenCapture \(identifier)\ntccutil reset Accessibility \(identifier)") + "\n\n接下来：\n① 从托盘菜单‘退出’完全退出 SnapPin；\n② 从‘应用程序’重新打开 SnapPin，按系统提示允许屏幕录制；\n③ 到系统设置 → 隐私与安全性 → 辅助功能，添加并勾选 SnapPin；\n④ 系统要求重新打开应用时，再退出重开一次。"
+          notice.addButton(withTitle: "好")
+          notice.runModal()
+          result(["action": "reset", "success": resetSucceeded, "results": resetResults, "status": details])
+        }
+      }
+    default:
+      MacStartupLog.write("permission-check-cancelled")
+      result(["action": "cancel", "status": details])
+    }
   }
 
   private static func windowSnap(_ args: [String: Any], excluding number: Int?) -> [String: Double]? {

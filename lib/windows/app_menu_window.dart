@@ -48,7 +48,13 @@ class _AppMenuWindowState extends State<AppMenuWindow> with WindowListener {
           _warnings = warnings;
         });
         await windowManager.setSize(
-          Size(appMenuWidth, appMenuHeight(warnings)),
+          Size(
+            appMenuWidth,
+            appMenuHeight(
+              warnings,
+              macOS: Theme.of(context).platform == TargetPlatform.macOS,
+            ),
+          ),
         );
         await windowManager.setPosition(
           Offset(
@@ -173,6 +179,8 @@ class _AppMenuWindowState extends State<AppMenuWindow> with WindowListener {
                 _item('贴图管理...', '', () => _action('pin-manager')),
                 _item('设置', '', () => _action('settings')),
                 _item('打开运行日志', '', () => _action('open-log')),
+                if (Theme.of(context).platform == TargetPlatform.macOS)
+                  _item('权限检查…', '', () => _action('perm-check')),
                 const Divider(height: 13, indent: 8, endIndent: 8),
                 _item('退出', '', () => _action('quit')),
               ],

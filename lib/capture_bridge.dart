@@ -158,6 +158,12 @@ class CaptureBridge {
     }
   }
 
+  static Future<Map<String, dynamic>?> checkAndFixPermissions() =>
+      _channel.invokeMapMethod<String, dynamic>('checkAndFixPermissions');
+
+  static Future<Map<String, dynamic>?> capturePermissionStatus() =>
+      _channel.invokeMapMethod<String, dynamic>('capturePermissionStatus');
+
   static Future<Uint8List> captureRegion(
     int x,
     int y,

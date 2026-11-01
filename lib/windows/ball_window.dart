@@ -105,6 +105,11 @@ class _BallWindowState extends State<BallWindow>
             _openSettings();
           case 'open-log':
             _openLog();
+          case 'perm-check':
+            if (Platform.isMacOS) {
+              final outcome = await CaptureBridge.checkAndFixPermissions();
+              AppLog.write('permission-check-result', outcome);
+            }
           case 'quit':
             AppLog.write('app-quit-requested', 'menu');
             exit(0);
@@ -175,6 +180,16 @@ class _BallWindowState extends State<BallWindow>
       if (!mounted) return;
       await windowManager.show();
       AppLog.write('ball-ready');
+      if (Platform.isMacOS) {
+        try {
+          AppLog.write(
+            'permission-startup-status',
+            await CaptureBridge.capturePermissionStatus(),
+          );
+        } catch (error) {
+          AppLog.write('permission-status-failed', error);
+        }
+      }
       if (Platform.isMacOS &&
           Platform.environment['SNAPPIN_STARTUP_SMOKE'] == '1') {
         final overlaysReady = await _prewarmOverlays();
@@ -583,6 +598,10 @@ class _BallWindowState extends State<BallWindow>
       _captureActive = false;
       await windowManager.show();
       if (!mounted) return;
+      if (error is PlatformException && error.code == 'capture_cancelled') {
+        AppLog.write('capture-cancelled', 'permission-dialog');
+        return;
+      }
       if (Platform.isMacOS &&
           error is PlatformException &&
           error.code == 'screen_recording_permission_required') {
@@ -1211,7 +1230,10 @@ class _BallWindowState extends State<BallWindow>
       final left = (anchor.dx - (cursor == null ? 218 : 18))
           .clamp(origin.dx, origin.dx + size.width - 260)
           .toDouble();
-      final menuHeight = appMenuHeight(_hotkeyWarnings);
+      final menuHeight = appMenuHeight(
+        _hotkeyWarnings,
+        macOS: Platform.isMacOS,
+      );
       final top = anchor.dy
           .clamp(origin.dy, origin.dy + size.height - menuHeight)
           .toDouble();

@@ -11,6 +11,19 @@ import 'ocr_bridge.dart';
 /// Explicit release verification mode, independent of user configuration,
 /// hotkeys, tray, screen permissions and the normal single-instance mutex.
 Future<void> runRuntimeSmoke({required bool shutdownDuringOcr}) async {
+  if (Platform.isMacOS) {
+    final status = await const MethodChannel('snappin/capture')
+        .invokeMapMethod<String, dynamic>('capturePermissionStatus');
+    if (status?['bundleId'] != 'com.snappin.dev' ||
+        status?['preflightGranted'] is! bool ||
+        status?['accessibilityGranted'] is! bool ||
+        status?['signatureStatus'] != 0 ||
+        status?['designatedRequirement'] is! String ||
+        !(status!['bundlePath'] as String).endsWith('/SnapPin.app')) {
+      throw StateError('Native permission diagnostic failed: $status');
+    }
+    AppLog.write('runtime-smoke-permission-status-ready', status);
+  }
   await windowManager.setAsFrameless();
   for (final value in [true, false, true]) {
     await windowManager.setHasShadow(value);
