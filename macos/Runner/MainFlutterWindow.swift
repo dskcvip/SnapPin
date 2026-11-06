@@ -65,6 +65,10 @@ class MainFlutterWindow: NSWindow {
       let channel = FlutterMethodChannel(
         name: "snappin/capture", binaryMessenger: controller.engine.binaryMessenger)
       channel.setMethodCallHandler { [weak controller] call, result in
+        if call.method == "printImage" {
+          Self.printImage(call.arguments, result: result)
+          return
+        }
         if call.method == "setCaptureExcluded" {
           result(Self.setCaptureExcluded(controller?.view.window, arguments: call.arguments))
           return
@@ -100,6 +104,8 @@ class MainFlutterWindow: NSWindow {
     captureChannel?.setMethodCallHandler { call, result in
       do {
         switch call.method {
+        case "printImage":
+          Self.printImage(call.arguments, result: result)
         case "mainDartStarted":
           self.dartStarted = true
           MacStartupLog.write("native-main-dart-started", "visible=\(self.isVisible)")
@@ -398,6 +404,34 @@ class MainFlutterWindow: NSWindow {
       }
     }
     MacStartupLog.write("native-window-ready")
+  }
+
+  private static func printImage(_ arguments: Any?, result: @escaping FlutterResult) {
+    guard let path = arguments as? String,
+          let image = NSImage(contentsOfFile: path), image.isValid else {
+      result(FlutterError(code: "print_image_invalid", message: "无法读取待打印的图片", details: nil))
+      return
+    }
+    let view = NSImageView(frame: NSRect(origin: .zero, size: image.size))
+    view.image = image
+    view.imageScaling = .scaleProportionallyUpOrDown
+    let info = NSPrintInfo.shared.copy() as! NSPrintInfo
+    info.horizontalPagination = .fit
+    info.verticalPagination = .automatic
+    info.isHorizontallyCentered = true
+    let operation = NSPrintOperation(view: view, printInfo: info)
+    operation.showsPrintPanel = true
+    operation.showsProgressPanel = true
+    if ProcessInfo.processInfo.environment["SNAPPIN_RUNTIME_SMOKE"] == "normal" {
+      // Validate the actual image/print-job setup in CI without sending a job.
+      MacStartupLog.write("print-job-prepared-smoke", "size=\(image.size)")
+      result(true)
+      return
+    }
+    MacStartupLog.write("print-panel-open")
+    let completed = operation.run()
+    MacStartupLog.write("print-panel-closed", "completed=\(completed)")
+    result(completed)
   }
 
   func requestBallReopen() {

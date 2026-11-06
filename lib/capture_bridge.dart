@@ -56,6 +56,9 @@ class CapturedDisplay {
 class CaptureBridge {
   static const _channel = MethodChannel('snappin/capture');
 
+  static Future<bool> printImage(String path) async =>
+      await _channel.invokeMethod<bool>('printImage', path) ?? false;
+
   static Map<String, Object> longCaptureRegion(
     CapturedDisplay display,
     Rect selection, {

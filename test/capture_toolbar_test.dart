@@ -11,6 +11,7 @@ import 'package:snappin_flutter/capture_bridge.dart';
 import 'package:snappin_flutter/annotation.dart';
 import 'package:snappin_flutter/capture_image.dart';
 import 'package:snappin_flutter/ocr_image_store.dart';
+import 'package:snappin_flutter/owned_images.dart';
 import 'package:snappin_flutter/windows/capture_overlay.dart';
 import 'package:zxing_lib/qrcode.dart';
 import 'package:zxing_lib/zxing.dart' show BarcodeFormat;
@@ -26,6 +27,7 @@ class _Session {
   final native = <MethodCall>[];
   Uint8List? copied;
   bool rejectOcr = false;
+  bool rejectPin = false;
   bool cancelSave = false;
   bool includeQr = false;
   String get saved => '${directory.path}/saved.png';
@@ -76,6 +78,9 @@ class _Session {
               jsonDecode((call.arguments as Map)['arguments'] as String) as Map,
             ),
           );
+          if (rejectPin && created.last['role'] == 'pin') {
+            throw PlatformException(code: 'injected_pin_failure');
+          }
           return 'created-${created.length}';
         }
         return null;
@@ -130,8 +135,9 @@ class _Session {
           await OcrImageStore.deleteOwned(item['image'] as String);
         } else if (item['role'] == 'pin') {
           final file = File(item['path'] as String);
-          if (file.existsSync()) file.deleteSync();
-          if (file.parent.existsSync()) file.parent.deleteSync();
+          await tester.runAsync(
+            () => OwnedImages.delete(file.parent.path, [file.path]),
+          );
         }
       }
       for (final channel in [
@@ -443,6 +449,32 @@ void main() {
     );
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets(
+    'failed pin creation retains selection and releases unclaimed image files',
+    (tester) async {
+      final session = _Session()..rejectPin = true;
+      await session.open(tester);
+      await session.click(tester, '贴图到屏幕');
+      for (
+        var attempt = 0;
+        attempt < 8 && find.textContaining('贴图失败，截图选区已保留').evaluate().isEmpty;
+        attempt++
+      ) {
+        await session.settle(tester);
+      }
+      expect(find.textContaining('贴图失败，截图选区已保留'), findsOneWidget);
+      expect(find.byTooltip('矩形'), findsOneWidget);
+      final path = session.created.single['path'] as String;
+      expect(File(path).existsSync(), false);
+      expect(Directory(File(path).parent.path).existsSync(), false);
+      expect(
+        session.dispatched.any((call) => call['method'] == 'captureFinished'),
+        false,
+      );
+      expect(tester.takeException(), isNull);
+    },
+  );
 
   testWidgets(
     'toolbar eraser restores source pixels without erasing the source',

@@ -28,6 +28,9 @@ class AppDelegate: FlutterAppDelegate {
 
 enum MacStartupLog {
   private static var enginePipe: Pipe?
+  private static let nativeLock = NSLock()
+  private static var nativeHandle: FileHandle?
+  private static var nativeDay = ""
 
   /// Preserve Flutter's own stderr diagnostics, including failures before Dart
   /// can create its log. Tee to the original stderr so CI keeps its console.
@@ -68,21 +71,28 @@ enum MacStartupLog {
   static func write(_ event: String, _ detail: String = "") {
     let line = "\(ISO8601DateFormatter().string(from: Date())) [\(event)] pid=\(ProcessInfo.processInfo.processIdentifier) \(detail)\n"
     NSLog("%@", line)
+    nativeLock.lock()
+    defer { nativeLock.unlock() }
     do {
-      let manager = FileManager.default
-      let base = manager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-      let directory = base.appendingPathComponent("com.snappin.flutter/logs", isDirectory: true)
-      try manager.createDirectory(at: directory, withIntermediateDirectories: true)
       let formatter = DateFormatter()
       formatter.dateFormat = "yyyy-MM-dd"
-      let file = directory.appendingPathComponent("snappin-native-\(formatter.string(from: Date())).log")
-      if !manager.fileExists(atPath: file.path) {
-        manager.createFile(atPath: file.path, contents: nil)
+      let day = formatter.string(from: Date())
+      if nativeHandle == nil || nativeDay != day {
+        nativeHandle?.closeFile()
+        nativeHandle = nil
+        let manager = FileManager.default
+        let base = manager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let directory = base.appendingPathComponent("com.snappin.flutter/logs", isDirectory: true)
+        try manager.createDirectory(at: directory, withIntermediateDirectories: true)
+        let file = directory.appendingPathComponent("snappin-native-\(day).log")
+        let descriptor = Darwin.open(file.path, O_WRONLY | O_CREAT | O_APPEND, mode_t(0o600))
+        guard descriptor >= 0 else {
+          throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+        nativeHandle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        nativeDay = day
       }
-      let handle = try FileHandle(forWritingTo: file)
-      defer { handle.closeFile() }
-      handle.seekToEndOfFile()
-      handle.write(Data(line.utf8))
+      try nativeHandle?.write(contentsOf: Data(line.utf8))
     } catch {
       NSLog("SnapPin native log failed: %@", error.localizedDescription)
     }

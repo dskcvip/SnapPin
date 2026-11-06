@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../app_config.dart';
+import '../platform_labels.dart';
 import '../window_roles.dart';
 
 class TranslationWindow extends StatefulWidget {
@@ -211,9 +212,9 @@ class _TranslationWindowState extends State<TranslationWindow> {
           decoration: const BoxDecoration(
             border: Border(top: BorderSide(color: Color(0xffeceef1))),
           ),
-          child: const Text(
-            '两边都可以直接用鼠标拖动选择，Ctrl+C 复制；也可以点「全选」一次选完整栏。',
-            style: TextStyle(fontSize: 11, color: Color(0xff9aa0ab)),
+          child: Text(
+            '两边都可以直接用鼠标拖动选择，${platformShortcut('Ctrl+C')} 复制；也可以点「全选」一次选完整栏。',
+            style: const TextStyle(fontSize: 11, color: Color(0xff9aa0ab)),
           ),
         ),
       ],

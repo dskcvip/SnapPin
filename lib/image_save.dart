@@ -1,9 +1,13 @@
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:file_selector/file_selector.dart';
 import 'package:image/image.dart' as img;
+
+import 'atomic_file.dart';
+import 'app_log.dart';
 
 String defaultSaveName() {
   final now = DateTime.now();
@@ -19,7 +23,7 @@ String defaultSaveName() {
   return 'snappin_${stamp}_$suffix.png';
 }
 
-Future<bool> saveImage(Uint8List png) async {
+Future<bool> saveImage(Uint8List png, {void Function(bool)? onWriting}) async {
   final location = await getSaveLocation(
     suggestedName: defaultSaveName(),
     acceptedTypeGroups: const [
@@ -28,10 +32,28 @@ Future<bool> saveImage(Uint8List png) async {
     ],
   );
   if (location == null) return false;
-  await File(location.path)
-      .writeAsBytes(encodeImageForPath(png, location.path));
-  return true;
+  onWriting?.call(true);
+  final elapsed = Stopwatch()..start();
+  AppLog.write('image-save-start', 'bytes=${png.length}');
+  try {
+    await writeImage(png, location.path);
+    AppLog.write(
+      'image-save-finished',
+      'elapsed=${elapsed.elapsedMilliseconds}ms',
+    );
+    return true;
+  } catch (error) {
+    AppLog.write('image-save-failed', 'type=${error.runtimeType}');
+    rethrow;
+  } finally {
+    onWriting?.call(false);
+  }
 }
+
+/// Encoding and disk staging run independently of the rendering isolate.
+Future<void> writeImage(Uint8List png, String path) => Isolate.run(() async {
+  await atomicWrite(File(path), encodeImageForPath(png, path));
+});
 
 Uint8List encodeImageForPath(Uint8List png, String path) {
   final extension = path.toLowerCase();

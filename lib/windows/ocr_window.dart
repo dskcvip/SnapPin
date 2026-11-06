@@ -10,6 +10,7 @@ import 'package:window_manager/window_manager.dart';
 import '../window_roles.dart';
 import '../ocr_image_store.dart';
 import '../app_log.dart';
+import '../platform_labels.dart';
 import '../ocr_document.dart';
 
 Future<void> showOcrResult(
@@ -60,7 +61,8 @@ class OcrWindow extends StatefulWidget {
   State<OcrWindow> createState() => _OcrWindowState();
 }
 
-class _OcrWindowState extends State<OcrWindow> {
+class _OcrWindowState extends State<OcrWindow> with WindowListener {
+  bool _closing = false;
   bool _copied = false;
   bool _topmost = true;
   late String _imagePath = widget.imagePath;
@@ -71,6 +73,8 @@ class _OcrWindowState extends State<OcrWindow> {
   @override
   void initState() {
     super.initState();
+    windowManager.addListener(this);
+    unawaited(windowManager.setPreventClose(true));
     widget.controller.setWindowMethodHandler((call) async {
       if (call.method == 'openResult') {
         final data = Map<String, dynamic>.from(call.arguments as Map);
@@ -96,12 +100,32 @@ class _OcrWindowState extends State<OcrWindow> {
 
   @override
   void dispose() {
+    windowManager.removeListener(this);
     unawaited(_deleteImage(_imagePath));
     super.dispose();
   }
 
   Future<void> _deleteImage(String path) async {
     await OcrImageStore.deleteOwned(path);
+  }
+
+  @override
+  void onWindowClose() => unawaited(_close());
+
+  Future<void> _close() async {
+    if (_closing) return;
+    _closing = true;
+    try {
+      await _deleteImage(_imagePath);
+      AppLog.write('ocr-window-closed');
+      AppLog.flush();
+      await windowManager.setPreventClose(false);
+      await windowManager.close();
+    } catch (error) {
+      _closing = false;
+      AppLog.write('ocr-close-failed', error);
+      await windowManager.setPreventClose(true);
+    }
   }
 
   Future<void> _copyAll() async {
@@ -203,7 +227,7 @@ class _OcrWindowState extends State<OcrWindow> {
                     ),
                   ),
                   TextButton(
-                    onPressed: windowManager.close,
+                    onPressed: _close,
                     style: TextButton.styleFrom(
                       foregroundColor: const Color(0xff6b7280),
                       backgroundColor: Colors.transparent,
@@ -295,10 +319,13 @@ class _OcrWindowState extends State<OcrWindow> {
             ),
             child: Row(
               children: [
-                const Expanded(
+                Expanded(
                   child: Text(
-                    '拖动鼠标选中任意内容，Ctrl+C 复制',
-                    style: TextStyle(fontSize: 11, color: Color(0xff9aa0ab)),
+                    '拖动鼠标选中任意内容，${platformShortcut('Ctrl+C')} 复制',
+                    style: const TextStyle(
+                      fontSize: 11,
+                      color: Color(0xff9aa0ab),
+                    ),
                   ),
                 ),
                 _action(

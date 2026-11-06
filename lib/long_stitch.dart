@@ -4,6 +4,8 @@ import 'dart:typed_data';
 
 import 'package:image/image.dart' as img;
 
+import 'png_rows.dart';
+
 enum LongStepKind { appended, noMatch, still, rewound }
 
 class LongCaptureLimitException implements Exception {
@@ -590,16 +592,12 @@ class LongStitchSession {
   }
 
   Future<File> savePng(File target) async {
-    await target.parent.create(recursive: true);
-    final png = img.encodePng(
-      img.Image.fromBytes(
-        width: width,
-        height: height,
-        bytes: Uint8List.sublistView(_canvas, 0, _height * width * 4).buffer,
-        order: img.ChannelOrder.rgba,
-      ),
+    await writePngRows(
+      target,
+      width,
+      height,
+      (y) => Uint8List.sublistView(_canvas, y * width * 4, (y + 1) * width * 4),
     );
-    await target.writeAsBytes(png);
     return target;
   }
 

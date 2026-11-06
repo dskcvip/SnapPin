@@ -18,11 +18,13 @@ import '../capture_bridge.dart';
 import 'app_menu_metrics.dart';
 import '../app_config.dart';
 import '../app_log.dart';
+import '../owned_images.dart';
 import '../ocr_bridge.dart';
 import '../translation_service.dart';
 import '../shortcuts.dart';
 import '../long_stitch.dart';
 import '../long_stitch_worker.dart';
+import '../long_result_delivery.dart';
 
 class BallWindow extends StatefulWidget {
   const BallWindow({super.key, required this.controller, required this.config});
@@ -44,12 +46,12 @@ class _BallWindowState extends State<BallWindow>
   late AppConfig _config;
   Timer? _positionSave;
   bool _movingForConfig = false;
-  bool _previewingSettings = false;
   Future<WindowController>? _menuFuture;
   bool _menuOpening = false;
   Future<bool>? _trayMenuOperation;
   Future<List<WindowController>>? _overlayFuture;
   LongStitchWorker? _longSession;
+  final _longResult = LongResultDelivery();
   Timer? _longTimer;
   bool _longSampling = false;
   bool _longStopping = false;
@@ -123,14 +125,25 @@ class _BallWindowState extends State<BallWindow>
             jsonDecode(call.arguments as String) as Map,
           ),
         );
-        _previewingSettings = false;
         await _applyConfig(config);
+      }
+      if (call.method == 'saveSettings') {
+        final desired = AppConfig.fromJson(
+          Map<String, dynamic>.from(
+            jsonDecode(call.arguments as String) as Map,
+          ),
+        );
+        final saved = await ConfigStore.update(
+          (current) => desired.copyWith(
+            ballCenter: current.ballCenter ?? desired.ballCenter,
+          ),
+        );
+        return jsonEncode(saved.toJson());
       }
       if (call.method == 'previewBall') {
         final values = Map<String, dynamic>.from(
           jsonDecode(call.arguments as String) as Map,
         );
-        _previewingSettings = true;
         await _applyConfig(
           _config.copyWith(
             ballSize: (values['size'] as num).toInt(),
@@ -353,10 +366,13 @@ class _BallWindowState extends State<BallWindow>
       final size = await windowManager.getSize();
       final center = position + Offset(size.width / 2, size.height / 2);
       _config = _config.copyWith(ballCenter: center);
-      final persisted = _previewingSettings
-          ? await ConfigStore.load()
-          : _config;
-      await ConfigStore.save(persisted.copyWith(ballCenter: center));
+      try {
+        await ConfigStore.update(
+          (current) => current.copyWith(ballCenter: center),
+        );
+      } catch (error) {
+        AppLog.write('ball-position-save-failed', error.runtimeType);
+      }
     });
   }
 
@@ -465,6 +481,7 @@ class _BallWindowState extends State<BallWindow>
   Future<void> _openLog() async {
     if (AppLog.path.isEmpty) return;
     AppLog.write('open-log');
+    AppLog.flush();
     await Process.start(Platform.isMacOS ? 'open' : 'explorer.exe', [
       AppLog.path,
     ]);
@@ -504,6 +521,7 @@ class _BallWindowState extends State<BallWindow>
 
   Future<void> _pinClipboard() async {
     AppLog.write('pin-clipboard-start');
+    String? unclaimedPath;
     try {
       final bytes = await Pasteboard.image;
       if (bytes == null || bytes.isEmpty) throw StateError('剪贴板中没有图像');
@@ -521,8 +539,9 @@ class _BallWindowState extends State<BallWindow>
         1.0,
         math.min(900 / logicalWidth, 700 / logicalHeight),
       );
-      final directory = await Directory.systemTemp.createTemp('snappin-pin-');
+      final directory = await OwnedImages.create();
       final path = '${directory.path}${Platform.pathSeparator}pin.png';
+      unclaimedPath = path;
       await File(path).writeAsBytes(bytes);
       await WindowController.create(
         WindowConfiguration(
@@ -541,7 +560,13 @@ class _BallWindowState extends State<BallWindow>
         'pin-clipboard-created',
         '${width.round()}x${height.round()}',
       );
+      unclaimedPath = null;
     } catch (error) {
+      if (unclaimedPath != null) {
+        await OwnedImages.delete(File(unclaimedPath).parent.path, [
+          unclaimedPath,
+        ]);
+      }
       AppLog.write('pin-clipboard-failed', error);
       final visible = await windowManager.isVisible();
       if (mounted && visible) {
@@ -735,7 +760,10 @@ class _BallWindowState extends State<BallWindow>
   }
 
   Future<void> _startLongCapture(Map<String, dynamic> region) async {
-    if (_longStarting || _longStopping || _longSession != null) {
+    if (_longStarting ||
+        _longStopping ||
+        _longSession != null ||
+        _longResult.pending != null) {
       throw StateError('长截图正在进行');
     }
     final started = DateTime.now();
@@ -975,10 +1003,11 @@ class _BallWindowState extends State<BallWindow>
   }
 
   Future<void> _finishLongCapture({String reason = 'user-stop'}) async {
-    if (_longSession == null || _longStopping) return;
+    if ((_longSession == null && _longResult.pending == null) || _longStopping)
+      return;
     AppLog.write(
       'long-finish-begin',
-      'reason=$reason height=${_longSession!.height} steps=${_longSession!.steps}',
+      'reason=$reason height=${_longSession?.height ?? _longResult.pending?['height']} retry=${_longResult.pending != null}',
     );
     _longStopping = true;
     _longTimer?.cancel();
@@ -986,76 +1015,77 @@ class _BallWindowState extends State<BallWindow>
     while (_longSampling) {
       await Future<void>.delayed(const Duration(milliseconds: 20));
     }
-    var saved = false;
+    var exported = _longResult.pending != null;
     try {
-      final session = _longSession!;
-      await _sendLongProgress({
-        'height': session.height,
-        'steps': session.steps,
-        'warning': false,
-        'finishing': true,
-        'message': '正在生成长截图…',
-      });
-      final directory = await Directory.systemTemp.createTemp('snappin-long-');
-      final path = '${directory.path}${Platform.pathSeparator}long.png';
-      await session.savePng(File(path));
-      saved = true;
-      AppLog.write('long-result-saved', path);
-      String? firstTilePath;
-      try {
-        final tilePath =
-            '${directory.path}${Platform.pathSeparator}first-tile.png';
-        await File(tilePath).writeAsBytes(await session.firstTilePng());
-        firstTilePath = tilePath;
-        AppLog.write('long-result-first-tile-ready');
-      } catch (error) {
-        // The full-resolution export already succeeded; still open that result.
-        AppLog.write('long-result-first-tile-failed', error);
+      if (_longResult.pending == null) {
+        final session = _longSession!;
+        await _sendLongFeedback({
+          'height': session.height,
+          'steps': session.steps,
+          'warning': false,
+          'finishing': true,
+          'message': reason == 'memory-limit'
+              ? '已达内存保护上限，正在保留原始清晰度生成结果…'
+              : '正在生成长截图…',
+        });
+        final directory = await OwnedImages.create();
+        final path = '${directory.path}${Platform.pathSeparator}long.png';
+        await session.savePng(File(path));
+        // Save recovery metadata before doing anything that depends on a window.
+        _longResult.pending = {
+          'role': 'pin',
+          'path': path,
+          'width': session.width,
+          'height': session.height,
+          'pixelWidth': session.width,
+          'pixelHeight': session.height,
+          if (reason == 'memory-limit')
+            'notice': '已达内存保护上限，已保存当前长图；图片宽度和分辨率保持不变',
+          if (reason == 'capture-error') 'notice': '采集异常，已保留此前截取的完整内容',
+        };
+        exported = true;
+        AppLog.write('long-result-saved', path);
+        String? firstTilePath;
+        try {
+          final tilePath =
+              '${directory.path}${Platform.pathSeparator}first-tile.png';
+          await File(tilePath).writeAsBytes(await session.firstTilePng());
+          firstTilePath = tilePath;
+          AppLog.write('long-result-first-tile-ready');
+        } catch (error) {
+          // The full-resolution export already succeeded; still open that result.
+          AppLog.write('long-result-first-tile-failed', error);
+        }
+        _longResult.pending!['firstTilePath'] = firstTilePath;
       }
-      final width = session.width;
-      final height = session.height;
-      final steps = session.steps;
-      await _closeLongPreview();
-      AppLog.write('long-preview-closed');
-      unawaited(_cleanupLongThumbnails());
-      await _closeCaptureOverlays();
-      AppLog.write('long-overlays-closed');
-      await WindowController.create(
-        WindowConfiguration(
-          arguments: jsonEncode({
-            'role': 'pin',
-            'path': path,
-            'firstTilePath': firstTilePath,
-            'width': width,
-            'height': height,
-            'pixelWidth': width,
-            'pixelHeight': height,
-          }),
-          hiddenAtLaunch: true,
-        ),
-      );
+      final output = _longResult.pending!;
+      await _longResult.open();
       AppLog.write(
         'long-result-created',
-        'viewer=pin ${width}x$height steps=$steps',
+        'viewer=pin ${output['width']}x${output['height']}',
       );
-      AppLog.write('long-finished', '${width}x$height path=$path');
+      // Ownership transfers only after the result engine was created.
+      await _closeLongPreview();
+      unawaited(_cleanupLongThumbnails());
+      try {
+        await _closeCaptureOverlays();
+      } catch (error) {
+        AppLog.write('long-overlay-cleanup-failed', error);
+      }
+      AppLog.write('long-finished', 'path=${output['path']}');
     } catch (error, stack) {
       AppLog.write('long-finish-failed', '$error\n$stack');
-      if (!saved) {
-        try {
-          await _sendLongProgress({
-            'height': _longSession!.height,
-            'steps': _longSession!.steps,
-            'warning': true,
-            'finishing': false,
-            'message': '生成失败，已保留截图内容；请再次点击完成重试',
-          });
-        } catch (previewError) {
-          AppLog.write('long-finish-feedback-failed', previewError);
-        }
-      }
+      await _sendLongFeedback({
+        'height': _longSession?.height ?? _longResult.pending?['height'] ?? 0,
+        'steps': _longSession?.steps ?? 0,
+        'warning': true,
+        'finishing': false,
+        'message': _longResult.pending == null
+            ? '生成失败，已保留截图内容；请再次点击完成重试'
+            : '长图已生成，结果窗口打开失败；点击对号重试。原图：${_longResult.pending!['path']}',
+      });
     } finally {
-      if (saved) {
+      if (exported) {
         _longSession?.dispose();
         _longSession = null;
         _lastLongStepKind = null;
@@ -1064,6 +1094,14 @@ class _BallWindowState extends State<BallWindow>
         await _restoreLongInputToolbar();
       }
       _longStopping = false;
+    }
+  }
+
+  Future<void> _sendLongFeedback(Map<String, dynamic> value) async {
+    try {
+      await _sendLongProgress(value);
+    } catch (error) {
+      AppLog.write('long-feedback-failed', error);
     }
   }
 
@@ -1079,6 +1117,13 @@ class _BallWindowState extends State<BallWindow>
     _longSession = null;
     _lastLongStepKind = null;
     _longRegion = null;
+    // A generated result that failed to open remains an ordinary result: do
+    // not delete its only copy when dismissing the retry preview.
+    final pending = _longResult.pending;
+    if (pending != null) {
+      AppLog.write('long-result-retained', pending['path']);
+      _longResult.abandon();
+    }
     try {
       await _unregisterLongEscape();
       await _restoreLongInputToolbar();

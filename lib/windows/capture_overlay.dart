@@ -16,6 +16,8 @@ import '../capture_bridge.dart';
 import 'capture_exit_dialog.dart';
 import 'ocr_window.dart' show showOcrResult;
 import '../app_log.dart';
+import '../platform_labels.dart';
+import '../owned_images.dart';
 import '../ocr_document.dart';
 import '../window_capture_exclusion.dart';
 import '../image_save.dart';
@@ -59,6 +61,7 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
   ByteData? _pixels;
   AnnotationPreview? _annotationPreview;
   bool _closing = false;
+  bool _outputBusy = false;
   DateTime? _lastSelectionClick;
   Offset? _lastSelectionClickPoint;
   bool _hoverLogged = false;
@@ -571,7 +574,7 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
   }
 
   Future<void> _requestExit() async {
-    if (_closing || _confirmingExit) return;
+    if (_closing || _confirmingExit || _outputBusy) return;
     _confirmingExit = true;
     final preference = CaptureExitPreference();
     try {
@@ -664,7 +667,7 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
     );
   }
 
-  Future<void> _copy() async {
+  Future<void> _copy() => _performOutput('复制', () async {
     await Pasteboard.writeImage(await _crop());
     await _close(reason: 'copy-completed');
     try {
@@ -678,17 +681,36 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
     } catch (error) {
       AppLog.write('capture-copy-toast-failed', error);
     }
-  }
+  });
 
-  Future<void> _save() async {
+  Future<void> _save() => _performOutput('保存', () async {
     if (!await saveImage(await _crop())) return;
     await _close(reason: 'save-completed');
-  }
+  });
 
-  Future<void> _pin() async {
+  Future<void> _pin() => _performOutput('贴图', () async {
     final bytes = await _crop();
     await _openPin(bytes, _validSelection!);
     await _close(reason: 'pin-opened');
+  });
+
+  Future<void> _performOutput(
+    String action,
+    Future<void> Function() output,
+  ) async {
+    if (_outputBusy || _closing) return;
+    setState(() => _outputBusy = true);
+    try {
+      await WidgetsBinding.instance.endOfFrame;
+      await output();
+    } catch (error) {
+      AppLog.write('capture-output-failed', '$action $error');
+      if (mounted)
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('$action失败，截图选区已保留：$error')));
+    } finally {
+      if (mounted) setState(() => _outputBusy = false);
+    }
   }
 
   Future<void> _openPin(
@@ -696,25 +718,30 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
     Rect rect, {
     bool topmost = true,
   }) async {
-    final directory = await Directory.systemTemp.createTemp('snappin-pin-');
+    final directory = await OwnedImages.create();
     final path = '${directory.path}${Platform.pathSeparator}pin.png';
-    await File(path).writeAsBytes(bytes);
-    await WindowController.create(
-      WindowConfiguration(
-        arguments: jsonEncode({
-          'role': 'pin',
-          'topmost': topmost,
-          'path': path,
-          'width': rect.width + 20,
-          'height': rect.height + 20,
-          'pixelWidth': (rect.width * _display.scale).round(),
-          'pixelHeight': (rect.height * _display.scale).round(),
-          'x': _display.x + rect.left - 10,
-          'y': _display.y + rect.top - 10,
-        }),
-        hiddenAtLaunch: true,
-      ),
-    );
+    try {
+      await File(path).writeAsBytes(bytes);
+      await WindowController.create(
+        WindowConfiguration(
+          arguments: jsonEncode({
+            'role': 'pin',
+            'topmost': topmost,
+            'path': path,
+            'width': rect.width + 20,
+            'height': rect.height + 20,
+            'pixelWidth': (rect.width * _display.scale).round(),
+            'pixelHeight': (rect.height * _display.scale).round(),
+            'x': _display.x + rect.left - 10,
+            'y': _display.y + rect.top - 10,
+          }),
+          hiddenAtLaunch: true,
+        ),
+      );
+    } catch (_) {
+      await OwnedImages.delete(directory.path, [path]);
+      rethrow;
+    }
   }
 
   Future<void> _startLongCapture() async {
@@ -815,6 +842,7 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
       child: Focus(
         autofocus: true,
         onKeyEvent: (_, event) {
+          if (_outputBusy) return KeyEventResult.handled;
           if (event is! KeyDownEvent) return KeyEventResult.ignored;
           if (_editingText != null) return KeyEventResult.ignored;
           if (event.logicalKey == LogicalKeyboardKey.escape) {
@@ -1321,12 +1349,12 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
                             ),
                             _actionButton(
                               'undo',
-                              '撤销 (Ctrl+Z)',
+                              '撤销 (${platformShortcut('Ctrl+Z')})',
                               _annotations.isEmpty ? null : _undo,
                             ),
                             _actionButton(
                               'redo',
-                              '重做 (Ctrl+Shift+Z / Ctrl+Y)',
+                              '重做 (${platformShortcut('Ctrl+Shift+Z / Ctrl+Y')})',
                               _redo.isEmpty ? null : _redoLast,
                             ),
                             _actionButton('save', '保存到文件', _save),
@@ -1477,6 +1505,22 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
                   ),
                 ),
               if (_editingText != null) _textEditor(Size(width, height)),
+              if (_outputBusy) ...[
+                const Positioned.fill(
+                  child: ModalBarrier(
+                    dismissible: false,
+                    color: Color(0x33000000),
+                  ),
+                ),
+                const Center(
+                  child: Card(
+                    child: Padding(
+                      padding: EdgeInsets.all(20),
+                      child: Text('正在处理截图…'),
+                    ),
+                  ),
+                ),
+              ],
             ],
           ),
         ),

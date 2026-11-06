@@ -18,6 +18,8 @@ import '../annotation.dart';
 import '../annotated_image.dart';
 import '../image_save.dart';
 import '../app_log.dart';
+import '../capture_bridge.dart';
+import '../owned_images.dart';
 import '../ocr_document.dart';
 import '../window_roles.dart';
 import 'ocr_window.dart' show showOcrResult;
@@ -33,12 +35,14 @@ class PinWindow extends StatefulWidget {
     required this.baseSize,
     this.initiallyTopmost = true,
     this.firstTilePath,
+    this.initialNotice,
   });
   final WindowController controller;
   final String path;
   final Size baseSize;
   final bool initiallyTopmost;
   final String? firstTilePath;
+  final String? initialNotice;
 
   @override
   State<PinWindow> createState() => _PinWindowState();
@@ -79,6 +83,9 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
   bool _allowClose = false;
   bool _closePromptOpen = false;
   bool _unsavedEdits = false;
+  bool _saving = false;
+  bool _copying = false;
+  final Set<String> _temporaryEdits = {};
   String _sticker = '✅';
   double _stickerSize = 48;
   Color _stickerColor = const Color(0xff111827);
@@ -94,9 +101,24 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
     _editSourceSize = widget.baseSize;
     _displayPath = widget.path;
     _sourceBytes = File(widget.path).readAsBytes();
+    final notice = widget.initialNotice;
+    if (notice != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted)
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(notice),
+              duration: const Duration(seconds: 8),
+            ),
+          );
+      });
+    }
     unawaited(windowManager.setPreventClose(true));
     widget.controller.setWindowMethodHandler((call) async {
       switch (call.method) {
+        case 'pinReady':
+          await _sourceBytes;
+          return widget.path;
         case 'getPinInfo':
           return jsonEncode({
             'id': widget.controller.windowId,
@@ -157,10 +179,7 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
     for (final picture in _stickerPictures) {
       picture.dispose();
     }
-    if (_displayPath != widget.path) {
-      final path = _displayPath;
-      unawaited(File(path).delete().catchError((_) => File(path)));
-    }
+    unawaited(_cleanupImages());
     super.dispose();
   }
 
@@ -181,7 +200,8 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
   }
 
   Future<void> _requestClose() async {
-    if (_editing || _closePromptOpen || _allowClose) return;
+    if (_editing || _saving || _copying || _closePromptOpen || _allowClose)
+      return;
     _closePromptOpen = true;
     try {
       final dirty =
@@ -220,6 +240,8 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
         }
       }
       _allowClose = true;
+      await _cleanupImages();
+      AppLog.flush();
       await windowManager.setPreventClose(false);
       await windowManager.close();
     } catch (error, stack) {
@@ -231,6 +253,17 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
             .showSnackBar(const SnackBar(content: Text('关闭失败，请重试')));
     } finally {
       _closePromptOpen = false;
+    }
+  }
+
+  Future<void> _cleanupImages() async {
+    await OwnedImages.delete(File(widget.path).parent.path, [
+      widget.path,
+      if (widget.firstTilePath != null) widget.firstTilePath!,
+      ..._temporaryEdits,
+    ]);
+    for (final path in _temporaryEdits) {
+      await OwnedImages.delete(File(path).parent.path, [path]);
     }
   }
 
@@ -334,9 +367,9 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
     try {
       await WidgetsBinding.instance.endOfFrame;
       final bytes = await renderPinEdits(await _sourceBytes, next);
-      final path =
-          '${File(widget.path).parent.path}${Platform.pathSeparator}'
-          'edit-${DateTime.now().microsecondsSinceEpoch}.png';
+      final directory = await OwnedImages.create();
+      final path = '${directory.path}/edit.png';
+      _temporaryEdits.add(path);
       await File(path).writeAsBytes(bytes);
       final oldPath = _displayPath;
       _edits = next;
@@ -393,9 +426,9 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
         crop,
         _marks,
       );
-      final path =
-          '${File(widget.path).parent.path}${Platform.pathSeparator}'
-          'viewer-edit-${DateTime.now().microsecondsSinceEpoch}.png';
+      final directory = await OwnedImages.create();
+      final path = '${directory.path}/edit.png';
+      _temporaryEdits.add(path);
       await File(path).writeAsBytes(bytes);
       final oldPath = _displayPath;
       setState(() {
@@ -497,13 +530,44 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
     );
   }
 
-  Future<void> _copy() async =>
-      Pasteboard.writeImage(await File(_displayPath).readAsBytes());
+  Future<void> _copy() async {
+    if (_copying || _saving || _editing) return;
+    setState(() => _copying = true);
+    try {
+      await Pasteboard.writeImage(await File(_displayPath).readAsBytes());
+      if (mounted)
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('已复制到剪贴板')));
+    } catch (error) {
+      AppLog.write('pin-copy-failed', error);
+      if (mounted)
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('复制失败，图片已保留：$error')));
+    } finally {
+      if (mounted) setState(() => _copying = false);
+    }
+  }
 
   Future<bool> _save() async {
-    final saved = await saveImage(await File(_displayPath).readAsBytes());
-    if (saved && mounted) setState(() => _unsavedEdits = false);
-    return saved;
+    if (_saving || _copying || _editing) return false;
+    setState(() => _saving = true);
+    try {
+      final saved = await saveImage(await File(_displayPath).readAsBytes());
+      if (saved && mounted) {
+        setState(() => _unsavedEdits = false);
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('图片已保存')));
+      }
+      return saved;
+    } catch (error) {
+      AppLog.write('pin-save-failed', error);
+      if (mounted)
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('保存失败，修改已保留：$error')));
+      return false;
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
   }
 
   void _startMark(Offset point) {
@@ -672,8 +736,7 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
 
   Future<void> _printImage() async {
     if (Platform.isMacOS) {
-      final result = await Process.run('lp', [_displayPath]);
-      if (result.exitCode != 0) throw StateError('${result.stderr}');
+      await CaptureBridge.printImage(_displayPath);
       return;
     }
     final quoted = _displayPath.replaceAll("'", "''");
@@ -1117,7 +1180,7 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
                   ?.findAncestorStateOfType<EditableTextState>() !=
               null)
         return KeyEventResult.ignored;
-      if (_editing) return KeyEventResult.handled;
+      if (_editing || _saving || _copying) return KeyEventResult.handled;
       final modifier =
           HardwareKeyboard.instance.isControlPressed ||
           HardwareKeyboard.instance.isMetaPressed;
@@ -1212,11 +1275,11 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
                 ),
               ),
             ),
-          if (_editing) ...[
-            const Positioned.fill(
+          if (_editing || _saving || _copying) ...[
+            Positioned.fill(
               child: ModalBarrier(dismissible: false, color: Color(0x33000000)),
             ),
-            const Positioned.fill(
+            Positioned.fill(
               child: Center(
                 child: Card(
                   child: Padding(
@@ -1230,7 +1293,14 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
                           child: CircularProgressIndicator(strokeWidth: 2),
                         ),
                         SizedBox(width: 12),
-                        Text('保存修改中', style: TextStyle(fontSize: 14)),
+                        Text(
+                          _copying
+                              ? '复制中…'
+                              : _saving
+                              ? '保存图片中…'
+                              : '保存修改中',
+                          style: const TextStyle(fontSize: 14),
+                        ),
                       ],
                     ),
                   ),

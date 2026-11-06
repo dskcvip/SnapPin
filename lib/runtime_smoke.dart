@@ -8,6 +8,7 @@ import 'package:window_manager/window_manager.dart';
 import 'app_log.dart';
 import 'ocr_bridge.dart';
 import 'long_stitch.dart';
+import 'owned_images.dart';
 
 import 'package:image/image.dart' as img;
 
@@ -89,6 +90,19 @@ Future<void> runRuntimeSmoke({required bool shutdownDuringOcr}) async {
   image.dispose();
   picture.dispose();
   paragraph.dispose();
+  if (Platform.isMacOS && !shutdownDuringOcr) {
+    final directory = await OwnedImages.create();
+    final file = File('${directory.path}/print.png');
+    try {
+      await file.writeAsBytes(bytes);
+      final prepared = await const MethodChannel('snappin/capture')
+          .invokeMethod<bool>('printImage', file.path);
+      if (prepared != true) throw StateError('Native print job setup failed');
+      AppLog.write('runtime-smoke-print-prepared');
+    } finally {
+      await OwnedImages.delete(directory.path, [file.path]);
+    }
+  }
   var completed = false;
   final recognition = OcrBridge.recognizeLayout(bytes)
       .timeout(const Duration(seconds: 60));
@@ -115,6 +129,7 @@ Future<void> runRuntimeSmoke({required bool shutdownDuringOcr}) async {
   if (shutdownDuringOcr) {
     recognition.ignore();
     AppLog.write('runtime-smoke-shutdown-start');
+    AppLog.flush();
     await windowManager.close();
     if (Platform.isMacOS) exit(0);
     return;
@@ -152,6 +167,7 @@ Future<void> runRuntimeSmoke({required bool shutdownDuringOcr}) async {
   }
   await windowManager.getTitle();
   AppLog.write('runtime-smoke-ready');
+  AppLog.flush();
   await windowManager.close();
   if (Platform.isMacOS) exit(0);
 }

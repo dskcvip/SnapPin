@@ -2,6 +2,9 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:ui';
 
+import 'atomic_file.dart';
+import 'app_log.dart';
+
 class TranslationModel {
   const TranslationModel({
     required this.id,
@@ -101,15 +104,19 @@ class AppConfig {
               (position['y'] as num).toDouble(),
             )
           : null,
-      shortcutCapture: map['shortcutCapture'] as String? ??
+      shortcutCapture:
+          map['shortcutCapture'] as String? ??
           (Platform.isMacOS ? 'Super+1' : 'Ctrl+1'),
-      shortcutPinClipboard: map['shortcutPinClipboard'] as String? ??
+      shortcutPinClipboard:
+          map['shortcutPinClipboard'] as String? ??
           (Platform.isMacOS ? 'Super+2' : 'Ctrl+2'),
       saveDir: map['saveDir'] as String?,
       translationModels: (translation['models'] as List? ?? const [])
           .whereType<Map>()
-          .map((model) => TranslationModel.fromJson(
-              Map<String, dynamic>.from(model)))
+          .map(
+            (model) =>
+                TranslationModel.fromJson(Map<String, dynamic>.from(model)),
+          )
           .toList(),
       targetLang: translation['targetLang'] as String? ?? '中文',
     );
@@ -138,6 +145,7 @@ class AppConfig {
 }
 
 class ConfigStore {
+  static final _repository = ConfigRepository(file);
   static File get file {
     final root = Platform.isWindows
         ? Platform.environment['APPDATA']
@@ -150,24 +158,65 @@ class ConfigStore {
     );
   }
 
-  static Future<AppConfig> load() async {
-    try {
-      final map = jsonDecode(await file.readAsString()) as Map<String, dynamic>;
-      return AppConfig.fromJson(map);
-    } catch (_) {
-      return AppConfig(
-        shortcutCapture: Platform.isMacOS ? 'Super+1' : 'Ctrl+1',
-        shortcutPinClipboard: Platform.isMacOS ? 'Super+2' : 'Ctrl+2',
-      );
-    }
-  }
+  static Future<AppConfig> load() => _repository.load();
+
+  static Future<AppConfig> update(AppConfig Function(AppConfig) change) =>
+      _repository.update(change);
 
   static Future<void> save(AppConfig config) async {
-    final target = file;
-    await target.parent.create(recursive: true);
-    final temp = File('${target.path}.tmp');
-    await temp.writeAsString(jsonEncode(config.toJson()));
-    if (await target.exists()) await target.delete();
-    await temp.rename(target.path);
+    await update((_) => config);
+  }
+}
+
+/// All production writes are dispatched through the main (ball) engine.
+/// This queue serializes read/merge/write, including drag-position updates.
+class ConfigRepository {
+  ConfigRepository(this.file);
+  final File file;
+  Future<void> _writes = Future<void>.value();
+
+  File get _backup => File('${file.path}.bak');
+
+  Future<AppConfig> load() async {
+    for (final candidate in [file, _backup]) {
+      try {
+        final map =
+            jsonDecode(await candidate.readAsString()) as Map<String, dynamic>;
+        final config = AppConfig.fromJson(map);
+        if (candidate.path != file.path) {
+          AppLog.write('config-backup-recovered');
+        }
+        return config;
+      } on FileSystemException catch (error) {
+        if (await candidate.exists())
+          AppLog.write('config-read-failed', error.osError?.errorCode);
+      } on FormatException {
+        AppLog.write('config-invalid-json', candidate.path);
+      } on TypeError {
+        AppLog.write('config-invalid-fields', candidate.path);
+      }
+    }
+    return AppConfig(
+      shortcutCapture: Platform.isMacOS ? 'Super+1' : 'Ctrl+1',
+      shortcutPinClipboard: Platform.isMacOS ? 'Super+2' : 'Ctrl+2',
+    );
+  }
+
+  Future<AppConfig> update(AppConfig Function(AppConfig) change) {
+    final operation = _writes.then((_) async {
+      final current = await load();
+      final next = change(current);
+      // Back up the parsed/recovered version, never overwrite a good backup
+      // with malformed bytes from an interrupted older release.
+      await atomicWrite(_backup, utf8.encode(jsonEncode(current.toJson())));
+      await atomicWrite(file, utf8.encode(jsonEncode(next.toJson())));
+      AppLog.write('config-saved');
+      return next;
+    });
+    _writes = operation.then<void>(
+      (_) {},
+      onError: (Object _, StackTrace __) {},
+    );
+    return operation;
   }
 }

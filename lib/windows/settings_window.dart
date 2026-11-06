@@ -222,11 +222,21 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
       } catch (error) {
         AppLog.write('settings-ball-position-failed', error);
       }
-      await ConfigStore.save(config);
+      if (ball == null) throw StateError('主窗口不可用，未保存设置，请重试');
+      final saved = await ball.invokeMethod<String>(
+        'saveSettings',
+        jsonEncode(config.toJson()),
+      );
+      if (saved == null) throw StateError('未收到保存确认，请重试');
+      config = AppConfig.fromJson(
+        Map<String, dynamic>.from(jsonDecode(saved) as Map),
+      );
       try {
         await _preview(config);
       } catch (error) {
         AppLog.write('settings-apply-failed', error);
+        if (mounted) setState(() => _saveError = '配置已保存，但应用失败；请点击保存重试：$error');
+        return false;
       }
       if (mounted)
         setState(() {

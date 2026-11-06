@@ -130,9 +130,8 @@ void main() {
           () => Future<void>.delayed(const Duration(milliseconds: 20)),
         );
         await tester.pump();
-        saved = directory.listSync().any(
-          (file) => file.path.contains('viewer-edit-'),
-        );
+        final result = tester.widget<ImagePixels>(find.byType(ImagePixels));
+        saved = result.path != file.path && File(result.path).existsSync();
         if (saved && find.text('保存修改中').evaluate().isEmpty) break;
       }
       expect(saved, isTrue, reason: 'Edited image was not saved');

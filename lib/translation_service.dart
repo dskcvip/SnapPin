@@ -3,6 +3,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'app_config.dart';
+import 'app_log.dart';
 
 class TranslationService {
   /// Same minimal probe as Tauri: a successful HTTP status is sufficient.
@@ -63,8 +64,9 @@ class TranslationService {
   static Future<String> translate(
     String source,
     TranslationModel model,
-    String targetLanguage,
-  ) async {
+    String targetLanguage, {
+    Duration requestTimeout = const Duration(seconds: 45),
+  }) async {
     if (model.apiKey.isEmpty || model.model.isEmpty || model.baseUrl.isEmpty) {
       throw StateError('翻译模型配置不完整');
     }
@@ -72,40 +74,66 @@ class TranslationService {
     final uri = Uri.parse('$base/chat/completions');
     final client = HttpClient()
       ..connectionTimeout = const Duration(seconds: 15);
+    final elapsed = Stopwatch()..start();
+    AppLog.write('translation-start', 'sourceChars=${source.length}');
     try {
-      final request = await client.postUrl(uri);
-      request.headers.contentType = ContentType.json;
-      request.headers.set(
-        HttpHeaders.authorizationHeader,
-        'Bearer ${model.apiKey}',
+      // Bound the entire exchange, including response-body streaming. A server
+      // can send headers promptly and then never finish its JSON response.
+      return await (() async {
+        final request = await client.postUrl(uri);
+        request.headers.contentType = ContentType.json;
+        request.headers.set(
+          HttpHeaders.authorizationHeader,
+          'Bearer ${model.apiKey}',
+        );
+        request.write(
+          jsonEncode({
+            'model': model.model,
+            'temperature': 0,
+            'messages': [
+              {
+                'role': 'system',
+                'content':
+                    'Translate the user text into $targetLanguage. '
+                    'Return only the translation, preserving line breaks.',
+              },
+              {'role': 'user', 'content': source},
+            ],
+          }),
+        );
+        final response = await request.close();
+        final body = await utf8.decoder.bind(response).join();
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+          throw HttpException('翻译请求失败：${response.statusCode}', uri: uri);
+        }
+        final data = jsonDecode(body);
+        final choices = data is Map ? data['choices'] : null;
+        final first = choices is List && choices.isNotEmpty
+            ? choices.first
+            : null;
+        final message = first is Map ? first['message'] : null;
+        final content = message is Map ? message['content'] : null;
+        if (content is! String || content.trim().isEmpty) {
+          throw const FormatException('翻译响应为空或格式不正确');
+        }
+        AppLog.write(
+          'translation-ready',
+          'resultChars=${content.length} elapsed=${elapsed.elapsedMilliseconds}ms',
+        );
+        return content;
+      })().timeout(requestTimeout);
+    } on TimeoutException {
+      AppLog.write(
+        'translation-timeout',
+        'elapsed=${elapsed.elapsedMilliseconds}ms',
       );
-      request.write(
-        jsonEncode({
-          'model': model.model,
-          'temperature': 0,
-          'messages': [
-            {
-              'role': 'system',
-              'content':
-                  'Translate the user text into $targetLanguage. '
-                  'Return only the translation, preserving line breaks.',
-            },
-            {'role': 'user', 'content': source},
-          ],
-        }),
+      throw const FormatException('翻译请求超时，请重试');
+    } catch (error) {
+      AppLog.write(
+        'translation-failed',
+        'type=${error.runtimeType} elapsed=${elapsed.elapsedMilliseconds}ms',
       );
-      final response = await request.close().timeout(
-        const Duration(seconds: 45),
-      );
-      final body = await utf8.decoder.bind(response).join();
-      if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw HttpException('翻译请求失败：${response.statusCode}', uri: uri);
-      }
-      final data = jsonDecode(body) as Map<String, dynamic>;
-      final choices = data['choices'] as List?;
-      if (choices == null || choices.isEmpty) throw FormatException('翻译响应为空');
-      final message = (choices.first as Map)['message'] as Map;
-      return message['content'] as String? ?? '';
+      rethrow;
     } finally {
       client.close(force: true);
     }

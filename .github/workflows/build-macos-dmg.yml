@@ -35,7 +35,7 @@ jobs:
       - name: Build macOS app
         run: |
           flutter config --no-enable-macos-arm64-only
-          flutter build macos --release
+          flutter build macos --release --dart-define=SNAPPIN_BUILD_COMMIT=${{ github.sha }}
       - name: Sign and package DMG
         run: |
           APP='build/macos/Build/Products/Release/SnapPin.app'

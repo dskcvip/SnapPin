@@ -28,7 +28,11 @@ Future<void> main(List<String> args) async {
   final startup = Stopwatch()..start();
   WidgetsFlutterBinding.ensureInitialized();
   AppLog.initialize();
-  AppLog.write('startup-binding', '${startup.elapsedMilliseconds}ms');
+  AppLog.write(
+    'startup-binding',
+    'commit=${const String.fromEnvironment('SNAPPIN_BUILD_COMMIT', defaultValue: 'development')} '
+        'pid=$pid os=${Platform.operatingSystemVersion} ${startup.elapsedMilliseconds}ms',
+  );
   FlutterError.onError = (details) {
     AppLog.write('flutter-error', '${details.exception}\n${details.stack}');
     FlutterError.presentError(details);
@@ -188,6 +192,7 @@ Future<void> main(List<String> args) async {
             baseSize: size,
             initiallyTopmost: topmost,
             firstTilePath: arguments['firstTilePath'] as String?,
+            initialNotice: arguments['notice'] as String?,
           ),
         ),
       );
