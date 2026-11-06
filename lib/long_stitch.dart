@@ -25,12 +25,15 @@ class LongStep {
     this.score,
     this.diff, {
     this.direction = 'none',
+    this.matchedRows = 0,
+    this.overlapRows = 0,
   });
 
   final LongStepKind kind;
   final int appended, stillCount, height, steps;
   final double score, diff;
   final String direction;
+  final int matchedRows, overlapRows;
 }
 
 class LongStitchSession {
@@ -219,6 +222,11 @@ class LongStitchSession {
           final extended = Uint8List((_height + prepend) * width * 4);
           extended.setRange(0, prepend * width * 4, next);
           extended.setRange(prepend * width * 4, extended.length, _canvas, 0);
+          // Join inside the shared content rather than at the viewport edge.
+          // Rounded window corners/shadows at either edge must not repeat at
+          // every splice. Keep every original column and copy pixels verbatim.
+          final seam = prepend + (_frameHeight - prepend) ~/ 2;
+          extended.setRange(0, seam * width * 4, next);
           _canvas = extended;
           _height += prepend;
           _origin -= prepend;
@@ -234,6 +242,8 @@ class LongStitchSession {
           1 - upward.diff / 255,
           frameDiff,
           direction: prepend > 0 ? 'prepend-up' : 'up-existing',
+          matchedRows: upward.support,
+          overlapRows: _frameHeight - upward.shift,
         );
       }
       if (downward.shift != 0 &&
@@ -249,6 +259,8 @@ class LongStitchSession {
           1 - downward.diff / 255,
           frameDiff,
           direction: 'down-existing',
+          matchedRows: downward.support,
+          overlapRows: _frameHeight - downward.shift,
         );
       }
     }
@@ -325,11 +337,12 @@ class LongStitchSession {
     }
     _ensureCapacity(_height + bestShift);
     final firstNewRow = _frameHeight - bestShift;
+    final seam = firstNewRow ~/ 2;
     _canvas.setRange(
-      _height * width * 4,
+      (_height - firstNewRow + seam) * width * 4,
       (_height + bestShift) * width * 4,
       next,
-      firstNewRow * width * 4,
+      seam * width * 4,
     );
     _height += bestShift;
     _viewportTop = _height - _frameHeight;
@@ -344,6 +357,8 @@ class LongStitchSession {
       1 - bestDiff / 255,
       frameDiff,
       direction: 'append-down',
+      matchedRows: bestSupport,
+      overlapRows: _frameHeight - bestShift,
     );
   }
 
@@ -482,19 +497,32 @@ class LongStitchSession {
       var diff = 0;
       var texture = 0;
       var count = 0;
+      final columnDiffs = <int>[];
       final base = second[frameRow].toInt();
       for (var x = 0; x < width; x += colStep) {
         final a = canvasRow + x * 4;
         final b = frameRow + x * 4;
-        diff +=
+        final delta =
             (first[a] - second[b]).abs() +
             (first[a + 1] - second[b + 1]).abs() +
             (first[a + 2] - second[b + 2]).abs();
+        diff += delta;
+        columnDiffs.add(delta);
         texture += (second[b] - base).abs();
         count++;
       }
-      final mean = diff / (count * 3);
-      if (mean < 7) {
+      var mean = diff / (count * 3);
+      if (mean >= 1.5) {
+        // A localized cursor/tooltip can cover part of an otherwise exact row.
+        // Ignore at most a fifth of columns, and demand a much closer match in
+        // the remaining columns instead of diluting errors with blank pixels.
+        columnDiffs.sort();
+        final retained = count - count ~/ 5;
+        mean =
+            columnDiffs.take(retained).fold<int>(0, (a, b) => a + b) /
+            (retained * 3);
+      }
+      if (mean < 1.5) {
         run += 4;
         if (texture / count > 6) evidence++;
         runDiff += mean;
@@ -508,6 +536,11 @@ class LongStitchSession {
         evidence = 0;
         runDiff = 0;
       }
+    }
+    // A short repeated heading or blank strip is not proof that the entire
+    // overlap belongs to this position. Require substantial overlap support.
+    if (bestRun < math.max(24, (rows / 2).ceil())) {
+      return (support: 0, diff: double.infinity, start: 0);
     }
     return (support: bestRun, diff: bestDiff, start: bestStart);
   }

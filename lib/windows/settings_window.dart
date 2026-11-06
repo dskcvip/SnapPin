@@ -31,6 +31,19 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
   AppConfig? _config;
   AppConfig? _savedConfig;
   String _page = '通用';
+  String _settingsQuery = '';
+
+  bool _matchesPage(String page) {
+    final text = switch (page) {
+      '通用' => '通用 常规 主题色 颜色 外观 悬浮球 尺寸 不透明度 翻译 语言 动作 截图 剪贴板 归档 自动保存',
+      '快捷键' => '快捷键 热键 截图 贴图',
+      '模型' => '模型 翻译 API 服务',
+      '数据管理' => '数据管理 日志 OCR 本地 版本',
+      _ => '关于 版本 更新 官网',
+    };
+    return text.toLowerCase().contains(_settingsQuery.trim().toLowerCase());
+  }
+
   String _keyQuery = '';
   String? _recording;
   String? _requestedRecording;
@@ -257,7 +270,7 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
   }
 
   Widget _saveButton() => Align(
-    alignment: Alignment.center,
+    alignment: Alignment.centerRight,
     child: FilledButton(
       onPressed: !_dirty || _saving ? null : () => _save(),
       child: Text(
@@ -289,7 +302,23 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
           }
 
           return AlertDialog(
-            title: const Text('主题色', style: TextStyle(fontSize: 16)),
+            title: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text('主题色', style: TextStyle(fontSize: 16)),
+                TextButton(
+                  onPressed: () =>
+                      change(HSVColor.fromColor(const AppConfig().color)),
+                  style: TextButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(horizontal: 0),
+                    minimumSize: Size.zero,
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    textStyle: const TextStyle(fontSize: 12),
+                  ),
+                  child: const Text('恢复默认'),
+                ),
+              ],
+            ),
             content: SizedBox(
               width: 300,
               child: Column(
@@ -481,12 +510,55 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 Container(
-                  width: 208,
-                  color: const Color(0xfff7f8fa),
-                  padding: const EdgeInsets.fromLTRB(10, 12, 10, 10),
+                  width: 232,
+                  color: const Color(0xfff7f7f7),
+                  padding: const EdgeInsets.fromLTRB(12, 40, 30, 10),
                   child: Column(
                     children: [
-                      const SizedBox(height: 8),
+                      SizedBox(
+                        height: 32,
+                        child: TextField(
+                          style: const TextStyle(fontSize: 13),
+                          decoration: InputDecoration(
+                            hintText: '搜索设置项',
+                            hintStyle: const TextStyle(
+                              color: Color(0xff999999),
+                              fontSize: 13,
+                            ),
+                            prefixIcon: const Icon(
+                              Icons.search,
+                              size: 18,
+                              color: Color(0xff888888),
+                            ),
+                            prefixIconConstraints: const BoxConstraints(
+                              minWidth: 30,
+                            ),
+                            filled: true,
+                            fillColor: const Color(0xffebebeb),
+                            isDense: true,
+                            contentPadding: const EdgeInsets.symmetric(
+                              vertical: 8,
+                            ),
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(9),
+                              borderSide: BorderSide.none,
+                            ),
+                          ),
+                          onChanged: (value) => setState(() {
+                            _settingsQuery = value;
+                            final matches = [
+                              '通用',
+                              '快捷键',
+                              '模型',
+                              '数据管理',
+                              '关于',
+                            ].where(_matchesPage);
+                            if (!_matchesPage(_page) && matches.isNotEmpty)
+                              _page = matches.first;
+                          }),
+                        ),
+                      ),
+                      const SizedBox(height: 14),
                       const Align(
                         alignment: Alignment.centerLeft,
                         child: Padding(
@@ -503,13 +575,29 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
                       for (final item in const [
                         ('通用', Icons.settings_outlined),
                         ('快捷键', Icons.keyboard_outlined),
-                        ('模型', Icons.widgets_outlined),
                       ])
-                        _navItem(item.$1, item.$2),
+                        if (_matchesPage(item.$1)) _navItem(item.$1, item.$2),
+                      if (_matchesPage('模型')) ...[
+                        const SizedBox(height: 28),
+                        const Align(
+                          alignment: Alignment.centerLeft,
+                          child: Padding(
+                            padding: EdgeInsets.fromLTRB(12, 0, 0, 4),
+                            child: Text(
+                              '功能',
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: Color(0xff999999),
+                              ),
+                            ),
+                          ),
+                        ),
+                        _navItem('模型', Icons.widgets_outlined),
+                      ],
                       const Align(
                         alignment: Alignment.centerLeft,
                         child: Padding(
-                          padding: EdgeInsets.fromLTRB(8, 14, 0, 2),
+                          padding: EdgeInsets.fromLTRB(12, 28, 0, 4),
                           child: Text(
                             '数据与安全',
                             style: TextStyle(
@@ -519,22 +607,20 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
                           ),
                         ),
                       ),
-                      _navItem('数据管理', Icons.storage_outlined),
+                      if (_matchesPage('数据管理'))
+                        _navItem('数据管理', Icons.storage_outlined),
                       const SizedBox(height: 4),
-                      _navItem('关于', Icons.info_outline),
+                      if (_matchesPage('关于'))
+                        _navItem('关于', Icons.info_outline),
                     ],
                   ),
                 ),
-                const VerticalDivider(width: 1, color: Color(0xffeceef1)),
+
                 Expanded(
                   child: ColoredBox(
-                    color: _page == '关于'
-                        ? const Color(0xfff7f7f7)
-                        : Colors.white,
+                    color: const Color(0xfff7f7f7),
                     child: SingleChildScrollView(
-                      padding: _page == '关于'
-                          ? const EdgeInsets.fromLTRB(30, 40, 30, 28)
-                          : const EdgeInsets.fromLTRB(24, 20, 24, 28),
+                      padding: const EdgeInsets.fromLTRB(0, 40, 30, 28),
                       child: switch (_page) {
                         '通用' => _general(config),
                         '快捷键' => _shortcuts(config),
@@ -556,6 +642,33 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
                   ),
                 ),
               ],
+            ),
+            Positioned(
+              left: 0,
+              right: 40,
+              top: 0,
+              height: 32,
+              child: GestureDetector(
+                behavior: HitTestBehavior.translucent,
+                onPanStart: (_) => windowManager.startDragging(),
+                child: const SizedBox.expand(),
+              ),
+            ),
+            Positioned(
+              right: 0,
+              top: 0,
+              width: 40,
+              height: 32,
+              child: IconButton(
+                tooltip: '关闭设置',
+                padding: EdgeInsets.zero,
+                onPressed: _requestClose,
+                icon: const Icon(
+                  Icons.close,
+                  size: 16,
+                  color: Color(0xff555555),
+                ),
+              ),
             ),
             if (_closeArmed)
               Positioned(
@@ -657,147 +770,191 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
   Widget _general(AppConfig config) => Column(
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
-      _heading('通用'),
-      const Padding(
-        padding: EdgeInsets.only(bottom: 16),
-        child: Text(
-          '外观、悬浮球与翻译目标语言等常规项。',
-          style: TextStyle(fontSize: 12, height: 1.6, color: Color(0xff8a919f)),
-        ),
-      ),
+      _heading('常规'),
       _section('', [
-        Row(
-          children: [
-            const SizedBox(
-              width: 120,
-              child: Text(
-                '主题色',
-                style: TextStyle(fontSize: 13, color: Color(0xff4e5566)),
-              ),
-            ),
-            const SizedBox(width: 14),
-            Tooltip(
-              message: '选择主题色',
-              child: InkWell(
-                onTap: () => _pickThemeColor(config),
-                child: Container(
-                  width: 44,
-                  height: 28,
-                  padding: const EdgeInsets.all(2),
-                  decoration: BoxDecoration(
-                    border: Border.all(color: const Color(0xffe2e4e8)),
-                    borderRadius: BorderRadius.circular(6),
-                  ),
-                  child: ColoredBox(color: config.color),
+        _settingRow(
+          '翻译目标语言',
+          '写进提示词，如 中文 / 英文 / 日文',
+          SizedBox(
+            width: 120,
+            height: 32,
+            child: TextFormField(
+              initialValue: config.targetLang,
+              textAlignVertical: TextAlignVertical.center,
+              style: const TextStyle(fontSize: 14),
+              decoration: InputDecoration(
+                isDense: true,
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 7,
+                ),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(8),
+                  borderSide: const BorderSide(color: Color(0xffe6e6e6)),
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(8),
+                  borderSide: const BorderSide(color: Color(0xffe6e6e6)),
                 ),
               ),
+              onChanged: (value) => _patch(config.copyWith(targetLang: value)),
             ),
-            const SizedBox(width: 14),
-            const Text(
-              '悬浮球 / 菜单 / 选中色',
-              style: TextStyle(fontSize: 12, color: Color(0xff9aa0ab)),
-            ),
-          ],
+          ),
         ),
-        const SizedBox(height: 14),
-        _slider(
+        _settingRow(
+          '主题色',
+          '悬浮球、菜单与选中色',
+          Tooltip(
+            message: '选择主题色',
+            child: InkWell(
+              onTap: () => _pickThemeColor(config),
+              borderRadius: BorderRadius.circular(6),
+              child: Container(
+                width: 44,
+                height: 28,
+                padding: const EdgeInsets.all(3),
+                decoration: BoxDecoration(
+                  border: Border.all(color: const Color(0xffe6e6e6)),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: ColoredBox(color: config.color),
+              ),
+            ),
+          ),
+        ),
+        _settingRow(
           '悬浮球尺寸',
-          config.ballSize.toDouble(),
-          40,
-          80,
-          (v) =>
-              _patch(config.copyWith(ballSize: v.round()), previewBall: true),
-          '${config.ballSize}px',
-          divisions: 20,
-        ),
-        const SizedBox(height: 14),
-        _slider(
-          '悬浮球不透明度',
-          config.ballOpacity * 100,
-          15,
-          100,
-          (v) =>
-              _patch(config.copyWith(ballOpacity: v / 100), previewBall: true),
-          '${(config.ballOpacity * 100).round()}%',
-          divisions: 17,
-        ),
-        const SizedBox(height: 14),
-        Row(
-          children: [
-            const SizedBox(
-              width: 120,
-              child: Text(
-                '翻译目标语言',
-                style: TextStyle(fontSize: 13, color: Color(0xff4e5566)),
+          '调整桌面悬浮球的大小',
+          SizedBox(
+            width: 224,
+            child: _slider(
+              '',
+              config.ballSize.toDouble(),
+              40,
+              80,
+              (v) => _patch(
+                config.copyWith(ballSize: v.round()),
+                previewBall: true,
               ),
+              '${config.ballSize}px',
+              divisions: 20,
             ),
-            const SizedBox(width: 14),
-            Expanded(
-              child: SizedBox(
-                height: 32,
-                child: TextFormField(
-                  initialValue: config.targetLang,
-                  textAlignVertical: TextAlignVertical.center,
-                  style: const TextStyle(fontSize: 13),
-                  decoration: InputDecoration(
-                    isDense: true,
-                    hintText: '中文',
-                    constraints: const BoxConstraints.tightFor(height: 32),
-                    contentPadding: const EdgeInsets.symmetric(
-                      horizontal: 10,
-                      vertical: 7,
-                    ),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    enabledBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(8),
-                      borderSide: const BorderSide(color: Color(0xffe2e4e8)),
-                    ),
-                  ),
-                  onChanged: (value) =>
-                      _patch(config.copyWith(targetLang: value)),
+          ),
+        ),
+        _settingRow(
+          '悬浮球不透明度',
+          '调整悬浮球的显示透明度',
+          SizedBox(
+            width: 224,
+            child: _slider(
+              '',
+              config.ballOpacity * 100,
+              15,
+              100,
+              (v) => _patch(
+                config.copyWith(ballOpacity: v / 100),
+                previewBall: true,
+              ),
+              '${(config.ballOpacity * 100).round()}%',
+              divisions: 17,
+            ),
+          ),
+        ),
+      ]),
+      const SizedBox(height: 20),
+      _heading('动作'),
+      _section('', [
+        _settingRow(
+          '开始截图',
+          '框选屏幕区域，编辑并输出截图',
+          OutlinedButton(
+            onPressed: () => _ballAction('capture'),
+            child: const Text('开始截图'),
+          ),
+        ),
+        _settingRow(
+          '剪贴板贴图',
+          '将剪贴板中的图片打开为贴图',
+          OutlinedButton(
+            onPressed: () => _ballAction('pin-clipboard'),
+            child: const Text('剪贴板贴图'),
+          ),
+        ),
+        _settingRow(
+          '退出程序',
+          '关闭 SnapPin 及全部窗口',
+          OutlinedButton(
+            onPressed: () => _ballAction('quit'),
+            child: const Text('退出'),
+          ),
+        ),
+      ]),
+      const SizedBox(height: 20),
+      _heading('截图归档'),
+      _section('', [
+        const Text(
+          '截图成功后自动保存一份到安装目录的“截图/年-月-日”文件夹。另存为会额外保存一份副本。',
+          style: TextStyle(fontSize: 12, color: Color(0xff888888)),
+        ),
+        const SizedBox(height: 8),
+        for (final source in ArchiveSource.values)
+          Material(
+            color: Colors.transparent,
+            child: CheckboxListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              controlAffinity: ListTileControlAffinity.leading,
+              title: Text(source.label, style: const TextStyle(fontSize: 13)),
+              value: config.archiveSources.contains(source.name),
+              onChanged: (enabled) => _patch(
+                config.copyWith(
+                  archiveSources: [
+                    for (final item in ArchiveSource.values)
+                      if (item == source
+                          ? enabled == true
+                          : config.archiveSources.contains(item.name))
+                        item.name,
+                  ],
                 ),
               ),
             ),
-            const SizedBox(width: 14),
-            const Text(
-              '写进提示词，如 中文 / 英文 / 日文',
-              style: TextStyle(fontSize: 12, color: Color(0xff9aa0ab)),
-            ),
-          ],
-        ),
-        const SizedBox(height: 14),
-      ]),
-      const SizedBox(height: 16),
-      _section('动作', [
-        const Text(
-          '常用入口，和托盘菜单一致。',
-          style: TextStyle(fontSize: 12, height: 1.6, color: Color(0xff8a919f)),
-        ),
-        const SizedBox(height: 10),
-        Wrap(
-          spacing: 10,
-          runSpacing: 8,
-          children: [
-            FilledButton(
-              onPressed: () => _ballAction('capture'),
-              child: const Text('开始截图'),
-            ),
-            OutlinedButton(
-              onPressed: () => _ballAction('pin-clipboard'),
-              child: const Text('剪贴板贴图'),
-            ),
-            OutlinedButton(
-              onPressed: () => _ballAction('quit'),
-              child: const Text('退出'),
-            ),
-          ],
-        ),
+          ),
       ]),
       const SizedBox(height: 18),
       _saveButton(),
     ],
+  );
+
+  Widget _settingRow(String title, String detail, Widget control) => SizedBox(
+    height: 58,
+    child: Row(
+      children: [
+        Expanded(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                title,
+                style: const TextStyle(fontSize: 14, color: Colors.black),
+              ),
+              if (detail.isNotEmpty) ...[
+                const SizedBox(height: 3),
+                Text(
+                  detail,
+                  style: const TextStyle(
+                    fontSize: 13,
+                    color: Color(0xff999999),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+        const SizedBox(width: 16),
+        control,
+      ],
+    ),
   );
 
   Widget _shortcuts(AppConfig config) => Column(
@@ -870,7 +1027,7 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
       const SizedBox(height: 16),
       Container(
         width: double.infinity,
-        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 18),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
         decoration: BoxDecoration(
           border: Border.all(color: const Color(0xffeceef1)),
           borderRadius: BorderRadius.circular(12),
@@ -1214,13 +1371,14 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
   }
 
   Widget _heading(String title) => Padding(
-    padding: const EdgeInsets.only(bottom: 6),
+    padding: const EdgeInsets.fromLTRB(8, 0, 0, 10),
     child: Text(
       title,
       style: const TextStyle(
-        fontSize: 15,
-        height: 1.2,
-        fontWeight: FontWeight.w600,
+        fontSize: 14,
+        height: 1.4,
+        color: Color(0xff999999),
+        fontWeight: FontWeight.w400,
       ),
     ),
   );
@@ -1228,7 +1386,7 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
   Widget _navItem(String label, IconData icon) => SizedBox(
     height: 34,
     child: Material(
-      color: _page == label ? const Color(0xffe6e8ec) : Colors.transparent,
+      color: _page == label ? const Color(0xffebebeb) : Colors.transparent,
       borderRadius: BorderRadius.circular(8),
       child: InkWell(
         borderRadius: BorderRadius.circular(8),
@@ -1255,7 +1413,7 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
             Text(
               label,
               style: TextStyle(
-                fontSize: 13,
+                fontSize: 14,
                 fontWeight: _page == label ? FontWeight.w500 : FontWeight.w400,
                 color: _page == label
                     ? const Color(0xff1f2329)
@@ -1270,10 +1428,10 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
 
   Widget _section(String title, List<Widget> children) => Container(
     width: double.infinity,
-    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 18),
+    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
     decoration: BoxDecoration(
-      border: Border.all(color: const Color(0xffeceef1)),
-      borderRadius: BorderRadius.circular(12),
+      color: Colors.white,
+      borderRadius: BorderRadius.circular(14),
     ),
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1306,24 +1464,25 @@ class _SettingsWindowState extends State<SettingsWindow> with WindowListener {
     height: 20,
     child: Row(
       children: [
-        SizedBox(
-          width: 120,
-          child: Text(
-            label,
-            style: const TextStyle(fontSize: 13, color: Color(0xff4e5566)),
+        if (label.isNotEmpty)
+          SizedBox(
+            width: 120,
+            child: Text(
+              label,
+              style: const TextStyle(fontSize: 13, color: Color(0xff4e5566)),
+            ),
           ),
-        ),
-        const SizedBox(width: 14),
+        if (label.isNotEmpty) const SizedBox(width: 14),
         Expanded(
           child: SliderTheme(
             data: SliderTheme.of(context).copyWith(
-              trackHeight: 6,
-              activeTrackColor: const Color(0xff3478ff),
+              trackHeight: 1,
+              activeTrackColor: const Color(0xff777777),
               inactiveTrackColor: const Color(0xffefefef),
-              thumbColor: const Color(0xff3478ff),
+              thumbColor: Colors.white,
               thumbShape: const RoundSliderThumbShape(
-                enabledThumbRadius: 7.5,
-                elevation: 0,
+                enabledThumbRadius: 4,
+                elevation: 1,
                 pressedElevation: 0,
               ),
               overlayShape: SliderComponentShape.noOverlay,
@@ -1388,7 +1547,7 @@ class _NativeRangeTrack extends RoundedRectSliderTrackShape {
     canvas.clipRRect(rounded);
     canvas.drawRect(
       Rect.fromLTRB(rect.left, rect.top, thumbCenter.dx, rect.bottom),
-      Paint()..color = const Color(0xff3478ff),
+      Paint()..color = const Color(0xffaaaaaa),
     );
     canvas.restore();
   }

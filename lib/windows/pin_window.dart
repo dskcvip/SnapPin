@@ -26,6 +26,7 @@ import 'ocr_window.dart' show showOcrResult;
 import 'image_pixels.dart';
 import 'mosaic_preview.dart';
 import 'viewer_sticker_toolbar.dart';
+import 'screenshot_history.dart';
 
 class PinWindow extends StatefulWidget {
   const PinWindow({
@@ -60,7 +61,10 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
   String _group = '默认';
   late Size _baseSize;
   late Size _editSourceSize;
-  late Future<Uint8List> _sourceBytes;
+  Future<Uint8List>? _sourceBytes;
+  late String _editInputPath;
+  Future<Uint8List> _readSource() =>
+      _sourceBytes ??= File(_editInputPath).readAsBytes();
   String _displayPath = '';
   PinEdits _edits = const PinEdits();
   bool _editing = false;
@@ -69,6 +73,10 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
   bool _fullscreen = false;
   bool _maximized = false;
   bool _favorite = false;
+  bool _historyOpen = false;
+  int _historyRevision = 0;
+  late String _originalPath;
+  bool _switchingImage = false;
   AnnotationTool? _editTool;
   bool _cropMode = false;
   final List<Annotation> _marks = [];
@@ -100,6 +108,8 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
     _baseSize = widget.baseSize;
     _editSourceSize = widget.baseSize;
     _displayPath = widget.path;
+    _originalPath = widget.path;
+    _editInputPath = widget.path;
     _sourceBytes = File(widget.path).readAsBytes();
     final notice = widget.initialNotice;
     if (notice != null) {
@@ -116,9 +126,11 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
     unawaited(windowManager.setPreventClose(true));
     widget.controller.setWindowMethodHandler((call) async {
       switch (call.method) {
+        case 'archiveChanged':
+          if (mounted) setState(() => _historyRevision++);
         case 'pinReady':
-          await _sourceBytes;
-          return widget.path;
+          await _readSource();
+          return _displayPath;
         case 'getPinInfo':
           return jsonEncode({
             'id': widget.controller.windowId,
@@ -262,6 +274,11 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
       if (widget.firstTilePath != null) widget.firstTilePath!,
       ..._temporaryEdits,
     ]);
+    final firstTile = widget.firstTilePath;
+    if (firstTile != null &&
+        File(firstTile).parent.path != File(widget.path).parent.path) {
+      await OwnedImages.delete(File(firstTile).parent.path, [firstTile]);
+    }
     for (final path in _temporaryEdits) {
       await OwnedImages.delete(File(path).parent.path, [path]);
     }
@@ -366,7 +383,7 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
     setState(() => _editing = true);
     try {
       await WidgetsBinding.instance.endOfFrame;
-      final bytes = await renderPinEdits(await _sourceBytes, next);
+      final bytes = await renderPinEdits(await _readSource(), next);
       final directory = await OwnedImages.create();
       final path = '${directory.path}/edit.png';
       _temporaryEdits.add(path);
@@ -383,7 +400,7 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
         });
       unawaited(_loadMosaicPreview());
       await _resizeForEdit();
-      if (oldPath != widget.path) {
+      if (_temporaryEdits.contains(oldPath)) {
         unawaited(File(oldPath).delete().catchError((_) => File(oldPath)));
       }
     } finally {
@@ -444,7 +461,7 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
         _cropMode = false;
         _unsavedEdits = true;
       });
-      if (oldPath != widget.path) {
+      if (_temporaryEdits.contains(oldPath)) {
         unawaited(File(oldPath).delete().catchError((_) => File(oldPath)));
       }
       AppLog.write(
@@ -769,6 +786,144 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
     }
   }
 
+  Future<void> _switchHistoryImage(Map<String, dynamic> entry) async {
+    final path = entry['path'] as String;
+    AppLog.write(
+      'pin-history-open-start',
+      'path=$path current=$_originalPath busy=$_switchingImage/$_editing/$_saving/$_copying',
+    );
+    if (path == _originalPath ||
+        _switchingImage ||
+        _editing ||
+        _saving ||
+        _copying)
+      return;
+    _switchingImage = true;
+    try {
+      if (_unsavedEdits ||
+          _marks.isNotEmpty ||
+          _draftMark != null ||
+          _cropRect != null ||
+          (_textPoint != null && _textInput.text.isNotEmpty)) {
+        final choice = await showDialog<String>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('有未保存的修改'),
+            content: const Text('是否保存修改后切换图片？'),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('继续编辑'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(context, 'discard'),
+                child: const Text('不保存'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(context, 'save'),
+                child: const Text('保存并切换'),
+              ),
+            ],
+          ),
+        );
+        if (choice == null || !mounted) return;
+        if (choice == 'save') {
+          if (_viewerEditing) await _completeViewerEdit();
+          if (_viewerEditing || !mounted || !await _save()) return;
+        }
+      }
+      final handle = await File(path).open();
+      try {
+        if (await handle.length() < 24) throw StateError('截图文件不完整');
+      } finally {
+        await handle.close();
+      }
+      if (!mounted) return;
+      setState(() {
+        _originalPath = path;
+        _displayPath = path;
+        // Lazy source loading avoids reading every historical long screenshot twice.
+        _editInputPath = path;
+        _sourceBytes = null;
+        _baseSize = Size(
+          (entry['width'] as num).toDouble(),
+          (entry['height'] as num).toDouble(),
+        );
+        _editSourceSize = _baseSize;
+        _edits = const PinEdits();
+        _viewerEditing = false;
+        _editTool = null;
+        _cropMode = false;
+        _marks.clear();
+        _undoneMarks.clear();
+        _draftMark = null;
+        _cropRect = null;
+        _textPoint = null;
+        _textInput.clear();
+        _mosaicPreview = null;
+        _unsavedEdits = false;
+        _fit = false;
+        _scale = 1;
+      });
+      await windowManager.setTitle('SnapPin - 贴图 - ${entry['name']}');
+      AppLog.write(
+        'pin-history-selected',
+        'path=$path ${entry['width']}x${entry['height']}',
+      );
+    } catch (error) {
+      AppLog.write('pin-history-open-failed', error);
+      if (mounted)
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('打开截图失败：$error')));
+    } finally {
+      _switchingImage = false;
+    }
+  }
+
+  Widget _viewerGlyph(IconData icon, Color color) {
+    final asset = <IconData, String>{
+      Icons.push_pin_outlined: 'pin',
+      Icons.file_download_outlined: 'save',
+      Icons.document_scanner_outlined: 'ocr',
+      Icons.close: 'close',
+    }[icon];
+    if (asset != null)
+      return SvgPicture.asset(
+        'assets/icons/shot/$asset.svg',
+        width: 20,
+        height: 20,
+        colorFilter: ColorFilter.mode(color, BlendMode.srcIn),
+      );
+    final path = <IconData, String>{
+      Icons.arrow_back: '<path d="M18 12H6m5-5-5 5 5 5"/>',
+      Icons.arrow_forward: '<path d="M6 12h12m-5-5 5 5-5 5"/>',
+      Icons.apps_outlined: [
+        for (final y in [5, 10, 15])
+          for (final x in [4, 10, 16])
+            '<rect x="$x" y="$y" width="4" height="4"/>',
+      ].join(),
+      Icons.zoom_in: '<circle cx="10" cy="10" r="6"/><path d="m14.5 14.5 5 5M7 10h6m-3-3v6"/>',
+      Icons.zoom_out:
+          '<circle cx="10" cy="10" r="6"/><path d="m14.5 14.5 5 5M7 10h6"/>',
+      Icons.fit_screen: '<rect x="3" y="5" width="18" height="14"/><rect x="6" y="8" width="12" height="8"/>',
+      Icons.aspect_ratio: '<rect x="3" y="5" width="18" height="14"/><path d="M7 11V9h3m4 6h3v-2"/>',
+      Icons.rotate_right: '<path d="M8 5H4v4m0-4 4 4M10 9h11v10H6v-7"/>',
+      Icons.edit_outlined:
+          '<path d="M12 4H4v16h16v-8M9 15l2-5L20 1l3 3-9 9-5 2Z"/>',
+      Icons.fullscreen: '<path d="M8 4H4v4m12-4h4v4M4 16v4h4m12-4v4h-4M8 8l3 3m5-3-3 3m-5 5 3-3m5 3-3-3"/>',
+      Icons.minimize: '<path d="M7 12h10"/>',
+      Icons.crop_square: '<rect x="6" y="6" width="12" height="12"/>',
+      Icons.filter_none: '<path d="M9 6V3h12v12h-3"/><rect x="3" y="9" width="12" height="12"/>',
+    }[icon];
+    if (path == null) return Icon(icon, size: 18, color: color);
+    return SvgPicture.string(
+      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round">$path</svg>',
+      width: 18,
+      height: 18,
+      colorFilter: ColorFilter.mode(color, BlendMode.srcIn),
+    );
+  }
+
   Widget _viewerIcon(
     IconData icon,
     String label,
@@ -781,7 +936,7 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
       height: 40,
       child: Center(
         child: Material(
-          color: active ? const Color(0xffd5d5d7) : Colors.transparent,
+          color: Colors.transparent,
           borderRadius: BorderRadius.circular(3),
           child: InkWell(
             onTap: action,
@@ -789,11 +944,12 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
             child: SizedBox(
               width: 28,
               height: 28,
-              child: Icon(
+              child: _viewerGlyph(
                 icon,
-                size: 18,
-                color: action == null
+                action == null
                     ? const Color(0xffb5b5b5)
+                    : active
+                    ? const Color(0xff27c36c)
                     : const Color(0xff57585a),
               ),
             ),
@@ -807,8 +963,11 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
       Container(width: 1, height: 20, color: const Color(0xffcfcfd1));
 
   Widget _viewerToolbar() => Container(
-    height: 41,
-    color: const Color(0xffe8e8ea),
+    height: 42,
+    decoration: const BoxDecoration(
+      color: Color(0xffe8e8ea),
+      border: Border(bottom: BorderSide(color: Color(0xffd7d7d7))),
+    ),
     child: Row(
       children: [
         _viewerIcon(
@@ -821,6 +980,12 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
         if (!_viewerEditing) ...[
           _viewerIcon(Icons.arrow_back, '上一张', null),
           _viewerIcon(Icons.arrow_forward, '下一张', null),
+          _viewerIcon(
+            Icons.apps_outlined,
+            '截图历史',
+            () => setState(() => _historyOpen = !_historyOpen),
+            active: _historyOpen,
+          ),
           _divider(),
           _viewerIcon(Icons.zoom_in, '放大', () {
             _fit = false;
@@ -973,23 +1138,30 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
           PopupMenuButton<String>(
             tooltip: '更多',
             onSelected: _moreAction,
-            constraints: const BoxConstraints.tightFor(width: 160),
+            constraints: const BoxConstraints(minWidth: 160, maxWidth: 224),
+            color: Colors.white,
+            elevation: 3,
+            shadowColor: const Color(0x33000000),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(6),
+              side: const BorderSide(color: Color(0xffdedede)),
+            ),
             itemBuilder: (_) => [
               const PopupMenuItem(
                 value: 'copy',
-                height: 36,
+                height: 32,
                 padding: EdgeInsets.symmetric(horizontal: 10),
                 child: Text('复制', style: TextStyle(fontSize: 14)),
               ),
               const PopupMenuItem(
                 value: 'print',
-                height: 36,
+                height: 32,
                 padding: EdgeInsets.symmetric(horizontal: 10),
                 child: Text('打印', style: TextStyle(fontSize: 14)),
               ),
               PopupMenuItem(
                 value: 'favorite',
-                height: 36,
+                height: 32,
                 padding: const EdgeInsets.symmetric(horizontal: 10),
                 child: Text(
                   _favorite ? '取消收藏' : '收藏',
@@ -998,7 +1170,7 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
               ),
               const PopupMenuItem(
                 value: 'open',
-                height: 36,
+                height: 32,
                 padding: EdgeInsets.symmetric(horizontal: 10),
                 child: Text('使用系统默认方式打开', style: TextStyle(fontSize: 14)),
               ),
@@ -1155,6 +1327,7 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
     return Container(
       color: const Color(0xfff8f8f8),
       child: SingleChildScrollView(
+        key: ValueKey('viewer-scroll-$_originalPath'),
         scrollDirection: Axis.horizontal,
         child: SizedBox(
           width: math.max(bounds.maxWidth, imageWidth),
@@ -1243,72 +1416,103 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
           );
         }
       },
-      child: Stack(
-        children: [
-          Column(
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          border: Border.all(color: const Color(0xffb0b0b0)),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(1),
+          child: Stack(
             children: [
-              if (_toolbar) _viewerToolbar(),
-              if (_viewerEditing && _editTool == AnnotationTool.sticker)
-                ViewerStickerToolbar(onSelected: _selectSticker),
-              Expanded(
-                child: LayoutBuilder(
-                  builder: (_, bounds) => _viewerImage(bounds),
-                ),
-              ),
-            ],
-          ),
-          if (_passThrough)
-            const Positioned(
-              bottom: 16,
-              left: 0,
-              right: 0,
-              child: Center(
-                child: DecoratedBox(
-                  decoration: BoxDecoration(color: Color(0xff4b4b4b)),
-                  child: Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 12, vertical: 7),
-                    child: Text(
-                      '鼠标穿透中 · 5 秒后自动恢复',
-                      style: TextStyle(color: Colors.white, fontSize: 12),
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          if (_editing || _saving || _copying) ...[
-            Positioned.fill(
-              child: ModalBarrier(dismissible: false, color: Color(0x33000000)),
-            ),
-            Positioned.fill(
-              child: Center(
-                child: Card(
-                  child: Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 28, vertical: 22),
+              Column(
+                children: [
+                  if (_toolbar) _viewerToolbar(),
+                  if (_viewerEditing && _editTool == AnnotationTool.sticker)
+                    ViewerStickerToolbar(onSelected: _selectSticker),
+                  Expanded(
                     child: Row(
-                      mainAxisSize: MainAxisSize.min,
                       children: [
-                        SizedBox(
-                          width: 20,
-                          height: 20,
-                          child: CircularProgressIndicator(strokeWidth: 2),
+                        Expanded(
+                          child: ClipRect(
+                            child: LayoutBuilder(
+                              builder: (_, bounds) => _viewerImage(bounds),
+                            ),
+                          ),
                         ),
-                        SizedBox(width: 12),
-                        Text(
-                          _copying
-                              ? '复制中…'
-                              : _saving
-                              ? '保存图片中…'
-                              : '保存修改中',
-                          style: const TextStyle(fontSize: 14),
-                        ),
+                        if (_historyOpen)
+                          ScreenshotHistory(
+                            currentPath: _originalPath,
+                            revision: _historyRevision,
+                            onSelected: _switchHistoryImage,
+                          ),
                       ],
                     ),
                   ),
-                ),
+                ],
               ),
-            ),
-          ],
-        ],
+              if (_passThrough)
+                const Positioned(
+                  bottom: 16,
+                  left: 0,
+                  right: 0,
+                  child: Center(
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(color: Color(0xff4b4b4b)),
+                      child: Padding(
+                        padding: EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 7,
+                        ),
+                        child: Text(
+                          '鼠标穿透中 · 5 秒后自动恢复',
+                          style: TextStyle(color: Colors.white, fontSize: 12),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              if (_editing || _saving || _copying) ...[
+                Positioned.fill(
+                  child: ModalBarrier(
+                    dismissible: false,
+                    color: Color(0x33000000),
+                  ),
+                ),
+                Positioned.fill(
+                  child: Center(
+                    child: Card(
+                      child: Padding(
+                        padding: EdgeInsets.symmetric(
+                          horizontal: 28,
+                          vertical: 22,
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            SizedBox(
+                              width: 20,
+                              height: 20,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            ),
+                            SizedBox(width: 12),
+                            Text(
+                              _copying
+                                  ? '复制中…'
+                                  : _saving
+                                  ? '保存图片中…'
+                                  : '保存修改中',
+                              style: const TextStyle(fontSize: 14),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
       ),
     ),
   );

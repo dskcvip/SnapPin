@@ -92,6 +92,13 @@ class _Session {
         if (call.method != 'invokeMethod') return null;
         final args = Map<dynamic, dynamic>.from(call.arguments as Map);
         dispatched.add(args);
+        if (args['method'] == 'archiveScreenshot') {
+          final path = '${directory.path}/snappin_20261107000000_0001.png';
+          File(
+            path,
+          ).writeAsBytesSync((args['arguments'] as Map)['bytes'] as Uint8List);
+          return path;
+        }
         if (args['method'] == 'recognizeText') {
           if (rejectOcr) throw PlatformException(code: 'ocr_test_failure');
           final crop = img.decodePng(args['arguments'] as Uint8List)!;
@@ -112,7 +119,10 @@ class _Session {
     ) async {
       if (call.method == 'writeImage') {
         copied = call.arguments is Uint8List
-            ? call.arguments as Uint8List
+            ? (call.arguments is Map
+                      ? (call.arguments as Map)['bytes']
+                      : call.arguments)
+                  as Uint8List
             : File((call.arguments as Map)['fileName'] as String)
                   .readAsBytesSync();
       }
@@ -366,8 +376,11 @@ void main() {
         expect(pin['topmost'], isFalse);
         expect((image.width, image.height), (1000, 500));
       } else if (action == _translate) {
-        expect(session.created.single['role'], 'translation');
-        expect(session.created.single['source'], '本地识别文字');
+        expect(session.created.map((item) => item['role']), [
+          'translation',
+          'pin',
+        ]);
+        expect(session.created.first['source'], '本地识别文字');
       } else if (action == '贴图到屏幕') {
         expect(session.created.single['role'], 'pin');
         expect(session.created.single['topmost'], isTrue);
@@ -379,6 +392,9 @@ void main() {
         final image = img.decodePng(File(session.saved).readAsBytesSync())!;
         expect((image.width, image.height), (1000, 500));
       } else if (action == _long) {
+        // A successful exclusion API call must not keep a full-screen input
+        // surface over GDI capture, especially on a reused overlay engine.
+        expect(session.native.map((call) => call.method), contains('hide'));
         final border = tester
             .widgetList<CustomPaint>(find.byType(CustomPaint))
             .singleWhere(
@@ -451,7 +467,7 @@ void main() {
   });
 
   testWidgets(
-    'failed pin creation retains selection and releases unclaimed image files',
+    'failed pin creation retains selection and preserves the archived screenshot',
     (tester) async {
       final session = _Session()..rejectPin = true;
       await session.open(tester);
@@ -466,8 +482,7 @@ void main() {
       expect(find.textContaining('贴图失败，截图选区已保留'), findsOneWidget);
       expect(find.byTooltip('矩形'), findsOneWidget);
       final path = session.created.single['path'] as String;
-      expect(File(path).existsSync(), false);
-      expect(Directory(File(path).parent.path).existsSync(), false);
+      expect(File(path).existsSync(), true);
       expect(
         session.dispatched.any((call) => call['method'] == 'captureFinished'),
         false,

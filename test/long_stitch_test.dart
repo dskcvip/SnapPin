@@ -41,6 +41,132 @@ Uint8List _frameWithFixedHeader(int top) {
 }
 
 void main() {
+  test('overlap joins remove repeated viewport corner artifacts on both edges without changing width', () async {
+    Uint8List corners(int top) {
+      final image = img.decodePng(_frame(top))!;
+      for (final y0 in [0, image.height - 6]) {
+        for (var y = y0; y < y0 + 6; y++) {
+          for (var x = 0; x < 5; x++) {
+            image.setPixelRgb(x, y, 0, 0, 0);
+            image.setPixelRgb(image.width - x - 1, y, 0, 0, 0);
+          }
+        }
+      }
+      return Uint8List.fromList(img.encodePng(image));
+    }
+
+    final session = LongStitchSession.start(corners(500));
+    for (final top in [700, 900, 1100, 900, 700, 500, 300, 100, 0]) {
+      session.push(corners(top));
+    }
+    final directory = Directory.systemTemp.createTempSync('snappin-corners-');
+    addTearDown(() => directory.deleteSync(recursive: true));
+    final file = await session.savePng(File('${directory.path}/result.png'));
+    final result = img.decodePng(await file.readAsBytes())!;
+    expect(result.width, 160);
+    expect(result.height, 1700);
+    for (var y = 6; y < result.height - 6; y++) {
+      for (final x in [0, 1, 158, 159]) {
+        final pixel = result.getPixel(x, y);
+        final seed = (y * 1103515245 + 12345) & 0x7fffffff;
+        expect(
+          [pixel.r, pixel.g, pixel.b],
+          [
+            ((seed >> 16) + x * 5) % 256,
+            ((seed >> 9) + x * 3) % 256,
+            ((seed >> 2) + x * 7) % 256,
+          ],
+          reason: 'edge x=$x y=$y',
+        );
+      }
+    }
+  });
+
+  test('repeated browser blocks with a fixed tooltip retain every row on fast reversal', () async {
+    final page = img.decodePng(
+      File('test/fixtures/long-scroll-page.png').readAsBytesSync(),
+    )!;
+    const frameHeight = 976;
+    final last = page.height - frameHeight;
+    final positions = [
+      8000,
+      for (var top = 8730; top < last; top += 730) top,
+      last,
+      for (var top = last - 710; top > 0; top -= 710) top,
+      0,
+    ];
+    img.Image frame(int top) {
+      final image = img.copyCrop(
+        page,
+        x: 0,
+        y: top,
+        width: page.width,
+        height: frameHeight,
+      );
+      img.fillRect(
+        image,
+        x1: 705,
+        y1: 80,
+        x2: 842,
+        y2: 200,
+        color: img.ColorRgb8(255, 255, 255),
+      );
+      img.drawString(
+        image,
+        'STATIC POPUP',
+        font: img.arial14,
+        x: 710,
+        y: 100,
+        color: img.ColorRgb8(0, 0, 0),
+      );
+      return image;
+    }
+
+    final first = frame(positions.first);
+    final session = LongStitchSession.startRgba(
+      first.getBytes(order: img.ChannelOrder.rgba),
+      page.width,
+      frameHeight,
+    );
+    final directory = await Directory.systemTemp.createTemp('snappin-blocks-');
+    try {
+      var minimum = positions.first, maximum = positions.first;
+      for (var index = 1; index < positions.length; index++) {
+        final top = positions[index];
+        final image = frame(top);
+        final step = index.isEven
+            ? session.push(Uint8List.fromList(img.encodePng(image)))
+            : session.pushRgba(
+                image.getBytes(order: img.ChannelOrder.rgba),
+                page.width,
+                frameHeight,
+              );
+        if (top < minimum) minimum = top;
+        if (top > maximum) maximum = top;
+        expect(step.kind, isNot(LongStepKind.noMatch), reason: 'top=$top');
+        expect(
+          session.height,
+          maximum - minimum + frameHeight,
+          reason: 'top=$top',
+        );
+      }
+      final file = await session.savePng(File('${directory.path}/full.png'));
+      final output = img.decodePng(await file.readAsBytes())!;
+      expect((output.width, output.height), (page.width, page.height));
+      // Ignore the fixed popup itself; verify the source rows on either side
+      // of every block boundary, including text and the unique barcode.
+      for (var y = 0; y < page.height; y++) {
+        for (final x in [4, 30, 130, 300, 590]) {
+          final a = output.getPixel(x, y), b = page.getPixel(x, y);
+          expect((a.r, a.g, a.b), (b.r, b.g, b.b), reason: 'x=$x y=$y');
+        }
+      }
+    } finally {
+      session.dispose();
+      await directory.delete(recursive: true);
+    }
+  });
+
   test(
     'raw worker preserves fast scroll, reversal and detached recovery pixels',
     () async {

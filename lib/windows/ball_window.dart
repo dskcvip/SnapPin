@@ -18,6 +18,8 @@ import '../capture_bridge.dart';
 import 'app_menu_metrics.dart';
 import '../app_config.dart';
 import '../app_log.dart';
+import '../screenshot_archive.dart';
+import '../window_roles.dart';
 import '../owned_images.dart';
 import '../ocr_bridge.dart';
 import '../translation_service.dart';
@@ -54,6 +56,7 @@ class _BallWindowState extends State<BallWindow>
   final _longResult = LongResultDelivery();
   Timer? _longTimer;
   bool _longSampling = false;
+  final _screenshotArchive = ScreenshotArchive();
   int _longSkippedTicks = 0;
   bool _longStopping = false;
   bool _longStarting = false;
@@ -92,6 +95,31 @@ class _BallWindowState extends State<BallWindow>
         );
       }
       if (call.method == 'longStop') await _finishLongCapture();
+      if (call.method == 'listScreenshots') {
+        return jsonEncode(await _screenshotArchive.list());
+      }
+      if (call.method == 'archiveScreenshot') {
+        final arguments = call.arguments;
+        final data = arguments is Map
+            ? arguments['bytes'] as Uint8List
+            : arguments as Uint8List;
+        final source = arguments is Map
+            ? arguments['source'] as String
+            : 'capture';
+        final config = await ConfigStore.load();
+        if (!config.archiveSources.contains(source)) {
+          final directory = await OwnedImages.create();
+          final file = File(
+            '${directory.path}${Platform.pathSeparator}pin.png',
+          );
+          await file.writeAsBytes(data, flush: true);
+          AppLog.write('screenshot-archive-skipped', 'source=$source');
+          return file.path;
+        }
+        final saved = await _screenshotArchive.savePng(data);
+        unawaited(_notifyScreenshotHistory());
+        return saved.path;
+      }
       if (call.method == 'longCancel') await _cancelLongCapture();
       if (call.method == 'menuAction') {
         AppLog.write('menu-dispatch', call.arguments);
@@ -195,6 +223,11 @@ class _BallWindowState extends State<BallWindow>
       if (Platform.isMacOS) await CaptureBridge.mainBallReady();
       await windowManager.show();
       AppLog.write('ball-ready');
+      unawaited(
+        _screenshotArchive.prepare().catchError((Object error) {
+          AppLog.write('screenshot-archive-prepare-failed', error);
+        }),
+      );
       if (Platform.isMacOS) {
         try {
           AppLog.write(
@@ -520,6 +553,21 @@ class _BallWindowState extends State<BallWindow>
     );
   }
 
+  Future<void> _notifyScreenshotHistory() async {
+    try {
+      for (final window in await WindowController.getAll()) {
+        if (windowRole(window) != 'pin') continue;
+        try {
+          await window.invokeMethod<void>('archiveChanged');
+        } catch (error) {
+          AppLog.write('archive-notify-window-failed', error);
+        }
+      }
+    } catch (error) {
+      AppLog.write('archive-notify-failed', error);
+    }
+  }
+
   Future<void> _pinClipboard() async {
     AppLog.write('pin-clipboard-start');
     String? unclaimedPath;
@@ -530,6 +578,11 @@ class _BallWindowState extends State<BallWindow>
       final frame = await codec.getNextFrame();
       final width = frame.image.width.toDouble();
       final height = frame.image.height.toDouble();
+      final pngData = await frame.image.toByteData(
+        format: ui.ImageByteFormat.png,
+      );
+      if (pngData == null) throw StateError('剪贴板图片无法转换为 PNG');
+      final pngBytes = pngData.buffer.asUint8List();
       frame.image.dispose();
       codec.dispose();
       final display = await screenRetriever.getPrimaryDisplay();
@@ -540,10 +593,17 @@ class _BallWindowState extends State<BallWindow>
         1.0,
         math.min(900 / logicalWidth, 700 / logicalHeight),
       );
-      final directory = await OwnedImages.create();
-      final path = '${directory.path}${Platform.pathSeparator}pin.png';
-      unclaimedPath = path;
-      await File(path).writeAsBytes(bytes);
+      final config = await ConfigStore.load();
+      final String path;
+      if (config.archiveSources.contains('pin')) {
+        path = (await _screenshotArchive.savePng(pngBytes)).path;
+        unawaited(_notifyScreenshotHistory());
+      } else {
+        final directory = await OwnedImages.create();
+        path = '${directory.path}${Platform.pathSeparator}pin.png';
+        unclaimedPath = path;
+        await File(path).writeAsBytes(pngBytes);
+      }
       await WindowController.create(
         WindowConfiguration(
           arguments: jsonEncode({
@@ -930,6 +990,7 @@ class _BallWindowState extends State<BallWindow>
               'direction=${step.direction} previewScale=${_longSession!.previewScale.toStringAsFixed(4)} '
               'canvasBytes=${_longSession!.width * step.height * 4} steps=${step.steps} '
               'score=${step.score.toStringAsFixed(3)} diff=${step.diff.toStringAsFixed(2)} '
+              'matchedRows=${step.matchedRows} overlapRows=${step.overlapRows} '
               'transport=${raw == null ? 'png' : 'rgba'} bytes=${frame.length} capture=${captureMs}ms stitch=${stitchMs}ms '
               'total=${DateTime.now().difference(sampledAt).inMilliseconds}ms',
         );
@@ -1071,10 +1132,24 @@ class _BallWindowState extends State<BallWindow>
         final directory = await OwnedImages.create();
         final path = '${directory.path}${Platform.pathSeparator}long.png';
         await session.savePng(File(path));
+        final File archived;
+        try {
+          final config = await ConfigStore.load();
+          archived = config.archiveSources.contains('longCapture')
+              ? await _screenshotArchive.saveFile(File(path))
+              : File(path);
+        } catch (_) {
+          await OwnedImages.delete(directory.path, [path]);
+          rethrow;
+        }
+        if (archived.path != path) {
+          await File(path).delete();
+          unawaited(_notifyScreenshotHistory());
+        }
         // Save recovery metadata before doing anything that depends on a window.
         _longResult.pending = {
           'role': 'pin',
-          'path': path,
+          'path': archived.path,
           'width': session.width,
           'height': session.height,
           'pixelWidth': session.width,
@@ -1084,7 +1159,7 @@ class _BallWindowState extends State<BallWindow>
           if (reason == 'capture-error') 'notice': '采集异常，已保留此前截取的完整内容',
         };
         exported = true;
-        AppLog.write('long-result-saved', path);
+        AppLog.write('long-result-saved', archived.path);
         String? firstTilePath;
         try {
           final tilePath =
@@ -1095,6 +1170,7 @@ class _BallWindowState extends State<BallWindow>
         } catch (error) {
           // The full-resolution export already succeeded; still open that result.
           AppLog.write('long-result-first-tile-failed', error);
+          await OwnedImages.delete(directory.path, []);
         }
         _longResult.pending!['firstTilePath'] = firstTilePath;
       }

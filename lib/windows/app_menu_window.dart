@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../app_log.dart';
+import 'menu_surface.dart';
 import 'app_menu_metrics.dart';
 import '../window_roles.dart';
 
@@ -136,23 +137,7 @@ class _AppMenuWindowState extends State<AppMenuWindow> with WindowListener {
         Padding(
           padding: const EdgeInsets.all(18),
           child: Container(
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(12),
-              boxShadow: const [
-                BoxShadow(color: Color(0x140f172a), spreadRadius: 1),
-                BoxShadow(
-                  color: Color(0x2e0f172a),
-                  blurRadius: 16,
-                  offset: Offset(0, 6),
-                ),
-                BoxShadow(
-                  color: Color(0x1f0f172a),
-                  blurRadius: 3,
-                  offset: Offset(0, 1),
-                ),
-              ],
-            ),
+            decoration: desktopMenuDecoration,
             padding: const EdgeInsets.all(6),
             child: Column(
               mainAxisSize: MainAxisSize.min,
@@ -192,13 +177,13 @@ class _AppMenuWindowState extends State<AppMenuWindow> with WindowListener {
   );
 
   Widget _item(String label, String shortcut, VoidCallback action) => SizedBox(
-    height: 34,
+    height: desktopMenuRowHeight,
     child: Material(
       color: Colors.transparent,
       child: InkWell(
         onTap: action,
-        borderRadius: BorderRadius.circular(7),
-        hoverColor: const Color(0x0f0f172a),
+        borderRadius: BorderRadius.circular(desktopMenuRadius),
+        hoverColor: desktopMenuHover,
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 10),
           child: Row(
@@ -207,7 +192,7 @@ class _AppMenuWindowState extends State<AppMenuWindow> with WindowListener {
                 child: Text(
                   label,
                   style: const TextStyle(
-                    fontSize: 13.5,
+                    fontSize: 14,
                     color: Color(0xff1f2933),
                   ),
                 ),

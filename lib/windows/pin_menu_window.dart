@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../app_log.dart';
+import 'menu_surface.dart';
 
 class PinMenuWindow extends StatefulWidget {
   const PinMenuWindow({
@@ -162,7 +163,7 @@ class _PinMenuWindowState extends State<PinMenuWindow> with WindowListener {
                             const Text(
                               '不透明度',
                               style: TextStyle(
-                                fontSize: 13.5,
+                                fontSize: 14,
                                 color: Color(0xff1f2933),
                               ),
                             ),
@@ -395,23 +396,7 @@ class _PinMenuWindowState extends State<PinMenuWindow> with WindowListener {
       Container(
         width: width,
         padding: const EdgeInsets.all(6),
-        decoration: BoxDecoration(
-          color: Colors.white,
-          border: Border.all(color: const Color(0x140f172a)),
-          borderRadius: BorderRadius.circular(12),
-          boxShadow: const [
-            BoxShadow(
-              color: Color(0x2e0f172a),
-              blurRadius: 16,
-              offset: Offset(0, 6),
-            ),
-            BoxShadow(
-              color: Color(0x1f0f172a),
-              blurRadius: 3,
-              offset: Offset(0, 1),
-            ),
-          ],
-        ),
+        decoration: desktopMenuDecoration,
         child: Column(mainAxisSize: MainAxisSize.min, children: children),
       );
 
@@ -425,7 +410,7 @@ class _PinMenuWindowState extends State<PinMenuWindow> with WindowListener {
     String? parentMenu,
     bool reserveCheck = true,
   }) => SizedBox(
-    height: 34,
+    height: desktopMenuRowHeight,
     child: MouseRegion(
       onEnter: (_) {
         if (submenu != null) setState(() => _submenu = submenu);
@@ -437,7 +422,7 @@ class _PinMenuWindowState extends State<PinMenuWindow> with WindowListener {
       child: Material(
         color: Colors.transparent,
         child: InkWell(
-          hoverColor: const Color(0x100f172a),
+          hoverColor: desktopMenuHover,
           onTap: () {
             if (submenu != null) {
               setState(() => _submenu = submenu);
@@ -463,7 +448,7 @@ class _PinMenuWindowState extends State<PinMenuWindow> with WindowListener {
                     label,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
-                      fontSize: 13.5,
+                      fontSize: 14,
                       color: Color(0xff1f2933),
                     ),
                   ),

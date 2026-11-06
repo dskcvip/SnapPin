@@ -9,8 +9,8 @@ import 'package:image/image.dart' as img;
 import 'atomic_file.dart';
 import 'app_log.dart';
 
-String defaultSaveName() {
-  final now = DateTime.now();
+String defaultSaveName({DateTime? time}) {
+  final now = time ?? DateTime.now();
   final stamp = [
     now.year.toString().padLeft(4, '0'),
     now.month.toString().padLeft(2, '0'),

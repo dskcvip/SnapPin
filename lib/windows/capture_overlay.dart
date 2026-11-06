@@ -6,6 +6,7 @@ import 'dart:ui' as ui;
 
 import 'package:desktop_multi_window/desktop_multi_window.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:pasteboard/pasteboard.dart';
@@ -17,7 +18,6 @@ import 'capture_exit_dialog.dart';
 import 'ocr_window.dart' show showOcrResult;
 import '../app_log.dart';
 import '../platform_labels.dart';
-import '../owned_images.dart';
 import '../ocr_document.dart';
 import '../window_capture_exclusion.dart';
 import '../image_save.dart';
@@ -464,7 +464,7 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
         'capture-ocr-recognized',
         'characters=${text.length} ${watch.elapsedMilliseconds}ms',
       );
-      await _openPin(await _crop(), selection, topmost: false);
+      await _openPin(await _crop(), selection, topmost: false, source: 'ocr');
       AppLog.write('capture-ocr-pin-opened', '${watch.elapsedMilliseconds}ms');
       await showOcrResult(bytes, text, document: document);
       AppLog.write(
@@ -526,6 +526,12 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
           ),
         );
       }
+      await _openPin(
+        await _crop(),
+        selection,
+        topmost: false,
+        source: 'translation',
+      );
       await _close(reason: 'translation-result');
     } catch (error) {
       AppLog.write('capture-translation-failed', error);
@@ -668,7 +674,9 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
   }
 
   Future<void> _copy() => _performOutput('复制', () async {
-    await Pasteboard.writeImage(await _crop());
+    final bytes = await _crop();
+    await Pasteboard.writeImage(bytes);
+    await _openPin(bytes, _validSelection!, source: 'capture');
     await _close(reason: 'copy-completed');
     try {
       await WindowController.create(
@@ -684,13 +692,15 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
   });
 
   Future<void> _save() => _performOutput('保存', () async {
-    if (!await saveImage(await _crop())) return;
+    final bytes = await _crop();
+    if (!await saveImage(bytes)) return;
+    await _openPin(bytes, _validSelection!, source: 'capture');
     await _close(reason: 'save-completed');
   });
 
   Future<void> _pin() => _performOutput('贴图', () async {
     final bytes = await _crop();
-    await _openPin(bytes, _validSelection!);
+    await _openPin(bytes, _validSelection!, source: 'pin');
     await _close(reason: 'pin-opened');
   });
 
@@ -713,35 +723,44 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
     }
   }
 
+  Uint8List? _archivedBytes;
+  String? _archivedPath;
+  String? _archivedSource;
+
   Future<void> _openPin(
     Uint8List bytes,
     Rect rect, {
     bool topmost = true,
+    String source = 'pin',
   }) async {
-    final directory = await OwnedImages.create();
-    final path = '${directory.path}${Platform.pathSeparator}pin.png';
-    try {
-      await File(path).writeAsBytes(bytes);
-      await WindowController.create(
-        WindowConfiguration(
-          arguments: jsonEncode({
-            'role': 'pin',
-            'topmost': topmost,
-            'path': path,
-            'width': rect.width + 20,
-            'height': rect.height + 20,
-            'pixelWidth': (rect.width * _display.scale).round(),
-            'pixelHeight': (rect.height * _display.scale).round(),
-            'x': _display.x + rect.left - 10,
-            'y': _display.y + rect.top - 10,
-          }),
-          hiddenAtLaunch: true,
-        ),
-      );
-    } catch (_) {
-      await OwnedImages.delete(directory.path, [path]);
-      rethrow;
-    }
+    final ball = await findBallWindow();
+    if (ball == null) throw StateError('主窗口不可用，无法归档截图');
+    final path = _archivedSource == source && listEquals(_archivedBytes, bytes)
+        ? _archivedPath
+        : await ball.invokeMethod<String>('archiveScreenshot', {
+            'bytes': bytes,
+            'source': source,
+          });
+    if (path == null) throw StateError('未收到截图归档确认');
+    _archivedBytes = bytes;
+    _archivedPath = path;
+    _archivedSource = source;
+    await WindowController.create(
+      WindowConfiguration(
+        arguments: jsonEncode({
+          'role': 'pin',
+          'topmost': topmost,
+          'path': path,
+          'width': rect.width + 20,
+          'height': rect.height + 20,
+          'pixelWidth': (rect.width * _display.scale).round(),
+          'pixelHeight': (rect.height * _display.scale).round(),
+          'x': _display.x + rect.left - 10,
+          'y': _display.y + rect.top - 10,
+        }),
+        hiddenAtLaunch: true,
+      ),
+    );
   }
 
   Future<void> _startLongCapture() async {
@@ -772,11 +791,14 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
           );
         }
       }
-      if (Platform.isMacOS) {
+      if (Platform.isMacOS || Platform.isWindows) {
         // Same rule as Tauri: keep the full-screen input surface hidden for
         // the entire manual scroll session, never show it between samples.
         await windowManager.hide();
-        AppLog.write('long-overlay-guide-hidden', 'macos manual scrolling');
+        AppLog.write(
+          'long-overlay-guide-hidden',
+          '${Platform.operatingSystem} manual scrolling; full-screen surface removed before sampling',
+        );
       }
       await Future<void>.delayed(const Duration(milliseconds: 80));
       final ball = await findBallWindow();

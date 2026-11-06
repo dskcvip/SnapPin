@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <shellscalingapi.h>
 #include <gdiplus.h>
+#include <dwmapi.h>
 #include <objidl.h>
 
 #include <atomic>
@@ -174,4 +175,66 @@ std::vector<uint8_t> CaptureRegion(int x, int y, int width, int height) {
   stream->Release();
   Gdiplus::GdiplusShutdown(token);
   return bytes;
+}
+
+// Own test windows only: verify the production GDI path after hiding a reused
+// capture surface. Never send input or change the user's browser window.
+flutter::EncodableList CaptureRepeatedRegionSmoke() {
+  wchar_t mode[32]{};
+  if (!GetEnvironmentVariableW(L"SNAPPIN_RUNTIME_SMOKE", mode, 32)) {
+    throw std::runtime_error("Capture regression requires runtime smoke mode");
+  }
+  const auto instance = GetModuleHandleW(nullptr);
+  HBRUSH brush = CreateSolidBrush(RGB(37, 157, 211));
+  WNDCLASSW fixture_class{};
+  fixture_class.lpfnWndProc = DefWindowProcW;
+  fixture_class.hInstance = instance;
+  fixture_class.hbrBackground = brush;
+  fixture_class.lpszClassName = L"SnapPinRepeatedCaptureFixture";
+  const auto fixture_atom = RegisterClassW(&fixture_class);
+  WNDCLASSW cover_class = fixture_class;
+  cover_class.hbrBackground = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
+  cover_class.lpszClassName = L"SnapPinRepeatedCaptureSurface";
+  const auto cover_atom = RegisterClassW(&cover_class);
+  RECT work{};
+  SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+  const int x = work.left + 40, y = work.top + 40;
+  HWND fixture = nullptr, cover = nullptr;
+  const auto cleanup = [&]() {
+    if (cover) DestroyWindow(cover);
+    if (fixture) DestroyWindow(fixture);
+    if (cover_atom) UnregisterClassW(cover_class.lpszClassName, instance);
+    if (fixture_atom) UnregisterClassW(fixture_class.lpszClassName, instance);
+    DeleteObject(brush);
+  };
+  try {
+    if (!fixture_atom || !cover_atom) throw std::runtime_error("Cannot register capture fixtures");
+    fixture = CreateWindowExW(WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+        fixture_class.lpszClassName, L"SnapPin capture regression", WS_POPUP,
+        x, y, 260, 320, nullptr, nullptr, instance, nullptr);
+    cover = CreateWindowExW(WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW |
+        WS_EX_LAYERED | WS_EX_TRANSPARENT, cover_class.lpszClassName,
+        L"SnapPin capture surface regression", WS_POPUP,
+        x, y, 260, 320, nullptr, nullptr, instance, nullptr);
+    if (!fixture || !cover) throw std::runtime_error("Cannot create capture fixtures");
+    SetLayeredWindowAttributes(cover, 0, 255, LWA_ALPHA);
+    SetWindowDisplayAffinity(cover, 0x11);
+    ShowWindow(fixture, SW_SHOWNOACTIVATE);
+    UpdateWindow(fixture);
+    flutter::EncodableList frames;
+    for (int cycle = 0; cycle < 2; ++cycle) {
+      ShowWindow(cover, SW_SHOWNOACTIVATE);
+      UpdateWindow(cover);
+      DwmFlush();
+      ShowWindow(cover, SW_HIDE);
+      DwmFlush();
+      Sleep(30);
+      frames.push_back(flutter::EncodableValue(CaptureRegion(x, y, 260, 320)));
+    }
+    cleanup();
+    return frames;
+  } catch (...) {
+    cleanup();
+    throw;
+  }
 }

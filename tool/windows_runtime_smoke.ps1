@@ -29,7 +29,7 @@ foreach ($mode in @('normal', 'shutdown')) {
     throw "Runtime smoke failed: $mode exit=$exitCode`n$logs"
   }
   $markers = if ($mode -eq 'normal') {
-    @('runtime-smoke-shadow-ready', 'runtime-smoke-ocr-responsive',
+    @('runtime-smoke-long-repeat-ready', 'runtime-smoke-shadow-ready', 'runtime-smoke-ocr-responsive',
       'runtime-smoke-ocr-busy-ready', 'runtime-smoke-ocr-layout-ready',
       'runtime-smoke-ocr-error-ready', '[runtime-smoke-ready]')
   } else { @('runtime-smoke-ocr-responsive', 'runtime-smoke-shutdown-start') }

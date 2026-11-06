@@ -40,6 +40,19 @@ class TranslationModel {
   };
 }
 
+enum ArchiveSource {
+  capture('普通完成截图'),
+  pin('贴图'),
+  longCapture('长截图结果'),
+  ocr('文字识别截图'),
+  translation('翻译截图');
+
+  const ArchiveSource(this.label);
+  final String label;
+}
+
+const defaultArchiveSources = ['capture', 'pin', 'longCapture'];
+
 class AppConfig {
   const AppConfig({
     this.themeColor = '#12A5D8',
@@ -51,6 +64,7 @@ class AppConfig {
     this.saveDir,
     this.translationModels = const [],
     this.targetLang = '中文',
+    this.archiveSources = defaultArchiveSources,
   });
 
   final String themeColor;
@@ -62,6 +76,7 @@ class AppConfig {
   final String? saveDir;
   final List<TranslationModel> translationModels;
   final String targetLang;
+  final List<String> archiveSources;
 
   AppConfig copyWith({
     String? themeColor,
@@ -73,6 +88,7 @@ class AppConfig {
     String? saveDir,
     List<TranslationModel>? translationModels,
     String? targetLang,
+    List<String>? archiveSources,
   }) => AppConfig(
     themeColor: themeColor ?? this.themeColor,
     ballSize: ballSize ?? this.ballSize,
@@ -83,6 +99,7 @@ class AppConfig {
     saveDir: saveDir ?? this.saveDir,
     translationModels: translationModels ?? this.translationModels,
     targetLang: targetLang ?? this.targetLang,
+    archiveSources: archiveSources ?? this.archiveSources,
   );
 
   factory AppConfig.fromJson(Map<String, dynamic> map) {
@@ -111,6 +128,12 @@ class AppConfig {
           map['shortcutPinClipboard'] as String? ??
           (Platform.isMacOS ? 'Super+2' : 'Ctrl+2'),
       saveDir: map['saveDir'] as String?,
+      archiveSources: map['archiveSources'] is List
+          ? (map['archiveSources'] as List)
+                .whereType<String>()
+                .where((id) => ArchiveSource.values.any((s) => s.name == id))
+                .toList()
+          : defaultArchiveSources,
       translationModels: (translation['models'] as List? ?? const [])
           .whereType<Map>()
           .map(
@@ -131,6 +154,7 @@ class AppConfig {
     'shortcutCapture': shortcutCapture,
     'shortcutPinClipboard': shortcutPinClipboard,
     'saveDir': saveDir,
+    'archiveSources': archiveSources,
     'translation': {
       'models': translationModels.map((model) => model.toJson()).toList(),
       'targetLang': targetLang,

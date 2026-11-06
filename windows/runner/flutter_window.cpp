@@ -193,6 +193,8 @@ bool FlutterWindow::OnCreate() {
             };
             result->Success(flutter::EncodableValue(CaptureRegion(
                 number("x"), number("y"), number("width"), number("height"))));
+          } else if (call.method_name() == "longCaptureSmoke") {
+            result->Success(flutter::EncodableValue(CaptureRepeatedRegionSmoke()));
           } else if (call.method_name() == "suppressInputToolbar") {
             suppress_input_toolbar_ = std::get<bool>(*call.arguments());
             if (suppress_input_toolbar_) {

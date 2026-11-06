@@ -169,6 +169,7 @@ Future<void> main(List<String> args) async {
       await windowManager.waitUntilReadyToShow(
         WindowOptions(
           size: Size(1100, 760),
+          minimumSize: Size(720, 420),
           title: 'SnapPin - 贴图',
           center: true,
           alwaysOnTop: topmost,
@@ -214,12 +215,15 @@ Future<void> main(List<String> args) async {
       await windowManager.setPreventClose(true);
       await windowManager.waitUntilReadyToShow(
         const WindowOptions(
-          size: Size(782, 672),
+          size: Size(900, 680),
+          titleBarStyle: TitleBarStyle.hidden,
           center: true,
           backgroundColor: Colors.white,
           title: 'SnapPin 设置',
         ),
         () async {
+          await windowManager.setAsFrameless();
+          await windowManager.setHasShadow(true);
           await windowManager.show();
           await windowManager.focus();
         },
@@ -310,7 +314,7 @@ Future<void> main(List<String> args) async {
     case 'menu':
       await windowManager.waitUntilReadyToShow(
         const WindowOptions(
-          size: Size(260, 312),
+          size: Size(260, 300),
           alwaysOnTop: true,
           backgroundColor: Colors.transparent,
           skipTaskbar: true,

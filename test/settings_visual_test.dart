@@ -13,7 +13,7 @@ void main() {
   testWidgets('all settings pages fit the Tauri reference window', (
     tester,
   ) async {
-    tester.view.physicalSize = const Size(782, 640);
+    tester.view.physicalSize = const Size(900, 680);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
@@ -120,21 +120,22 @@ void main() {
     await tester.tap(find.text('模型').first);
     await tester.pumpAndSettle();
     final card = find.byKey(const ValueKey('model-list-card'));
-    expect(tester.getTopLeft(card).dx, closeTo(233, 1));
-    expect(tester.getTopLeft(card).dy, closeTo(99, 1));
+    expect(tester.getTopLeft(card).dx, closeTo(232, 1));
+    expect(tester.getTopLeft(card).dy, closeTo(119, 1));
     await tester.tap(find.byTooltip('编辑'));
     await tester.pumpAndSettle();
     final editor = find.byKey(const ValueKey('model-editor-surface'));
     expect(tester.getSize(editor).width, 460);
     expect(tester.getSize(editor).height, closeTo(384, 1));
-    expect(find.byType(TextField), findsNWidgets(6));
-    for (final field in find.byType(TextField).evaluate()) {
+    final fields = find.descendant(
+      of: editor,
+      matching: find.byType(TextField),
+    );
+    expect(fields, findsNWidgets(6));
+    for (final field in fields.evaluate()) {
       expect(tester.getSize(find.byWidget(field.widget)).height, 32);
     }
-    expect(
-      tester.widget<TextField>(find.byType(TextField).at(3)).obscureText,
-      isTrue,
-    );
+    expect(tester.widget<TextField>(fields.at(3)).obscureText, isTrue);
     if (review != null) {
       await tester.runAsync(() async {
         final image =
@@ -151,7 +152,17 @@ void main() {
     expect(find.text('deepseek-flash'), findsOneWidget);
     await tester.tap(find.text('通用').first);
     await tester.pumpAndSettle();
-    expect(tester.getTopLeft(find.text('通用').last).dy, closeTo(20, 1));
+    await tester.tap(find.byTooltip('选择主题色'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(TextButton, '恢复默认'));
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<TextField>(find.byType(TextField).last).controller!.text,
+      const AppConfig().themeColor,
+    );
+    await tester.tap(find.widgetWithText(TextButton, '取消'));
+    await tester.pumpAndSettle();
+    expect(tester.getTopLeft(find.text('常规')).dy, closeTo(40, 1));
     final language = find.byType(TextFormField);
     expect(tester.getSize(language).height, 32);
     await tester.enterText(language, '英文');

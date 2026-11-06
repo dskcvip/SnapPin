@@ -1,4 +1,8 @@
 import 'dart:io';
+import 'dart:convert';
+import 'dart:ui' as ui;
+
+import 'package:flutter/rendering.dart';
 
 import 'package:desktop_multi_window/desktop_multi_window.dart';
 import 'package:flutter/material.dart';
@@ -15,10 +19,28 @@ void main() {
   ) async {
     const manager = MethodChannel('window_manager');
     final nativeCalls = <MethodCall>[];
+    final boundary = GlobalKey();
+    final entries = <Map<String, dynamic>>[];
+    Future<void> snapshot(String name) async {
+      final review = Platform.environment['SNAPPIN_VISUAL_REVIEW'];
+      if (review == null) return;
+      await tester.runAsync(() async {
+        final image =
+            await (boundary.currentContext!.findRenderObject()
+                    as RenderRepaintBoundary)
+                .toImage();
+        final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
+        await File('$review/$name.png')
+            .writeAsBytes(bytes!.buffer.asUint8List());
+        image.dispose();
+      });
+    }
+
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(
           const MethodChannel('mixin.one/desktop_multi_window/channels'),
-          (call) async => null,
+          (call) async =>
+              call.method == 'invokeMethod' ? jsonEncode(entries) : null,
         );
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(manager, (call) async {
@@ -30,6 +52,13 @@ void main() {
           const MethodChannel('mixin.one/desktop_multi_window'),
           (call) async => call.method == 'getWindowDefinition'
               ? {'windowId': 'pin-viewer-test', 'windowArgument': ''}
+              : call.method == 'getAllWindows'
+              ? [
+                  {
+                    'windowId': 'history-ball',
+                    'windowArgument': '{"role":"ball"}',
+                  },
+                ]
               : null,
         );
     final directory = Directory.systemTemp.createTempSync(
@@ -37,9 +66,27 @@ void main() {
     );
     final file = File('${directory.path}/pin.png');
     file.writeAsBytesSync(img.encodePng(img.Image(width: 160, height: 600)));
+    final secondFile = File('${directory.path}/second.png')
+      ..writeAsBytesSync(img.encodePng(img.Image(width: 100, height: 400)));
+    entries.add({
+      'path': secondFile.path,
+      'day': '2026-11-08',
+      'name': 'second.png',
+      'width': 100,
+      'height': 400,
+    });
+    entries.add({
+      'path': file.path,
+      'day': '2026-11-07',
+      'name': 'original.png',
+      'width': 160,
+      'height': 600,
+    });
     try {
       await tester.pumpWidget(
         MaterialApp(
+          builder: (context, child) =>
+              RepaintBoundary(key: boundary, child: child!),
           home: Scaffold(
             body: PinWindow(
               controller: WindowController.fromWindowId('pin-viewer-test'),
@@ -51,7 +98,42 @@ void main() {
       );
       expect(find.byTooltip('图片适应窗口大小'), findsOneWidget);
       expect(find.byTooltip('文字识别'), findsOneWidget);
-      await tester.pump();
+      await tester.pumpAndSettle();
+      await snapshot('贴图结果页');
+      await tester.tap(find.byTooltip('截图历史'));
+      await tester.pumpAndSettle();
+      expect(find.text('2026-11-07'), findsOneWidget);
+      await snapshot('贴图结果页-历史栏');
+      await tester.tap(
+        find.byKey(ValueKey('archive-thumbnail-${secondFile.path}')),
+      );
+      for (var i = 0; i < 30; i++) {
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 20)),
+        );
+        await tester.pump();
+      }
+      await tester.pumpAndSettle();
+      expect(
+        tester.widget<ImagePixels>(find.byType(ImagePixels)).path,
+        secondFile.path,
+      );
+      await tester.tap(find.byKey(ValueKey('archive-thumbnail-${file.path}')));
+      for (var i = 0; i < 30; i++) {
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 20)),
+        );
+        await tester.pump();
+      }
+      await tester.pumpAndSettle();
+      expect(
+        tester.widget<ImagePixels>(find.byType(ImagePixels)).path,
+        file.path,
+      );
+      expect(secondFile.existsSync(), isTrue);
+      await tester.tap(find.byTooltip('截图历史'));
+      await tester.pumpAndSettle();
+      expect(find.text('2026-11-07'), findsNothing);
       await tester.sendKeyEvent(LogicalKeyboardKey.keyY);
       await tester.pump();
       expect(
@@ -71,7 +153,10 @@ void main() {
       final more = tester.widget<PopupMenuButton<String>>(
         find.byType(PopupMenuButton<String>),
       );
-      expect(more.constraints, const BoxConstraints.tightFor(width: 160));
+      expect(
+        more.constraints,
+        const BoxConstraints(minWidth: 160, maxWidth: 224),
+      );
       await tester.tap(find.byTooltip('更多'));
       await tester.pumpAndSettle();
       final open = tester.widget<Text>(find.text('使用系统默认方式打开'));

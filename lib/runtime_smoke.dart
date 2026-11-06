@@ -16,6 +16,35 @@ import 'package:image/image.dart' as img;
 /// Explicit release verification mode, independent of user configuration,
 /// hotkeys, tray, screen permissions and the normal single-instance mutex.
 Future<void> runRuntimeSmoke({required bool shutdownDuringOcr}) async {
+  if (Platform.isWindows && !shutdownDuringOcr) {
+    final frames = await const MethodChannel('snappin/capture')
+        .invokeListMethod<Uint8List>('longCaptureSmoke');
+    if (frames == null || frames.length != 2) {
+      throw StateError('Missing consecutive capture frames');
+    }
+    for (final frame in frames) {
+      final image = img.decodePng(frame)!;
+      if (image.width != 260 || image.height != 320) {
+        throw StateError('Consecutive capture dimensions changed');
+      }
+      for (final y in [5, 160, 315]) {
+        for (final x in [5, 130, 255]) {
+          final pixel = image.getPixel(x, y);
+          if ((pixel.r - 37).abs() > 1 ||
+              (pixel.g - 157).abs() > 1 ||
+              (pixel.b - 211).abs() > 1) {
+            throw StateError(
+              'Hidden/reused capture surface obscured source pixels',
+            );
+          }
+        }
+      }
+    }
+    AppLog.write(
+      'runtime-smoke-long-repeat-ready',
+      'cycles=2 originalPixels=true',
+    );
+  }
   if (Platform.isMacOS) {
     final status = await const MethodChannel('snappin/capture')
         .invokeMapMethod<String, dynamic>('capturePermissionStatus');
