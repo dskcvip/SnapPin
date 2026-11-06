@@ -219,7 +219,7 @@ class MainFlutterWindow: NSWindow {
             return
           }
           result(Self.windowSnap(args, excluding: self.windowNumber))
-        case "captureRegion":
+        case "captureRegion", "captureRegionRaw":
           guard let args = call.arguments as? [String: Int],
                 let x = args["x"], let y = args["y"],
                 let width = args["width"], let height = args["height"] else {
@@ -230,13 +230,29 @@ class MainFlutterWindow: NSWindow {
           let excluded = Self.captureExcludedWindows.intersection(existing)
           Self.regionSequence += 1
           let sequence = Self.regionSequence
+          let raw = call.method == "captureRegionRaw"
+          let started = DispatchTime.now().uptimeNanoseconds
           if sequence <= 20 || sequence % 20 == 0 {
             MacStartupLog.write("long-native-capture-start", "sequence=\(sequence) rect=\(x),\(y),\(width),\(height) excluded=\(excluded.sorted()) frontmost=\(NSWorkspace.shared.frontmostApplication?.processIdentifier ?? -1)")
           }
           DispatchQueue.global(qos: .userInitiated).async {
             do {
-              let image = try Self.captureRegion(x: x, y: y, width: width, height: height, excluding: excluded)
-              DispatchQueue.main.async { result(FlutterStandardTypedData(bytes: image)) }
+              if raw {
+                let image = try Self.captureRegionImage(x: x, y: y, width: width, height: height, excluding: excluded)
+                let captured = DispatchTime.now().uptimeNanoseconds
+                let pixels = try Self.regionPixels(image)
+                let packed = DispatchTime.now().uptimeNanoseconds
+                DispatchQueue.main.async {
+                  result(pixels)
+                  if sequence <= 20 || sequence % 20 == 0 {
+                    let ended = DispatchTime.now().uptimeNanoseconds
+                    MacStartupLog.write("long-native-capture-end", "sequence=\(sequence) transport=rgba pixels=\(image.width)x\(image.height) captureMs=\((captured - started) / 1_000_000) packMs=\((packed - captured) / 1_000_000) totalMs=\((ended - started) / 1_000_000)")
+                  }
+                }
+              } else {
+                let image = try Self.captureRegion(x: x, y: y, width: width, height: height, excluding: excluded)
+                DispatchQueue.main.async { result(FlutterStandardTypedData(bytes: image)) }
+              }
             } catch {
               DispatchQueue.main.async {
                 result(FlutterError(code: "capture_failed", message: error.localizedDescription, details: nil))
@@ -675,6 +691,7 @@ class MainFlutterWindow: NSWindow {
     var excluded = Set<CGWindowID>()
     let positions = [0, 40, 80, 40, 0, 120]
     var frames: [FlutterStandardTypedData] = []
+    var rawFrames: [[String: Any]] = []
     var finished = false
     func saveFrame(_ data: Data, name: String) {
       if let directory = ProcessInfo.processInfo.environment["SNAPPIN_SMOKE_REPORT"] {
@@ -694,15 +711,19 @@ class MainFlutterWindow: NSWindow {
         result(FlutterError(code: "long_smoke_failed", message: error, details: nil))
       } else {
         MacStartupLog.write("long-native-smoke-ready", "frames=\(frames.count) wheelEvents=\(view.scrollEvents) nonactivating=true excluded=true")
-        result(["frames": frames, "positions": positions, "logicalHeight": Int(rect.height),
+        result(["frames": frames, "rawFrames": rawFrames, "positions": positions, "logicalHeight": Int(rect.height),
                 "wheelEvents": view.scrollEvents, "nonactivating": true])
       }
     }
     func sample(_ index: Int) {
       do {
         guard fixture.isKeyWindow else { finish("Preview stole keyboard focus"); return }
-        let data = try captureRegion(x: Int(region.minX), y: Int(region.minY),
+        let image = try captureRegionImage(x: Int(region.minX), y: Int(region.minY),
                                      width: Int(region.width), height: Int(region.height), excluding: excluded)
+        guard let data = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else {
+          finish("Cannot encode smoke frame"); return
+        }
+        rawFrames.append(try regionPixels(image))
         saveFrame(data, name: "long-frame-\(index).png")
         guard let bitmap = NSBitmapImageRep(data: data), !smokeCoverVisible(bitmap) else {
           finish("Excluded preview leaked into captured frame"); return
@@ -794,6 +815,32 @@ class MainFlutterWindow: NSWindow {
   /// Keep preview/guide visible without including them or stealing focus.
   private static func captureRegion(x: Int, y: Int, width: Int, height: Int,
                                     excluding excluded: Set<CGWindowID> = []) throws -> Data {
+    let image = try captureRegionImage(x: x, y: y, width: width, height: height, excluding: excluded)
+    guard let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else {
+      throw NSError(domain: "SnapPin", code: 12, userInfo: [NSLocalizedDescriptionKey: "Cannot encode region"])
+    }
+    return png
+  }
+
+  private static func regionPixels(_ image: CGImage) throws -> [String: Any] {
+    var data = Data(count: image.width * image.height * 4)
+    let rendered = data.withUnsafeMutableBytes { bytes -> Bool in
+      guard let context = CGContext(data: bytes.baseAddress,
+          width: image.width, height: image.height, bitsPerComponent: 8,
+          bytesPerRow: image.width * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+          bitmapInfo: CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+      context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+      return true
+    }
+    guard rendered else {
+      throw NSError(domain: "SnapPin", code: 13, userInfo: [NSLocalizedDescriptionKey: "Cannot read region pixels"])
+    }
+    return ["width": image.width, "height": image.height,
+            "rgba": FlutterStandardTypedData(bytes: data)]
+  }
+
+  private static func captureRegionImage(x: Int, y: Int, width: Int, height: Int,
+                                    excluding excluded: Set<CGWindowID> = []) throws -> CGImage {
     guard width > 0 && height > 0 else {
       throw NSError(domain: "SnapPin", code: 8,
                     userInfo: [NSLocalizedDescriptionKey: "Invalid region size"])
@@ -822,9 +869,8 @@ class MainFlutterWindow: NSWindow {
             CFArrayAppendValue(included, UnsafeRawPointer(bitPattern: UInt(number)))
           }
         }
-        if let image = CGImage(windowListFromArrayScreenBounds: region, windowArray: included, imageOption: .bestResolution),
-           let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) {
-          return png
+        if let image = CGImage(windowListFromArrayScreenBounds: region, windowArray: included, imageOption: .bestResolution) {
+          return image
         }
       }
     }

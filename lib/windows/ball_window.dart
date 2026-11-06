@@ -54,6 +54,7 @@ class _BallWindowState extends State<BallWindow>
   final _longResult = LongResultDelivery();
   Timer? _longTimer;
   bool _longSampling = false;
+  int _longSkippedTicks = 0;
   bool _longStopping = false;
   bool _longStarting = false;
   Map<String, dynamic>? _longRegion;
@@ -776,14 +777,24 @@ class _BallWindowState extends State<BallWindow>
     try {
       final hiddenToolbars = await CaptureBridge.suppressInputToolbar(true);
       AppLog.write('long-input-toolbar-hidden', 'count=$hiddenToolbars');
-      final first = await CaptureBridge.captureRegion(x, y, width, height);
-      _longSession = await LongStitchWorker.start(first);
+      final first = Platform.isMacOS
+          ? await CaptureBridge.captureRegionRaw(x, y, width, height)
+          : null;
+      final firstPng = first == null
+          ? await CaptureBridge.captureRegion(x, y, width, height)
+          : null;
+      _longSession = await LongStitchWorker.start(
+        first?.rgba ?? firstPng!,
+        rawWidth: first?.width,
+        rawHeight: first?.height,
+      );
       AppLog.write(
         'long-first-frame',
-        'requested=${width}x$height actual=${_longSession!.width}x${_longSession!.height} bytes=${first.length}',
+        'requested=${width}x$height actual=${_longSession!.width}x${_longSession!.height} bytes=${first?.rgba.length ?? firstPng!.length} transport=${Platform.isMacOS ? 'rgba' : 'png'}',
       );
       _lastLongStepKind = null;
       _longStillSamples = 0;
+      _longSkippedTicks = 0;
       _longNoMatchSince = null;
       _longWarningShown = false;
       _longLastThumbnail = DateTime.fromMillisecondsSinceEpoch(0);
@@ -858,6 +869,10 @@ class _BallWindowState extends State<BallWindow>
   }
 
   Future<void> _sampleLongCapture() async {
+    if (_longSampling) {
+      _longSkippedTicks++;
+      return;
+    }
     if (_longSampling ||
         _longStopping ||
         _longSession == null ||
@@ -871,18 +886,30 @@ class _BallWindowState extends State<BallWindow>
       previewHidden =
           await _longPreview?.invokeMethod<bool>('prepareCapture') ?? false;
       final captureStarted = DateTime.now();
-      final frame = await CaptureBridge.captureRegion(
-        region['x'] as int,
-        region['y'] as int,
-        region['width'] as int,
-        region['height'] as int,
-      );
+      final raw = Platform.isMacOS
+          ? await CaptureBridge.captureRegionRaw(
+              region['x'] as int,
+              region['y'] as int,
+              region['width'] as int,
+              region['height'] as int,
+            )
+          : null;
+      final frame =
+          raw?.rgba ??
+          await CaptureBridge.captureRegion(
+            region['x'] as int,
+            region['y'] as int,
+            region['width'] as int,
+            region['height'] as int,
+          );
       if (_longStopping || _longSession == null) return;
       final captureMs = DateTime.now()
           .difference(captureStarted)
           .inMilliseconds;
       final stitchStarted = DateTime.now();
-      final step = await _longSession!.push(frame);
+      final step = raw == null
+          ? await _longSession!.push(frame)
+          : await _longSession!.pushRgba(frame, raw.width, raw.height);
       final stitchMs = DateTime.now().difference(stitchStarted).inMilliseconds;
       if (step.kind == LongStepKind.still) {
         _longStillSamples++;
@@ -903,7 +930,7 @@ class _BallWindowState extends State<BallWindow>
               'direction=${step.direction} previewScale=${_longSession!.previewScale.toStringAsFixed(4)} '
               'canvasBytes=${_longSession!.width * step.height * 4} steps=${step.steps} '
               'score=${step.score.toStringAsFixed(3)} diff=${step.diff.toStringAsFixed(2)} '
-              'bytes=${frame.length} capture=${captureMs}ms stitch=${stitchMs}ms '
+              'transport=${raw == null ? 'png' : 'rgba'} bytes=${frame.length} capture=${captureMs}ms stitch=${stitchMs}ms '
               'total=${DateTime.now().difference(sampledAt).inMilliseconds}ms',
         );
       }
@@ -943,7 +970,12 @@ class _BallWindowState extends State<BallWindow>
           final now = DateTime.now();
           if (step.kind == LongStepKind.appended &&
               now.difference(_longLastThumbnail).inMilliseconds >= 300) {
+            final thumbWatch = Stopwatch()..start();
             thumbPath = await _writeLongThumb();
+            AppLog.write(
+              'long-preview-render',
+              'height=${step.height} steps=${step.steps} thumbnail=${thumbWatch.elapsedMilliseconds}ms',
+            );
             _longLastThumbnail = now;
           }
           await _sendLongProgress({
@@ -974,6 +1006,14 @@ class _BallWindowState extends State<BallWindow>
           await _longPreview?.invokeMethod<void>('finishCapture');
         } catch (_) {}
       }
+      final elapsed = DateTime.now().difference(sampledAt).inMilliseconds;
+      if (elapsed >= 160 || _longSkippedTicks > 0) {
+        AppLog.write(
+          'long-sample-cycle',
+          'total=${elapsed}ms skippedTicks=$_longSkippedTicks includesPreview=true',
+        );
+      }
+      _longSkippedTicks = 0;
       _longSampling = false;
     }
   }

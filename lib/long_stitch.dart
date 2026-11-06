@@ -66,19 +66,29 @@ class LongStitchSession {
     if (image == null || image.height < 80) {
       throw StateError('长截图首帧无效');
     }
-    final rgba = Uint8List.fromList(
+    return startRgba(
       image.getBytes(order: img.ChannelOrder.rgba),
+      image.width,
+      image.height,
+      maxCanvasBytes: maxCanvasBytes,
     );
+  }
+
+  static LongStitchSession startRgba(
+    Uint8List pixels,
+    int width,
+    int height, {
+    int maxCanvasBytes = 512 * 1024 * 1024,
+  }) {
+    if (width <= 0 || height < 80 || pixels.length != width * height * 4) {
+      throw StateError('长截图首帧像素无效');
+    }
+    final rgba = Uint8List.fromList(pixels);
     if (maxCanvasBytes < rgba.length) {
       throw ArgumentError.value(maxCanvasBytes, 'maxCanvasBytes');
     }
-    return LongStitchSession._(
-      image.width,
-      image.height,
-      rgba,
-      rgba,
-      maxCanvasBytes,
-    ).._height = image.height;
+    return LongStitchSession._(width, height, rgba, rgba, maxCanvasBytes)
+      .._height = height;
   }
 
   int get height => _height;
@@ -95,6 +105,28 @@ class LongStitchSession {
     final raw = image.getBytes(order: img.ChannelOrder.rgba);
     return _pushRaw(raw, sourcePng: png);
   }
+
+  LongStep pushRgba(Uint8List pixels, int frameWidth, int frameHeight) {
+    if (frameWidth != width ||
+        frameHeight != _frameHeight ||
+        pixels.length != width * _frameHeight * 4) {
+      throw StateError('长截图采集帧尺寸变化');
+    }
+    // Own the frame: callers may reuse their acquisition buffer after return.
+    return _pushRaw(Uint8List.fromList(pixels));
+  }
+
+  Uint8List _recoveryPng(Uint8List pixels) => Uint8List.fromList(
+    img.encodePng(
+      img.Image.fromBytes(
+        width: width,
+        height: _frameHeight,
+        bytes: pixels.buffer,
+        bytesOffset: pixels.offsetInBytes,
+        numChannels: 4,
+      ),
+    ),
+  );
 
   LongStep _pushRaw(
     Uint8List raw, {
@@ -123,7 +155,7 @@ class LongStitchSession {
     final capturedTop = replay ? null : _findCapturedTop(next);
     if (capturedTop != null) {
       _viewportTop = capturedTop;
-      _previous = Uint8List.fromList(next);
+      _previous = next;
       _previousLocated = true;
       final heightBeforeReplay = _height;
       final originBeforeReplay = _origin;
@@ -141,7 +173,7 @@ class LongStitchSession {
         final added = _height - heightBeforeReplay;
         final prepended = originBeforeReplay - _origin;
         _viewportTop = capturedTop + prepended;
-        _previous = Uint8List.fromList(next);
+        _previous = next;
         _previousLocated = true;
         if (added > 0) {
           return LongStep(
@@ -192,7 +224,7 @@ class LongStitchSession {
           _origin -= prepend;
         }
         _viewportTop = math.max(0, newTop);
-        _previous = Uint8List.fromList(next);
+        _previous = next;
         return LongStep(
           prepend > 0 ? LongStepKind.appended : LongStepKind.rewound,
           prepend,
@@ -207,7 +239,7 @@ class LongStitchSession {
       if (downward.shift != 0 &&
           _viewportTop + downward.shift + _frameHeight <= _height) {
         _viewportTop += downward.shift;
-        _previous = Uint8List.fromList(next);
+        _previous = next;
         return LongStep(
           LongStepKind.rewound,
           0,
@@ -224,9 +256,13 @@ class LongStitchSession {
     // A scrollbar jump can skip every intermediate row. Once detached, a
     // coincidental overlap with the tail is not evidence of downward scroll.
     if (!_previousLocated) {
-      _previous = Uint8List.fromList(next);
-      if (!replay && sourcePng != null) {
-        _detachedFrames.add(Uint8List.fromList(sourcePng));
+      _previous = next;
+      if (!replay) {
+        _detachedFrames.add(
+          sourcePng == null
+              ? _recoveryPng(next)
+              : Uint8List.fromList(sourcePng),
+        );
         if (_detachedFrames.length > 256) _detachedFrames.removeAt(0);
       }
       return LongStep(
@@ -267,10 +303,14 @@ class LongStitchSession {
       }
     }
     if (bestSupport < 24 || bestShift == 0) {
-      _previous = Uint8List.fromList(next);
+      _previous = next;
       _previousLocated = false;
-      if (!replay && sourcePng != null) {
-        _detachedFrames.add(Uint8List.fromList(sourcePng));
+      if (!replay) {
+        _detachedFrames.add(
+          sourcePng == null
+              ? _recoveryPng(next)
+              : Uint8List.fromList(sourcePng),
+        );
       }
       return LongStep(
         LongStepKind.noMatch,
@@ -293,7 +333,7 @@ class LongStitchSession {
     );
     _height += bestShift;
     _viewportTop = _height - _frameHeight;
-    _previous = Uint8List.fromList(next);
+    _previous = next;
     _previousLocated = true;
     return LongStep(
       LongStepKind.appended,

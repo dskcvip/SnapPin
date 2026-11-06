@@ -36,6 +36,7 @@ for mode in normal shutdown; do
   fi
   if [[ "$mode" == normal ]]; then
     grep -q 'runtime-smoke-permission-status-ready' "$dart_log"
+    grep -q 'runtime-smoke-long-raw-ready' "$dart_log"
     grep -q 'runtime-smoke-long-capture-ready' "$dart_log"
     grep -q 'runtime-smoke-shadow-ready' "$dart_log"
     grep -q 'runtime-smoke-print-prepared' "$dart_log"

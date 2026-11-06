@@ -8,6 +8,7 @@ import 'package:window_manager/window_manager.dart';
 import 'app_log.dart';
 import 'ocr_bridge.dart';
 import 'long_stitch.dart';
+import 'long_stitch_worker.dart';
 import 'owned_images.dart';
 
 import 'package:image/image.dart' as img;
@@ -32,18 +33,60 @@ Future<void> runRuntimeSmoke({required bool shutdownDuringOcr}) async {
           .invokeMapMethod<String, dynamic>('longCaptureSmoke');
       final frames = (capture!['frames'] as List).cast<Uint8List>();
       final positions = (capture['positions'] as List).cast<int>();
+      final rawFrames = (capture['rawFrames'] as List).cast<Map>();
+      final rawFirst = rawFrames.first;
+      final rawWorker = await LongStitchWorker.start(
+        rawFirst['rgba'] as Uint8List,
+        rawWidth: rawFirst['width'] as int,
+        rawHeight: rawFirst['height'] as int,
+      );
       final session = LongStitchSession.start(frames.first);
       try {
         final first = img.decodePng(frames.first)!;
+        // Same CGImage through PNG and RGBA: catches inverted rows, swapped
+        // channels, unexpected stride or accidental resolution changes.
+        for (var index = 0; index < frames.length; index++) {
+          final decoded = img.decodePng(frames[index])!;
+          final raw = rawFrames[index];
+          final pixels = raw['rgba'] as Uint8List;
+          if (raw['width'] != decoded.width ||
+              raw['height'] != decoded.height ||
+              pixels.length != decoded.width * decoded.height * 4) {
+            throw StateError('Native raw frame dimensions changed');
+          }
+          for (var y = 0; y < decoded.height; y += 7) {
+            for (var x = 0; x < decoded.width; x += 11) {
+              final pixel = decoded.getPixel(x, y);
+              final offset = (y * decoded.width + x) * 4;
+              if ((pixel.r - pixels[offset]).abs() > 16 ||
+                  (pixel.g - pixels[offset + 1]).abs() > 16 ||
+                  (pixel.b - pixels[offset + 2]).abs() > 16 ||
+                  pixels[offset + 3] != 255) {
+                throw StateError(
+                  'Native raw/PNG pixel mismatch frame=$index x=$x y=$y',
+                );
+              }
+            }
+          }
+        }
         final scale = first.height / (capture['logicalHeight'] as int);
         for (var index = 1; index < frames.length; index++) {
           final step = session.push(frames[index]);
+          final raw = rawFrames[index];
+          final rawStep = await rawWorker.pushRgba(
+            raw['rgba'] as Uint8List,
+            raw['width'] as int,
+            raw['height'] as int,
+          );
           final expected =
               ((positions.take(index + 1).reduce((a, b) => a > b ? a : b) +
                           (capture['logicalHeight'] as int)) *
                       scale)
                   .round();
-          if (step.kind == LongStepKind.noMatch ||
+          if (rawStep.kind != step.kind ||
+              rawWorker.height != session.height ||
+              rawWorker.width != session.width ||
+              step.kind == LongStepKind.noMatch ||
               (session.height - expected).abs() > 8) {
             throw StateError(
               'Native scrolling did not stitch: index=$index '
@@ -55,10 +98,15 @@ Future<void> runRuntimeSmoke({required bool shutdownDuringOcr}) async {
           throw StateError('Native wheel events were not delivered');
         }
         AppLog.write(
+          'runtime-smoke-long-raw-ready',
+          'frames=${rawFrames.length} output=${rawWorker.width}x${rawWorker.height} pixelsAndDirectionVerified=true',
+        );
+        AppLog.write(
           'runtime-smoke-long-capture-ready',
           'frames=${frames.length} output=${session.width}x${session.height} scale=$scale',
         );
       } finally {
+        rawWorker.dispose();
         session.dispose();
       }
     }

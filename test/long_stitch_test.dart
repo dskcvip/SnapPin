@@ -41,6 +41,126 @@ Uint8List _frameWithFixedHeader(int top) {
 }
 
 void main() {
+  test(
+    'raw worker preserves fast scroll, reversal and detached recovery pixels',
+    () async {
+      final pixels = img
+          .decodePng(_frame(600))!
+          .getBytes(order: img.ChannelOrder.rgba);
+      final worker = await LongStitchWorker.start(
+        pixels,
+        rawWidth: 160,
+        rawHeight: 600,
+      );
+      final reference = LongStitchSession.start(_frame(600));
+      final directory = await Directory.systemTemp.createTemp('snappin-raw-');
+      pixels.fillRange(0, pixels.length, 0);
+      try {
+        for (final top in [
+          1000,
+          1400,
+          1800,
+          1400,
+          1000,
+          600,
+          0,
+          120,
+          240,
+          360,
+          480,
+          601,
+          721,
+        ]) {
+          final png = _frame(top);
+          final image = img.decodePng(png)!;
+          final step = await worker.pushRgba(
+            image.getBytes(order: img.ChannelOrder.rgba),
+            160,
+            600,
+          );
+          final expected = reference.push(png);
+          expect(
+            (step.kind, step.direction, step.appended, step.height),
+            (
+              expected.kind,
+              expected.direction,
+              expected.appended,
+              expected.height,
+            ),
+            reason: 'top=$top',
+          );
+        }
+        await expectLater(
+          worker.pushRgba(Uint8List(8), 160, 600),
+          throwsStateError,
+        );
+        final actual = await worker.savePng(File('${directory.path}/raw.png'));
+        final expected = await reference.savePng(
+          File('${directory.path}/png.png'),
+        );
+        expect(
+          img.decodePng(await actual.readAsBytes())!.getBytes(),
+          img.decodePng(await expected.readAsBytes())!.getBytes(),
+        );
+        expect(worker.width, 160);
+      } finally {
+        worker.dispose();
+        reference.dispose();
+        await directory.delete(recursive: true);
+      }
+    },
+  );
+
+  test('raw session owns input and retains original width', () {
+    final initial = img
+        .decodePng(_frame(0))!
+        .getBytes(order: img.ChannelOrder.rgba);
+    final session = LongStitchSession.startRgba(initial, 160, 600);
+    initial.fillRange(0, initial.length, 0);
+    try {
+      final next = img
+          .decodePng(_frame(400))!
+          .getBytes(order: img.ChannelOrder.rgba);
+      expect(session.pushRgba(next, 160, 600).kind, LongStepKind.appended);
+      next.fillRange(0, next.length, 0);
+      expect(session.push(_frame(400)).kind, LongStepKind.still);
+      expect(session.width, 160);
+      expect(session.height, 1000);
+      expect(() => session.pushRgba(Uint8List(0), 160, 600), throwsStateError);
+    } finally {
+      session.dispose();
+    }
+  });
+
+  test('raw frames match PNG behavior under fixed navigation during fast scrolling', () {
+    final initial = img.decodePng(_frameWithFixedHeader(0))!;
+    final raw = LongStitchSession.startRgba(
+      initial.getBytes(order: img.ChannelOrder.rgba),
+      160,
+      600,
+    );
+    final png = LongStitchSession.start(_frameWithFixedHeader(0));
+    try {
+      for (final top in [400, 820, 1200, 1600, 1200, 820, 400, 0]) {
+        final frame = _frameWithFixedHeader(top);
+        final decoded = img.decodePng(frame)!;
+        final actual = raw.pushRgba(
+          decoded.getBytes(order: img.ChannelOrder.rgba),
+          160,
+          600,
+        );
+        final expected = png.push(frame);
+        expect(
+          (actual.kind, actual.height, actual.appended),
+          (expected.kind, expected.height, expected.appended),
+        );
+      }
+    } finally {
+      raw.dispose();
+      png.dispose();
+    }
+  });
+
   test('Dart stitch previews, appends, and exports', () async {
     final session = LongStitchSession.start(_frame(0));
     try {

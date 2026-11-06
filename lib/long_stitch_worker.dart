@@ -26,6 +26,8 @@ class LongStitchWorker {
   static Future<LongStitchWorker> start(
     Uint8List png, {
     int maxCanvasBytes = 512 * 1024 * 1024,
+    int? rawWidth,
+    int? rawHeight,
   }) async {
     final worker = LongStitchWorker._();
     // Also observe startup failures if spawning throws before awaiting readiness.
@@ -46,7 +48,16 @@ class LongStitchWorker {
         debugName: 'snappin-long-stitch',
       );
       worker._commands = await worker._ready.future;
-      await worker._request('start', (png, maxCanvasBytes));
+      if (rawWidth != null && rawHeight != null) {
+        await worker._request('startRaw', (
+          TransferableTypedData.fromList([png]),
+          rawWidth,
+          rawHeight,
+          maxCanvasBytes,
+        ));
+      } else {
+        await worker._request('start', (png, maxCanvasBytes));
+      }
       return worker;
     } catch (_) {
       worker.dispose();
@@ -92,6 +103,13 @@ class LongStitchWorker {
   Future<LongStep> push(Uint8List png) async =>
       await _request('push', png) as LongStep;
 
+  Future<LongStep> pushRgba(Uint8List pixels, int width, int height) async =>
+      await _request('pushRaw', (
+        TransferableTypedData.fromList([pixels]),
+        width,
+        height,
+      )) as LongStep;
+
   Future<Uint8List> previewPng() async =>
       await _request('preview') as Uint8List;
 
@@ -135,6 +153,24 @@ class LongStitchWorker {
             result = null;
           case 'push':
             result = session!.push(payload as Uint8List);
+          case 'startRaw':
+            final (data, width, height, limit) =
+                payload as (TransferableTypedData, int, int, int);
+            session = LongStitchSession.startRgba(
+              data.materialize().asUint8List(),
+              width,
+              height,
+              maxCanvasBytes: limit,
+            );
+            result = null;
+          case 'pushRaw':
+            final (data, width, height) =
+                payload as (TransferableTypedData, int, int);
+            result = session!.pushRgba(
+              data.materialize().asUint8List(),
+              width,
+              height,
+            );
           case 'preview':
             result = session!.previewPng();
           case 'firstTile':

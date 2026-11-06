@@ -203,6 +203,25 @@ class CaptureBridge {
     return bytes;
   }
 
+  static Future<({Uint8List rgba, int width, int height})> captureRegionRaw(
+    int x,
+    int y,
+    int width,
+    int height,
+  ) async {
+    final value = await _channel.invokeMapMethod<String, dynamic>(
+      'captureRegionRaw',
+      {'x': x, 'y': y, 'width': width, 'height': height},
+    );
+    if (value == null) throw StateError('选区像素采集失败');
+    final pixels = value['rgba'] as Uint8List;
+    final w = value['width'] as int, h = value['height'] as int;
+    if (w <= 0 || h < 80 || pixels.length != w * h * 4) {
+      throw StateError('选区原始像素尺寸不正确');
+    }
+    return (rgba: pixels, width: w, height: h);
+  }
+
   static Future<int> suppressInputToolbar(bool enabled) async {
     return await _channel.invokeMethod<int>('suppressInputToolbar', enabled) ??
         0;
