@@ -822,12 +822,12 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
         }
       }
       if (Platform.isMacOS || Platform.isWindows) {
-        // Same rule as Tauri: keep the full-screen input surface hidden for
-        // the entire manual scroll session, never show it between samples.
+        // Remove the full-screen input surface; the ball owns four independent
+        // nonactivating, mouse-transparent guide strips during manual scrolling.
         await windowManager.hide();
         AppLog.write(
           'long-overlay-guide-hidden',
-          '${Platform.operatingSystem} manual scrolling; full-screen surface removed before sampling',
+          '${Platform.operatingSystem} full-screen surface hidden; independent guide strips follow',
         );
       }
       await Future<void>.delayed(const Duration(milliseconds: 80));

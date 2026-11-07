@@ -222,6 +222,21 @@ class CaptureBridge {
     return (rgba: pixels, width: w, height: h);
   }
 
+  static Future<void> showLongCaptureGuide(Map<String, dynamic> region) async {
+    final status = await _channel.invokeMapMethod<String, dynamic>(
+      'showLongCaptureGuide',
+      region,
+    );
+    if (status?['visible'] != true ||
+        status?['segments'] != 4 ||
+        status?['mouseTransparent'] != true) {
+      throw StateError('长截图选区边框未就绪：$status');
+    }
+  }
+
+  static Future<void> hideLongCaptureGuide() =>
+      _channel.invokeMethod<void>('hideLongCaptureGuide');
+
   static Future<int> suppressInputToolbar(bool enabled) async {
     return await _channel.invokeMethod<int>('suppressInputToolbar', enabled) ??
         0;

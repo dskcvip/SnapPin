@@ -193,6 +193,12 @@ bool FlutterWindow::OnCreate() {
             };
             result->Success(flutter::EncodableValue(CaptureRegion(
                 number("x"), number("y"), number("width"), number("height"))));
+          } else if (call.method_name() == "showLongCaptureGuide") {
+            result->Success(flutter::EncodableValue(ShowLongCaptureGuide(
+                std::get<flutter::EncodableMap>(*call.arguments()))));
+          } else if (call.method_name() == "hideLongCaptureGuide") {
+            HideLongCaptureGuide();
+            result->Success();
           } else if (call.method_name() == "longCaptureSmoke") {
             result->Success(flutter::EncodableValue(CaptureRepeatedRegionSmoke()));
           } else if (call.method_name() == "suppressInputToolbar") {
@@ -368,6 +374,7 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::OnDestroy() {
+  HideLongCaptureGuide();
   if (ocr_state_) {
     std::lock_guard<std::mutex> lock(ocr_state_->mutex);
     ocr_state_->alive = false;

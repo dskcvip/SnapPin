@@ -6,7 +6,9 @@
 #include <dwmapi.h>
 #include <objidl.h>
 
+#include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <filesystem>
 #include <stdexcept>
 #include <string>
@@ -14,6 +16,13 @@
 namespace {
 
 std::atomic<uint64_t> capture_id{0};
+std::vector<HWND> long_guide_windows;
+LRESULT CALLBACK GuideWindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
+  if (message == WM_NCHITTEST) return HTTRANSPARENT;
+  if (message == WM_MOUSEACTIVATE) return MA_NOACTIVATE;
+  return DefWindowProcW(window, message, wparam, lparam);
+}
+
 
 std::string Utf8(const std::wstring& value) {
   const int length = WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1,
@@ -177,6 +186,68 @@ std::vector<uint8_t> CaptureRegion(int x, int y, int width, int height) {
   return bytes;
 }
 
+void HideLongCaptureGuide() {
+  for (auto window : long_guide_windows) {
+    if (IsWindow(window)) DestroyWindow(window);
+  }
+  long_guide_windows.clear();
+}
+
+flutter::EncodableMap ShowLongCaptureGuide(const flutter::EncodableMap& args) {
+  HideLongCaptureGuide();
+  const auto integer = [&](const char* key) {
+    const auto& value = args.at(flutter::EncodableValue(key));
+    return std::holds_alternative<int64_t>(value)
+        ? static_cast<int>(std::get<int64_t>(value)) : std::get<int32_t>(value);
+  };
+  const int x = integer("x") - 4, y = integer("y") - 4;
+  const int width = integer("width") + 8, height = integer("height") + 8;
+  if (width <= 8 || height <= 8) throw std::runtime_error("Invalid long capture guide bounds");
+  double scale = 1;
+  const auto logical = args.find(flutter::EncodableValue("logicalWidth"));
+  if (logical != args.end() && std::holds_alternative<double>(logical->second) &&
+      std::get<double>(logical->second) > 0) {
+    scale = width / std::get<double>(logical->second);
+  }
+  const int t = std::max(1, static_cast<int>(std::round(2 * scale)));
+  static const wchar_t* class_name = L"SnapPinLongCaptureGuide";
+  static const ATOM atom = [] {
+    WNDCLASSW cls{};
+    cls.lpfnWndProc = GuideWindowProc;
+    cls.hInstance = GetModuleHandleW(nullptr);
+    cls.hbrBackground = CreateSolidBrush(RGB(22, 136, 240));
+    cls.lpszClassName = class_name;
+    return RegisterClassW(&cls);
+  }();
+  if (!atom) throw std::runtime_error("Cannot register long capture guide class");
+  const RECT strips[] = {{x-t, y-t, x+width+t, y}, {x-t, y+height, x+width+t, y+height+t},
+                         {x-t, y, x, y+height}, {x+width, y, x+width+t, y+height}};
+  bool excluded = true;
+  try {
+    for (const auto& r : strips) {
+      HWND window = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE |
+          WS_EX_LAYERED | WS_EX_TRANSPARENT, class_name, L"SnapPin long capture guide", WS_POPUP,
+          r.left, r.top, r.right-r.left, r.bottom-r.top, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+      if (!window) throw std::runtime_error("Cannot create long capture guide strip");
+      long_guide_windows.push_back(window);
+      if (!SetLayeredWindowAttributes(window, 0, 255, LWA_ALPHA)) {
+        throw std::runtime_error("Cannot configure transparent-input guide");
+      }
+      excluded = (SetWindowDisplayAffinity(window, 0x11) != 0) && excluded;
+      ShowWindow(window, SW_SHOWNOACTIVATE);
+      UpdateWindow(window);
+    }
+    DwmFlush();
+    return {{flutter::EncodableValue("visible"), flutter::EncodableValue(true)},
+            {flutter::EncodableValue("segments"), flutter::EncodableValue(4)},
+            {flutter::EncodableValue("mouseTransparent"), flutter::EncodableValue(true)},
+            {flutter::EncodableValue("excluded"), flutter::EncodableValue(excluded)}};
+  } catch (...) {
+    HideLongCaptureGuide();
+    throw;
+  }
+}
+
 // Own test windows only: verify the production GDI path after hiding a reused
 // capture surface. Never send input or change the user's browser window.
 flutter::EncodableList CaptureRepeatedRegionSmoke() {
@@ -201,6 +272,7 @@ flutter::EncodableList CaptureRepeatedRegionSmoke() {
   const int x = work.left + 40, y = work.top + 40;
   HWND fixture = nullptr, cover = nullptr;
   const auto cleanup = [&]() {
+    HideLongCaptureGuide();
     if (cover) DestroyWindow(cover);
     if (fixture) DestroyWindow(fixture);
     if (cover_atom) UnregisterClassW(cover_class.lpszClassName, instance);
@@ -228,8 +300,27 @@ flutter::EncodableList CaptureRepeatedRegionSmoke() {
       DwmFlush();
       ShowWindow(cover, SW_HIDE);
       DwmFlush();
+      const auto guide_status = ShowLongCaptureGuide({
+          {flutter::EncodableValue("x"), flutter::EncodableValue(x + 34)},
+          {flutter::EncodableValue("y"), flutter::EncodableValue(y + 34)},
+          {flutter::EncodableValue("width"), flutter::EncodableValue(192)},
+          {flutter::EncodableValue("height"), flutter::EncodableValue(252)}});
+      if (!std::get<bool>(guide_status.at(flutter::EncodableValue("excluded")))) {
+        throw std::runtime_error("Guide capture exclusion unavailable in smoke test");
+      }
+      for (auto guide : long_guide_windows) {
+        if (!IsWindowVisible(guide) || GetActiveWindow() == guide ||
+            !(GetWindowLongPtr(guide, GWL_EXSTYLE) & WS_EX_TRANSPARENT)) {
+          throw std::runtime_error("Guide is invisible, active or intercepts input");
+        }
+      }
+      if (WindowFromPoint(POINT{x + 29, y + 160}) != fixture) {
+        throw std::runtime_error("Guide does not pass pointer hit testing to document");
+      }
       Sleep(30);
       frames.push_back(flutter::EncodableValue(CaptureRegion(x, y, 260, 320)));
+      HideLongCaptureGuide();
+      if (!long_guide_windows.empty()) throw std::runtime_error("Guide cleanup failed");
     }
     cleanup();
     return frames;

@@ -7,6 +7,7 @@ import Security
 import Metal
 
 class MainFlutterWindow: NSWindow {
+  private static var longGuidePanels: [NSPanel] = []
   private var captureChannel: FlutterMethodChannel?
   private var ocrChannel: FlutterMethodChannel?
   private var ocrBusy = false
@@ -204,6 +205,11 @@ class MainFlutterWindow: NSWindow {
           result(Self.setCaptureExcluded(self, arguments: call.arguments))
         case "showWithoutActivating":
           self.orderFrontRegardless()
+          result(nil)
+        case "showLongCaptureGuide":
+          result(try Self.showLongCaptureGuide(call.arguments))
+        case "hideLongCaptureGuide":
+          Self.hideLongCaptureGuide()
           result(nil)
         case "prepareLongCapture":
           result(Self.prepareLongCapture(call.arguments))
@@ -655,6 +661,59 @@ class MainFlutterWindow: NSWindow {
     return true
   }
 
+  private static func hideLongCaptureGuide() {
+    for panel in longGuidePanels {
+      captureExcludedWindows.remove(CGWindowID(panel.windowNumber))
+      panel.orderOut(nil)
+      panel.close()
+    }
+    longGuidePanels.removeAll()
+    MacStartupLog.write("long-native-guide-hidden")
+  }
+
+  private static func showLongCaptureGuide(_ arguments: Any?) throws -> [String: Any] {
+    hideLongCaptureGuide()
+    guard let args = arguments as? [String: Any],
+          let x = args["logicalX"] as? Double, let y = args["logicalY"] as? Double,
+          let width = args["logicalWidth"] as? Double, let height = args["logicalHeight"] as? Double,
+          x.isFinite, y.isFinite, width.isFinite, height.isFinite, width > 0, height > 0 else {
+      throw NSError(domain: "SnapPin", code: 14,
+                    userInfo: [NSLocalizedDescriptionKey: "Invalid long capture guide bounds"])
+    }
+    let t: CGFloat = 2
+    let left = CGFloat(x), top = CGFloat(y), w = CGFloat(width), h = CGFloat(height)
+    // Each strip is outside the selected area. No full-screen input surface
+    // remains over the browser, even if capture exclusion is unavailable.
+    let strips = [CGRect(x: left-t, y: top-t, width: w+2*t, height: t),
+                  CGRect(x: left-t, y: top+h, width: w+2*t, height: t),
+                  CGRect(x: left-t, y: top, width: t, height: h),
+                  CGRect(x: left+w, y: top, width: t, height: h)]
+    let desktopTop = NSScreen.screens.first?.frame.maxY ?? 0
+    for strip in strips {
+      let frame = NSRect(x: strip.minX, y: desktopTop-strip.maxY,
+                         width: strip.width, height: strip.height)
+      let panel = LongCaptureGuidePanel(contentRect: frame,
+        styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+      panel.isReleasedWhenClosed = false
+      panel.isFloatingPanel = true
+      panel.hidesOnDeactivate = false
+      panel.hasShadow = false
+      panel.isOpaque = true
+      panel.backgroundColor = NSColor(deviceRed: 22.0/255, green: 136.0/255, blue: 240.0/255, alpha: 1)
+      panel.ignoresMouseEvents = true
+      panel.level = .floating
+      panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
+      // NSWindow can otherwise constrain a strip at the menu bar to visibleFrame.
+      panel.setFrame(frame, display: true)
+      panel.orderFrontRegardless()
+      captureExcludedWindows.insert(CGWindowID(panel.windowNumber))
+      longGuidePanels.append(panel)
+    }
+    let visible = longGuidePanels.allSatisfy { $0.isVisible && $0.ignoresMouseEvents && !$0.isKeyWindow }
+    MacStartupLog.write("long-native-guide-shown", "x=\(x) y=\(y) size=\(width)x\(height) segments=\(longGuidePanels.count) visible=\(visible) mouseTransparent=true")
+    return ["visible": visible, "segments": longGuidePanels.count, "mouseTransparent": true]
+  }
+
   private static func prepareLongCapture(_ arguments: Any?) -> [String: Any] {
     guard let args = arguments as? [String: Any],
           let x = args["x"] as? Int, let y = args["y"] as? Int,
@@ -719,6 +778,7 @@ class MainFlutterWindow: NSWindow {
     func finish(_ error: String? = nil) {
       if finished { return }
       finished = true
+      hideLongCaptureGuide()
       if preview.windowNumber > 0 {
         captureExcludedWindows.remove(CGWindowID(preview.windowNumber))
       }
@@ -745,6 +805,15 @@ class MainFlutterWindow: NSWindow {
         saveFrame(data, name: "long-frame-\(index).png")
         guard let bitmap = NSBitmapImageRep(data: data), !smokeCoverVisible(bitmap) else {
           finish("Excluded preview leaked into captured frame"); return
+        }
+        let guideProbe = NSBitmapImageRep(cgImage: image)
+        let gx = Int(29.0 * Double(guideProbe.pixelsWide) / Double(region.width))
+        if let color = guideProbe.colorAt(x: gx, y: guideProbe.pixelsHigh / 2)?.usingColorSpace(.deviceRGB),
+           color.blueComponent > 0.85 {
+          finish("Guide leaked into source pixels"); return
+        }
+        guard longGuidePanels.count == 4 && longGuidePanels.allSatisfy({ $0.isVisible && $0.ignoresMouseEvents }) else {
+          finish("Guide disappeared while scrolling"); return
         }
         frames.append(FlutterStandardTypedData(bytes: data))
         if index + 1 == positions.count { finish(); return }
@@ -775,11 +844,29 @@ class MainFlutterWindow: NSWindow {
       fixture.display()
       preview.display()
       _ = setCaptureExcluded(preview, arguments: ["enabled": true, "label": "long-smoke-preview"])
-      excluded = [CGWindowID(preview.windowNumber)]
+      do {
+        let guideStatus = try showLongCaptureGuide([
+          "logicalX": Double(region.minX + 30), "logicalY": Double(region.minY + 30),
+          "logicalWidth": Double(region.width - 60), "logicalHeight": Double(region.height - 60)])
+        guard guideStatus["visible"] as? Bool == true, longGuidePanels.count == 4 else {
+          finish("Independent guide is not visible"); return
+        }
+      } catch { finish(error.localizedDescription); return }
+      excluded = Set([CGWindowID(preview.windowNumber)] + longGuidePanels.map { CGWindowID($0.windowNumber) })
       DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
       do {
         // A control capture must actually see magenta before exclusion. This
         // prevents a blank/unavailable screen capture from passing the test.
+        let guideControl = try captureRegionImage(x: Int(region.minX), y: Int(region.minY),
+          width: Int(region.width), height: Int(region.height), excluding: [CGWindowID(preview.windowNumber)])
+        let guideBitmap = NSBitmapImageRep(cgImage: guideControl)
+        let gx = Int(29.0 * Double(guideBitmap.pixelsWide) / Double(region.width))
+        let gy = guideBitmap.pixelsHigh / 2
+        guard let color = guideBitmap.colorAt(x: gx, y: gy)?.usingColorSpace(.deviceRGB),
+              color.blueComponent > 0.85, color.redComponent < 0.15 else {
+          finish("Independent blue guide strip was not rendered"); return
+        }
+        MacStartupLog.write("long-native-guide-smoke-visible", "segments=4 mouseTransparent=true")
         let control = try captureRegion(x: Int(region.minX), y: Int(region.minY),
                                         width: Int(region.width), height: Int(region.height))
         saveFrame(control, name: "long-control.png")
@@ -989,6 +1076,12 @@ class MainFlutterWindow: NSWindow {
       ]
     }
   }
+}
+
+private class LongCaptureGuidePanel: NSPanel {
+  override var canBecomeKey: Bool { false }
+  override var canBecomeMain: Bool { false }
+  override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
 }
 
 private class LongCaptureSmokeWindow: NSWindow {

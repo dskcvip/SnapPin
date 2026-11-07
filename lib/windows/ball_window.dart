@@ -848,6 +848,11 @@ class _BallWindowState extends State<BallWindow>
     try {
       final hiddenToolbars = await CaptureBridge.suppressInputToolbar(true);
       AppLog.write('long-input-toolbar-hidden', 'count=$hiddenToolbars');
+      await CaptureBridge.showLongCaptureGuide(region);
+      AppLog.write(
+        'long-guide-shown',
+        'region=$region segments=4 mouseTransparent=true nonactivating=true',
+      );
       final first = Platform.isMacOS
           ? await CaptureBridge.captureRegionRaw(x, y, width, height)
           : null;
@@ -1129,6 +1134,7 @@ class _BallWindowState extends State<BallWindow>
     }
     var exported = _longResult.pending != null;
     try {
+      await _hideLongGuide();
       if (_longResult.pending == null) {
         final session = _longSession!;
         await _sendLongFeedback({
@@ -1240,6 +1246,7 @@ class _BallWindowState extends State<BallWindow>
     while (_longSampling) {
       await Future<void>.delayed(const Duration(milliseconds: 20));
     }
+    await _hideLongGuide();
     _longSession?.dispose();
     _longSession = null;
     _lastLongStepKind = null;
@@ -1260,6 +1267,15 @@ class _BallWindowState extends State<BallWindow>
       AppLog.write('long-cancelled');
     } finally {
       _longStopping = false;
+    }
+  }
+
+  Future<void> _hideLongGuide() async {
+    try {
+      await CaptureBridge.hideLongCaptureGuide();
+      AppLog.write('long-guide-hidden');
+    } catch (error, stack) {
+      AppLog.write('long-guide-hide-failed', '$error\n$stack');
     }
   }
 

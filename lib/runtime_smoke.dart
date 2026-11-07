@@ -27,8 +27,8 @@ Future<void> runRuntimeSmoke({required bool shutdownDuringOcr}) async {
       if (image.width != 260 || image.height != 320) {
         throw StateError('Consecutive capture dimensions changed');
       }
-      for (final y in [5, 160, 315]) {
-        for (final x in [5, 130, 255]) {
+      for (final y in [5, 29, 160, 290, 315]) {
+        for (final x in [5, 29, 130, 230, 255]) {
           final pixel = image.getPixel(x, y);
           if ((pixel.r - 37).abs() > 1 ||
               (pixel.g - 157).abs() > 1 ||
@@ -42,7 +42,7 @@ Future<void> runRuntimeSmoke({required bool shutdownDuringOcr}) async {
     }
     AppLog.write(
       'runtime-smoke-long-repeat-ready',
-      'cycles=2 originalPixels=true',
+      'cycles=2 originalPixels=true guideVisible=true mouseTransparent=true guideExcluded=true',
     );
   }
   if (Platform.isMacOS) {
