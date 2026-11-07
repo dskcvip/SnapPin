@@ -682,12 +682,13 @@ class MainFlutterWindow: NSWindow {
     }
     let t: CGFloat = 2
     let left = CGFloat(x), top = CGFloat(y), w = CGFloat(width), h = CGFloat(height)
-    // Each strip is outside the selected area. No full-screen input surface
-    // remains over the browser, even if capture exclusion is unavailable.
-    let strips = [CGRect(x: left-t, y: top-t, width: w+2*t, height: t),
-                  CGRect(x: left-t, y: top+h, width: w+2*t, height: t),
-                  CGRect(x: left-t, y: top, width: t, height: h),
-                  CGRect(x: left+w, y: top, width: t, height: h)]
+    // Keep all four strips INSIDE the selection so an edge-aligned selection
+    // cannot place its left/right guide outside the physical display. Guides
+    // are excluded from captures; the source region and resolution do not change.
+    let strips = [CGRect(x: left, y: top, width: w, height: t),
+                  CGRect(x: left, y: top+h-t, width: w, height: t),
+                  CGRect(x: left, y: top, width: t, height: h),
+                  CGRect(x: left+w-t, y: top, width: t, height: h)]
     let desktopTop = NSScreen.screens.first?.frame.maxY ?? 0
     for strip in strips {
       let frame = NSRect(x: strip.minX, y: desktopTop-strip.maxY,
@@ -700,8 +701,12 @@ class MainFlutterWindow: NSWindow {
       panel.hasShadow = false
       panel.isOpaque = true
       panel.backgroundColor = NSColor(deviceRed: 22.0/255, green: 136.0/255, blue: 240.0/255, alpha: 1)
+      let stripView = NSView(frame: NSRect(origin: .zero, size: frame.size))
+      stripView.wantsLayer = true
+      stripView.layer?.backgroundColor = panel.backgroundColor.cgColor
+      panel.contentView = stripView
       panel.ignoresMouseEvents = true
-      panel.level = .floating
+      panel.level = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 1)
       panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
       // NSWindow can otherwise constrain a strip at the menu bar to visibleFrame.
       panel.setFrame(frame, display: true)
@@ -710,8 +715,17 @@ class MainFlutterWindow: NSWindow {
       longGuidePanels.append(panel)
     }
     let visible = longGuidePanels.allSatisfy { $0.isVisible && $0.ignoresMouseEvents && !$0.isKeyWindow }
-    MacStartupLog.write("long-native-guide-shown", "x=\(x) y=\(y) size=\(width)x\(height) segments=\(longGuidePanels.count) visible=\(visible) mouseTransparent=true")
-    return ["visible": visible, "segments": longGuidePanels.count, "mouseTransparent": true]
+    let frames = longGuidePanels.map { panel -> [String: Any] in
+      let frame = panel.frame
+      let onScreen = NSScreen.screens.contains { $0.frame.intersection(frame).width >= 1 && $0.frame.intersection(frame).height >= 1 }
+      return ["x": frame.minX, "y": desktopTop-frame.maxY, "width": frame.width,
+              "height": frame.height, "onScreen": onScreen, "level": panel.level.rawValue]
+    }
+    let onScreen = frames.allSatisfy { $0["onScreen"] as? Bool == true }
+    let status: [String: Any] = ["visible": visible, "segments": longGuidePanels.count,
+      "mouseTransparent": true, "onScreen": onScreen, "frames": frames, "placement": "inside-selection"]
+    MacStartupLog.write("long-native-guide-shown", "\(status)")
+    return status
   }
 
   private static func prepareLongCapture(_ arguments: Any?) -> [String: Any] {
@@ -744,6 +758,36 @@ class MainFlutterWindow: NSWindow {
   private static func runLongCaptureSmoke(result: @escaping FlutterResult) {
     guard let screen = NSScreen.screens.first else {
       result(FlutterError(code: "long_smoke_failed", message: "No test display", details: nil))
+      return
+    }
+    do {
+      let desktopTop = NSScreen.screens.first?.frame.maxY ?? 0
+      let edgeStatus = try showLongCaptureGuide([
+        "logicalX": Double(screen.frame.minX), "logicalY": Double(desktopTop-screen.frame.maxY+25),
+        "logicalWidth": Double(screen.frame.width), "logicalHeight": Double(screen.frame.height-100)])
+      guard edgeStatus["onScreen"] as? Bool == true else {
+        hideLongCaptureGuide()
+        result(FlutterError(code: "long_smoke_failed", message: "Full-width guide is off-screen", details: edgeStatus))
+        return
+      }
+      for panel in longGuidePanels {
+        panel.displayIfNeeded()
+        let frame = panel.frame
+        guard screen.frame.contains(frame), panel.level.rawValue > NSWindow.Level.statusBar.rawValue,
+              let image = CGWindowListCreateImage(.null, .optionIncludingWindow, CGWindowID(panel.windowNumber), [.boundsIgnoreFraming, .bestResolution]) else {
+          throw NSError(domain: "SnapPin", code: 15, userInfo: [NSLocalizedDescriptionKey: "Edge guide frame/pixel check failed"])
+        }
+        let bitmap = NSBitmapImageRep(cgImage: image)
+        guard let color = bitmap.colorAt(x: bitmap.pixelsWide/2, y: bitmap.pixelsHigh/2)?.usingColorSpace(.deviceRGB),
+              color.blueComponent > 0.85, color.redComponent < 0.15 else {
+          throw NSError(domain: "SnapPin", code: 15, userInfo: [NSLocalizedDescriptionKey: "Edge guide has no blue pixels"])
+        }
+      }
+      MacStartupLog.write("long-native-guide-edge-smoke-ready", "fullWidth=true allFourOnScreen=true bluePixels=true \(edgeStatus)")
+      hideLongCaptureGuide()
+    } catch {
+      hideLongCaptureGuide()
+      result(FlutterError(code: "long_smoke_failed", message: error.localizedDescription, details: nil))
       return
     }
     let rect = NSRect(x: screen.visibleFrame.minX + 80, y: screen.visibleFrame.minY + 80,
@@ -807,7 +851,7 @@ class MainFlutterWindow: NSWindow {
           finish("Excluded preview leaked into captured frame"); return
         }
         let guideProbe = NSBitmapImageRep(cgImage: image)
-        let gx = Int(29.0 * Double(guideProbe.pixelsWide) / Double(region.width))
+        let gx = Int(31.0 * Double(guideProbe.pixelsWide) / Double(region.width))
         if let color = guideProbe.colorAt(x: gx, y: guideProbe.pixelsHigh / 2)?.usingColorSpace(.deviceRGB),
            color.blueComponent > 0.85 {
           finish("Guide leaked into source pixels"); return
@@ -860,7 +904,7 @@ class MainFlutterWindow: NSWindow {
         let guideControl = try captureRegionImage(x: Int(region.minX), y: Int(region.minY),
           width: Int(region.width), height: Int(region.height), excluding: [CGWindowID(preview.windowNumber)])
         let guideBitmap = NSBitmapImageRep(cgImage: guideControl)
-        let gx = Int(29.0 * Double(guideBitmap.pixelsWide) / Double(region.width))
+        let gx = Int(31.0 * Double(guideBitmap.pixelsWide) / Double(region.width))
         let gy = guideBitmap.pixelsHigh / 2
         guard let color = guideBitmap.colorAt(x: gx, y: gy)?.usingColorSpace(.deviceRGB),
               color.blueComponent > 0.85, color.redComponent < 0.15 else {

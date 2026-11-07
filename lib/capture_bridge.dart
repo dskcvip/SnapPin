@@ -1,5 +1,7 @@
 import 'dart:io';
 
+import 'app_log.dart';
+
 import 'package:flutter/services.dart';
 
 class CapturedDisplay {
@@ -227,11 +229,15 @@ class CaptureBridge {
       'showLongCaptureGuide',
       region,
     );
+    if (Platform.isMacOS && status?['onScreen'] != true) {
+      throw StateError('长截图选区边框位于屏幕外：$status');
+    }
     if (status?['visible'] != true ||
         status?['segments'] != 4 ||
         status?['mouseTransparent'] != true) {
       throw StateError('长截图选区边框未就绪：$status');
     }
+    AppLog.write('long-guide-native-status', status);
   }
 
   static Future<void> hideLongCaptureGuide() =>

@@ -220,8 +220,8 @@ flutter::EncodableMap ShowLongCaptureGuide(const flutter::EncodableMap& args) {
     return RegisterClassW(&cls);
   }();
   if (!atom) throw std::runtime_error("Cannot register long capture guide class");
-  const RECT strips[] = {{x-t, y-t, x+width+t, y}, {x-t, y+height, x+width+t, y+height+t},
-                         {x-t, y, x, y+height}, {x+width, y, x+width+t, y+height}};
+  const RECT strips[] = {{x, y, x+width, y+t}, {x, y+height-t, x+width, y+height},
+                         {x, y, x+t, y+height}, {x+width-t, y, x+width, y+height}};
   bool excluded = true;
   try {
     for (const auto& r : strips) {
@@ -314,7 +314,7 @@ flutter::EncodableList CaptureRepeatedRegionSmoke() {
           throw std::runtime_error("Guide is invisible, active or intercepts input");
         }
       }
-      if (WindowFromPoint(POINT{x + 29, y + 160}) != fixture) {
+      if (WindowFromPoint(POINT{x + 31, y + 160}) != fixture) {
         throw std::runtime_error("Guide does not pass pointer hit testing to document");
       }
       Sleep(30);

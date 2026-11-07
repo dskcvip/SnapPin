@@ -27,8 +27,8 @@ Future<void> runRuntimeSmoke({required bool shutdownDuringOcr}) async {
       if (image.width != 260 || image.height != 320) {
         throw StateError('Consecutive capture dimensions changed');
       }
-      for (final y in [5, 29, 160, 290, 315]) {
-        for (final x in [5, 29, 130, 230, 255]) {
+      for (final y in [5, 31, 160, 288, 315]) {
+        for (final x in [5, 31, 130, 228, 255]) {
           final pixel = image.getPixel(x, y);
           if ((pixel.r - 37).abs() > 1 ||
               (pixel.g - 157).abs() > 1 ||
