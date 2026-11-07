@@ -98,6 +98,25 @@ void main() {
       );
       expect(find.byTooltip('图片适应窗口大小'), findsOneWidget);
       expect(find.byTooltip('文字识别'), findsOneWidget);
+      // Reference screenshot coordinates include the one-pixel outer border.
+      for (final item in [
+        ('窗口置顶', 26.0),
+        ('上一张', 78.0),
+        ('下一张', 118.0),
+        ('截图历史', 158.0),
+        ('放大', 212.0),
+        ('缩小', 252.0),
+        ('向右旋转', 344.0),
+        ('编辑', 384.0),
+        ('文字识别', 438.0),
+        ('全屏', 478.0),
+        ('保存', 518.0),
+      ]) {
+        final center = tester.getCenter(find.byTooltip(item.$1));
+        expect(center.dx, item.$2, reason: item.$1);
+        expect(center.dy, 20.5, reason: item.$1);
+      }
+
       await tester.pumpAndSettle();
       await snapshot('贴图结果页');
       await tester.tap(find.byTooltip('截图历史'));

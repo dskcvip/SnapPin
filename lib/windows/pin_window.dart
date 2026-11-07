@@ -881,45 +881,39 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
   }
 
   Widget _viewerGlyph(IconData icon, Color color) {
-    final asset = <IconData, String>{
-      Icons.push_pin_outlined: 'pin',
-      Icons.file_download_outlined: 'save',
-      Icons.document_scanner_outlined: 'ocr',
-      Icons.close: 'close',
-    }[icon];
-    if (asset != null)
-      return SvgPicture.asset(
-        'assets/icons/shot/$asset.svg',
-        width: 20,
-        height: 20,
-        colorFilter: ColorFilter.mode(color, BlendMode.srcIn),
-      );
+    // Explicit 20px canvas: the hit target must not stretch the SVG artwork.
     final path = <IconData, String>{
-      Icons.arrow_back: '<path d="M18 12H6m5-5-5 5 5 5"/>',
-      Icons.arrow_forward: '<path d="M6 12h12m-5-5 5 5-5 5"/>',
+      Icons.push_pin_outlined:
+          '<path d="M8 2.5h4v2.8l3 5.2v2H5v-2l3-5.2V2.5Zm2 10v5"/>',
+      Icons.arrow_back: '<path d="M15 10H4m5-5-5 5 5 5"/>',
+      Icons.arrow_forward: '<path d="M5 10h11m-5-5 5 5-5 5"/>',
       Icons.apps_outlined: [
-        for (final y in [5, 10, 15])
-          for (final x in [4, 10, 16])
+        for (final y in [4, 10])
+          for (final x in [2, 8, 14])
             '<rect x="$x" y="$y" width="4" height="4"/>',
       ].join(),
-      Icons.zoom_in: '<circle cx="10" cy="10" r="6"/><path d="m14.5 14.5 5 5M7 10h6m-3-3v6"/>',
-      Icons.zoom_out:
-          '<circle cx="10" cy="10" r="6"/><path d="m14.5 14.5 5 5M7 10h6"/>',
-      Icons.fit_screen: '<rect x="3" y="5" width="18" height="14"/><rect x="6" y="8" width="12" height="8"/>',
-      Icons.aspect_ratio: '<rect x="3" y="5" width="18" height="14"/><path d="M7 11V9h3m4 6h3v-2"/>',
-      Icons.rotate_right: '<path d="M8 5H4v4m0-4 4 4M10 9h11v10H6v-7"/>',
+      Icons.zoom_in: '<circle cx="8.5" cy="8.5" r="5.5"/><path d="m12.5 12.5 4 4M6 8.5h5m-2.5-2.5v5"/>',
+      Icons.zoom_out: '<circle cx="8.5" cy="8.5" r="5.5"/><path d="m12.5 12.5 4 4M6 8.5h5"/>',
+      Icons.fit_screen: '<rect x="1.5" y="2.5" width="17" height="15"/><path d="M6 6.5v7m4-5v3m4-5v7"/>',
+      Icons.aspect_ratio: '<rect x="1.5" y="2.5" width="17" height="15"/><path d="M6 6.5v7m4-5v3m4-5v7"/>',
+      Icons.rotate_right: '<path d="M6 1 3 3l3 2M3 3h6c2 0 3 1 3 3"/><rect x="5" y="7" width="14" height="9"/>',
       Icons.edit_outlined:
-          '<path d="M12 4H4v16h16v-8M9 15l2-5L20 1l3 3-9 9-5 2Z"/>',
-      Icons.fullscreen: '<path d="M8 4H4v4m12-4h4v4M4 16v4h4m12-4v4h-4M8 8l3 3m5-3-3 3m-5 5 3-3m5 3-3-3"/>',
-      Icons.minimize: '<path d="M7 12h10"/>',
-      Icons.crop_square: '<rect x="6" y="6" width="12" height="12"/>',
-      Icons.filter_none: '<path d="M9 6V3h12v12h-3"/><rect x="3" y="9" width="12" height="12"/>',
+          '<path d="M10 3H3v14h14v-7M8 12l1-3 7-7 2 2-7 7-3 1Z"/>',
+      Icons.document_scanner_outlined: '<path d="M9 9V2.8q0-.8.8-.8h7.4q.8 0 .8.8v7.4q0 .8-.8.8H11"/><path d="m11.8 8.5 2-4.5 2 4.5m-3.2-1.3h2.4"/><rect x="2" y="9" width="9" height="9" rx=".8"/><path d="M4 11.8h5m-2.5-1v1m-1.6 1c.5 1.8 1.9 3 3.8 3.7m-1-3.7c-.5 1.8-1.9 3-3.8 3.7"/>',
+      Icons.fullscreen: '<path d="M7 2H3v4m10-4h4v4M3 14v4h4m10-4v4h-4M7 6l6 8m0-8-6 8M7 6h6"/>',
+      Icons.file_download_outlined:
+          '<path d="M10 1v11m-3-3 3 3 3-3M6 5H4v12h12V5h-2"/>',
+      Icons.minimize: '<path d="M5 10h9"/>',
+      Icons.crop_square: '<rect x="5.5" y="5.5" width="9" height="9" rx=".5"/>',
+      Icons.filter_none: '<path d="M8 5V3h9v9h-2"/><rect x="4" y="7" width="9" height="9" rx=".5"/>',
+      Icons.close: '<path d="m5.5 5.5 9 9m0-9-9 9"/>',
+      Icons.more_horiz: '<circle cx="4" cy="10" r=".7" fill="currentColor"/><circle cx="10" cy="10" r=".7" fill="currentColor"/><circle cx="16" cy="10" r=".7" fill="currentColor"/>',
     }[icon];
     if (path == null) return Icon(icon, size: 18, color: color);
     return SvgPicture.string(
-      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round">$path</svg>',
-      width: 18,
-      height: 18,
+      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round">$path</svg>',
+      width: 20,
+      height: 20,
       colorFilter: ColorFilter.mode(color, BlendMode.srcIn),
     );
   }
@@ -929,10 +923,11 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
     String label,
     VoidCallback? action, {
     bool active = false,
+    double width = 40,
   }) => Tooltip(
     message: label,
     child: SizedBox(
-      width: 40,
+      width: width,
       height: 40,
       child: Center(
         child: Material(
@@ -944,13 +939,15 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
             child: SizedBox(
               width: 28,
               height: 28,
-              child: _viewerGlyph(
-                icon,
-                action == null
-                    ? const Color(0xffb5b5b5)
-                    : active
-                    ? const Color(0xff27c36c)
-                    : const Color(0xff57585a),
+              child: Center(
+                child: _viewerGlyph(
+                  icon,
+                  action == null && icon != Icons.arrow_back
+                      ? const Color(0xffa7a7a7)
+                      : active
+                      ? const Color(0xff27c36c)
+                      : const Color(0xff57585a),
+                ),
               ),
             ),
           ),
@@ -959,17 +956,22 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
     ),
   );
 
-  Widget _divider() =>
-      Container(width: 1, height: 20, color: const Color(0xffcfcfd1));
+  Widget _divider({double width = 12}) => SizedBox(
+    width: width,
+    child: Center(
+      child: Container(width: 1, height: 18, color: const Color(0xffcfcfd1)),
+    ),
+  );
 
   Widget _viewerToolbar() => Container(
-    height: 42,
+    height: 40,
     decoration: const BoxDecoration(
-      color: Color(0xffe8e8ea),
+      color: Color(0xffe6e6e8),
       border: Border(bottom: BorderSide(color: Color(0xffd7d7d7))),
     ),
     child: Row(
       children: [
+        const SizedBox(width: 5),
         _viewerIcon(
           Icons.push_pin_outlined,
           '窗口置顶',
@@ -986,7 +988,7 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
             () => setState(() => _historyOpen = !_historyOpen),
             active: _historyOpen,
           ),
-          _divider(),
+          _divider(width: 14),
           _viewerIcon(Icons.zoom_in, '放大', () {
             _fit = false;
             _resizeForScale((_scale * 1.25).clamp(.05, 8));
@@ -1014,7 +1016,7 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
             if (_mosaicPreview == null) unawaited(_loadMosaicPreview());
             setState(() => _viewerEditing = true);
           }),
-          _divider(),
+          _divider(width: 14),
           _viewerIcon(
             Icons.document_scanner_outlined,
             '文字识别',
@@ -1175,20 +1177,23 @@ class _PinWindowState extends State<PinWindow> with WindowListener {
                 child: Text('使用系统默认方式打开', style: TextStyle(fontSize: 14)),
               ),
             ],
-            child: const SizedBox(
+            child: SizedBox(
               width: 40,
               height: 40,
-              child: Icon(Icons.more_horiz, size: 18, color: Color(0xff57585a)),
+              child: Center(
+                child: _viewerGlyph(Icons.more_horiz, const Color(0xff57585a)),
+              ),
             ),
           ),
-        _divider(),
-        _viewerIcon(Icons.minimize, '最小化', windowManager.minimize),
+        _divider(width: 32),
+        _viewerIcon(Icons.minimize, '最小化', windowManager.minimize, width: 44),
         _viewerIcon(
           _maximized ? Icons.filter_none : Icons.crop_square,
           _maximized ? '还原' : '最大化',
           _toggleMaximized,
+          width: 44,
         ),
-        _viewerIcon(Icons.close, '关闭', _requestClose),
+        _viewerIcon(Icons.close, '关闭', _requestClose, width: 44),
       ],
     ),
   );
