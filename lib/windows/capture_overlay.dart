@@ -14,6 +14,7 @@ import 'package:screen_retriever/screen_retriever.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../capture_bridge.dart';
+import '../macos_window_surface.dart';
 import 'capture_exit_dialog.dart';
 import 'ocr_window.dart' show showOcrResult;
 import '../app_log.dart';
@@ -112,6 +113,28 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
     _windowBounds = widget.prewarmBounds;
     widget.controller.setWindowMethodHandler((call) async {
       if (call.method == 'prewarmReady') return true;
+      if (call.method == 'smokeSurface' &&
+          Platform.isMacOS &&
+          Platform.environment['SNAPPIN_STARTUP_SMOKE'] == '1') {
+        final surface = await MacWindowSurface.inspect();
+        final bounds = Rect.fromLTWH(
+          (surface!['screenX'] as num).toDouble(),
+          (surface['screenY'] as num).toDouble(),
+          (surface['screenWidth'] as num).toDouble(),
+          (surface['screenHeight'] as num).toDouble(),
+        );
+        await MacWindowSurface.configure(overlayBounds: bounds);
+        await windowManager.show();
+        await WidgetsBinding.instance.endOfFrame;
+        try {
+          await MacWindowSurface.configure(overlayBounds: bounds);
+          await MacWindowSurface.verifyTransparentSmoke('overlay');
+          AppLog.write('macos-overlay-geometry-smoke-ready', bounds);
+        } finally {
+          await windowManager.hide();
+        }
+        return true;
+      }
       if (call.method == 'closeSelf') {
         unawaited(Future<void>.delayed(Duration.zero, _closeSelf));
       } else if (call.method == 'startCapture') {
@@ -160,6 +183,12 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
     _image = null;
     _pixels = null;
     _closing = false;
+    _outputBusy = false;
+    _archivedBytes = null;
+    _archivedPath = null;
+    _archivedSource = null;
+    _lastSelectionClick = null;
+    _lastSelectionClickPoint = null;
     _hoverLogged = false;
     _snapSequence++;
     _lastSnap = null;
@@ -191,6 +220,7 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
     if (_windowBounds?.topLeft != bounds.topLeft) {
       await windowManager.setPosition(bounds.topLeft);
     }
+    await MacWindowSurface.configure(overlayBounds: bounds);
     _windowBounds = bounds;
     final cursor = screenCursor ?? await screenRetriever.getCursorScreenPoint();
     final localCursor = cursor - Offset(display.x, display.y);
@@ -203,7 +233,7 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
         '${localCursor.dx.round()},${localCursor.dy.round()}',
       );
     }
-    unawaited(_loadImage());
+    await _loadImage();
     await windowManager.show();
     await windowManager.focus();
   }
@@ -236,7 +266,7 @@ class _CaptureOverlayState extends State<CaptureOverlay> {
     });
     AppLog.write(
       'overlay-image-ready',
-      '${frame.image.width}x${frame.image.height}',
+      '${frame.image.width}x${frame.image.height} logical=${display.width}x${display.height} origin=${display.x},${display.y} dpr=${View.of(context).devicePixelRatio}',
     );
   }
 

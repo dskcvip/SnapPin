@@ -53,6 +53,9 @@ class MainFlutterWindow: NSWindow {
     }
     MacStartupLog.write("native-graphics-ready", "defaultDevice=\(device!.name)")
     let flutterViewController = FlutterViewController()
+    flutterViewController.backgroundColor = .clear
+    self.isOpaque = false
+    self.backgroundColor = .clear
     let windowFrame = self.frame
     self.contentViewController = flutterViewController
     self.setFrame(windowFrame, display: true)
@@ -61,10 +64,21 @@ class MainFlutterWindow: NSWindow {
     MacStartupLog.write("native-plugins-registered")
     FlutterMultiWindowPlugin.setOnWindowCreatedCallback { controller in
       MacStartupLog.write("native-child-created")
+      controller.backgroundColor = .clear
+      controller.view.window?.isOpaque = false
+      controller.view.window?.backgroundColor = .clear
       RegisterGeneratedPlugins(registry: controller)
       let channel = FlutterMethodChannel(
         name: "snappin/capture", binaryMessenger: controller.engine.binaryMessenger)
       channel.setMethodCallHandler { [weak controller] call, result in
+        if call.method == "configureWindowSurface" {
+          result(Self.configureWindowSurface(controller, arguments: call.arguments))
+          return
+        }
+        if call.method == "inspectWindowSurface" {
+          result(Self.inspectWindowSurface(controller))
+          return
+        }
         if call.method == "printImage" {
           Self.printImage(call.arguments, result: result)
           return
@@ -104,6 +118,10 @@ class MainFlutterWindow: NSWindow {
     captureChannel?.setMethodCallHandler { call, result in
       do {
         switch call.method {
+        case "configureWindowSurface":
+          result(Self.configureWindowSurface(flutterViewController, arguments: call.arguments))
+        case "inspectWindowSurface":
+          result(Self.inspectWindowSurface(flutterViewController))
         case "printImage":
           Self.printImage(call.arguments, result: result)
         case "mainDartStarted":
@@ -810,9 +828,62 @@ class MainFlutterWindow: NSWindow {
     return pixel[start] > peak * 9 / 10 && pixel[start + 1] < peak / 10 && pixel[start + 2] > peak * 9 / 10
   }
 
-  /// Compose the region from an explicit window list. CoreGraphics window-ID
-  /// arrays use raw pointer-sized IDs with nil callbacks, NOT CFNumber values.
-  /// Keep preview/guide visible without including them or stealing focus.
+  private static func configureWindowSurface(_ controller: FlutterViewController?, arguments: Any?) -> [String: Any] {
+    guard let controller = controller, let window = controller.view.window else { return ["ready": false] }
+    // NSWindow and FlutterView have independent backgrounds. Setting only
+    // NSWindow.clear leaves the engine's default black behind transparent pixels.
+    controller.backgroundColor = .clear
+    window.isOpaque = false
+    window.backgroundColor = .clear
+    if let args = arguments as? [String: Any],
+       let x = args["x"] as? Double, let y = args["y"] as? Double,
+       let width = args["width"] as? Double, let height = args["height"] as? Double,
+       width > 0, height > 0 {
+      window.identifier = NSUserInterfaceItemIdentifier("snappin-capture-overlay")
+      window.styleMask = [.borderless, .fullSizeContentView]
+      window.hasShadow = false
+      window.level = .screenSaver
+      window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+      let desktopTop = NSScreen.screens.first?.frame.maxY ?? 0
+      let frame = NSRect(x: x, y: desktopTop - y - height, width: width, height: height)
+      window.setFrame(frame, display: true)
+      controller.view.frame = NSRect(origin: .zero, size: frame.size)
+    }
+    let status = inspectWindowSurface(controller)
+    MacStartupLog.write("native-window-surface-configured", "\(status)")
+    return status
+  }
+
+  private static func inspectWindowSurface(_ controller: FlutterViewController?) -> [String: Any] {
+    guard let controller = controller, let window = controller.view.window else { return ["ready": false] }
+    let desktopTop = NSScreen.screens.first?.frame.maxY ?? 0
+    let content = window.contentRect(forFrameRect: window.frame)
+    let screenFrame = (window.screen ?? NSScreen.screens.first)?.frame ?? .zero
+    var status: [String: Any] = ["ready": true, "opaque": window.isOpaque,
+      "windowAlpha": window.backgroundColor.alphaComponent,
+      "flutterAlpha": controller.backgroundColor?.alphaComponent ?? 1,
+      "x": window.frame.minX, "y": desktopTop - window.frame.maxY,
+      "width": window.frame.width, "height": window.frame.height,
+      "contentWidth": content.width, "contentHeight": content.height,
+      "viewWidth": controller.view.bounds.width, "viewHeight": controller.view.bounds.height,
+      "visible": window.isVisible, "level": window.level.rawValue,
+      "screenX": screenFrame.minX, "screenY": desktopTop - screenFrame.maxY,
+      "screenWidth": screenFrame.width, "screenHeight": screenFrame.height]
+    if ProcessInfo.processInfo.environment["SNAPPIN_STARTUP_SMOKE"] == "1",
+       window.isVisible,
+       let image = CGWindowListCreateImage(.null, .optionIncludingWindow, CGWindowID(window.windowNumber),
+                                          [.boundsIgnoreFraming, .bestResolution]),
+       let context = CGContext(data: nil, width: image.width, height: image.height,
+         bitsPerComponent: 8, bytesPerRow: image.width * 4, space: CGColorSpaceCreateDeviceRGB(),
+         bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue), let data = context.data {
+      context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+      let bytes = data.assumingMemoryBound(to: UInt8.self)
+      status["cornerAlpha"] = bytes[3]
+    }
+    return status
+  }
+
+  /// Compose the region from an explicit window list without guide/preview windows.
   private static func captureRegion(x: Int, y: Int, width: Int, height: Int,
                                     excluding excluded: Set<CGWindowID> = []) throws -> Data {
     let image = try captureRegionImage(x: x, y: y, width: width, height: height, excluding: excluded)

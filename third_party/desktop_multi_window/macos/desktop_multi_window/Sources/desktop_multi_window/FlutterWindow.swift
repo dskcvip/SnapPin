@@ -21,6 +21,17 @@ class CustomWindow: NSWindow {
         self.isReleasedWhenClosed = false
     }
 
+    // A screenshot must cover menu bar and Dock instead of being constrained
+    // to the normal application's visible work area by AppKit.
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
+        if identifier?.rawValue == "snappin-capture-overlay" { return frameRect }
+        return super.constrainFrameRect(frameRect, to: screen)
+    }
+
+    override var canBecomeKey: Bool {
+        identifier?.rawValue == "snappin-capture-overlay" || super.canBecomeKey
+    }
+
     deinit {
         debugPrint("Child window deinit")
     }

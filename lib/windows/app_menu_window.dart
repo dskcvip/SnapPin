@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../app_log.dart';
+import '../macos_window_surface.dart';
 import 'menu_surface.dart';
 import 'app_menu_metrics.dart';
 import '../window_roles.dart';
@@ -70,6 +71,7 @@ class _AppMenuWindowState extends State<AppMenuWindow> with WindowListener {
           Platform.environment['SNAPPIN_STARTUP_SMOKE'] == '1') {
         if (call.method == 'smokeInspect') {
           await WidgetsBinding.instance.endOfFrame;
+          await MacWindowSurface.verifyTransparentSmoke('menu');
           return _open &&
               await windowManager.isVisible() &&
               await windowManager.isFocused();

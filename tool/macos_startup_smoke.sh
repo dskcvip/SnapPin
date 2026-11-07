@@ -33,6 +33,9 @@ for ((attempt=0; attempt<45; attempt++)); do
     wait "$smoke_pid" || exit_code=$?
     if [[ "$exit_code" -eq 0 ]] &&
        grep -q 'macos-main-startup-smoke-ready' "$dart_log" &&
+       grep -q 'macos-transparent-smoke-ready.*ball' "$dart_log" &&
+       grep -q 'macos-transparent-smoke-ready.*menu' "$dart_log" &&
+       grep -q 'macos-overlay-geometry-smoke-ready' "$dart_log" &&
        grep -q 'macos-startup-smoke-ready' "$dart_log" &&
        grep -q 'macos-tray-menu-smoke-ready.*left action=toggle-ball' "$dart_log" &&
        grep -q 'macos-tray-menu-smoke-ready.*right action=toggle-ball' "$dart_log" &&

@@ -15,6 +15,7 @@ import 'package:tray_manager/tray_manager.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../capture_bridge.dart';
+import '../macos_window_surface.dart';
 import 'app_menu_metrics.dart';
 import '../app_config.dart';
 import '../app_log.dart';
@@ -242,6 +243,14 @@ class _BallWindowState extends State<BallWindow>
           Platform.environment['SNAPPIN_STARTUP_SMOKE'] == '1') {
         await _checkNativeStartup();
         final overlaysReady = await _prewarmOverlays();
+        if (overlaysReady) {
+          final overlays = await _overlayFuture!;
+          for (final overlay in overlays) {
+            if (await overlay.invokeMethod<bool>('smokeSurface') != true) {
+              throw StateError('Overlay surface smoke failed');
+            }
+          }
+        }
         final menuReady = await _openMenu();
         final trayReady = menuReady && await _checkTrayMenuStartup();
         AppLog.write(
@@ -287,6 +296,8 @@ class _BallWindowState extends State<BallWindow>
         ((status?['height'] as num?)?.toDouble() ?? 600) > 100) {
       throw StateError('Main startup did not configure the ball: $status');
     }
+    await WidgetsBinding.instance.endOfFrame;
+    await MacWindowSurface.verifyTransparentSmoke('ball');
     await windowManager.hide();
     await CaptureBridge.smokeReopen();
     for (var attempt = 0; attempt < 20; attempt++) {

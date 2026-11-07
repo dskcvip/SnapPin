@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'capture_bridge.dart';
+import 'macos_window_surface.dart';
 import 'app_config.dart';
 import 'app_log.dart';
 import 'windows/ball_window.dart';
@@ -82,7 +83,10 @@ Future<void> main(List<String> args) async {
           titleBarStyle: TitleBarStyle.hidden,
           windowButtonVisibility: false,
         ),
-        () async => windowManager.show(),
+        () async {
+          await MacWindowSurface.configure();
+          await windowManager.show();
+        },
       );
       runApp(const SnapPinApp(child: CaptureToastWindow()));
     case 'long-preview':
@@ -102,6 +106,7 @@ Future<void> main(List<String> args) async {
               (arguments['y'] as num).toDouble(),
             ),
           );
+          await MacWindowSurface.configure();
           await WindowCaptureExclusion.showWithoutActivating();
         },
       );
@@ -142,10 +147,19 @@ Future<void> main(List<String> args) async {
         () async {
           if (display != null) {
             await windowManager.setPosition(Offset(display.x, display.y));
+            await MacWindowSurface.configure(
+              overlayBounds: Rect.fromLTWH(
+                display.x,
+                display.y,
+                display.width,
+                display.height,
+              ),
+            );
             await windowManager.show();
             await windowManager.focus();
           } else if (prewarmBounds != null) {
             await windowManager.setPosition(prewarmBounds.topLeft);
+            await MacWindowSurface.configure(overlayBounds: prewarmBounds);
           }
         },
       );
@@ -179,6 +193,7 @@ Future<void> main(List<String> args) async {
         ),
         () async {
           await windowManager.setAsFrameless();
+          await MacWindowSurface.configure();
           await windowManager.setHasShadow(true);
           await windowManager.show();
           await windowManager.focus();
@@ -223,6 +238,7 @@ Future<void> main(List<String> args) async {
         ),
         () async {
           await windowManager.setAsFrameless();
+          await MacWindowSurface.configure();
           await windowManager.setHasShadow(true);
           await windowManager.show();
           await windowManager.focus();
@@ -263,6 +279,7 @@ Future<void> main(List<String> args) async {
         ),
         () async {
           await windowManager.setAsFrameless();
+          await MacWindowSurface.configure();
           await windowManager.show();
           await windowManager.focus();
         },
@@ -292,6 +309,7 @@ Future<void> main(List<String> args) async {
         ),
         () async {
           await windowManager.setAsFrameless();
+          await MacWindowSurface.configure();
           await windowManager.setHasShadow(false);
           await windowManager.setPosition(
             Offset(
@@ -323,6 +341,7 @@ Future<void> main(List<String> args) async {
         ),
         () async {
           await windowManager.setAsFrameless();
+          await MacWindowSurface.configure();
           await windowManager.setHasShadow(false);
           if (arguments['prewarm'] != true) {
             await windowManager.setPosition(
@@ -352,6 +371,7 @@ Future<void> main(List<String> args) async {
         ),
         () async {
           await windowManager.setAsFrameless();
+          await MacWindowSurface.configure();
           await windowManager.setHasShadow(false);
         },
       );
