@@ -761,33 +761,49 @@ class MainFlutterWindow: NSWindow {
       return
     }
     do {
-      let desktopTop = NSScreen.screens.first?.frame.maxY ?? 0
+      let desktopTop = screen.frame.maxY
       let edgeStatus = try showLongCaptureGuide([
         "logicalX": Double(screen.frame.minX), "logicalY": Double(desktopTop-screen.frame.maxY+25),
         "logicalWidth": Double(screen.frame.width), "logicalHeight": Double(screen.frame.height-100)])
-      guard edgeStatus["onScreen"] as? Bool == true else {
-        hideLongCaptureGuide()
-        result(FlutterError(code: "long_smoke_failed", message: "Full-width guide is off-screen", details: edgeStatus))
-        return
-      }
-      for panel in longGuidePanels {
-        panel.displayIfNeeded()
-        let frame = panel.frame
-        guard screen.frame.contains(frame), panel.level.rawValue > NSWindow.Level.statusBar.rawValue,
-              let image = CGWindowListCreateImage(.null, .optionIncludingWindow, CGWindowID(panel.windowNumber), [.boundsIgnoreFraming, .bestResolution]) else {
-          throw NSError(domain: "SnapPin", code: 15, userInfo: [NSLocalizedDescriptionKey: "Edge guide frame/pixel check failed"])
+      // WindowServer needs a run-loop turn to publish newly ordered windows.
+      // Inspecting their pixels synchronously can return nil despite valid frames.
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+        do {
+          guard edgeStatus["onScreen"] as? Bool == true else {
+            throw NSError(domain: "SnapPin", code: 15, userInfo: [NSLocalizedDescriptionKey: "Full-width guide is off-screen"])
+          }
+          for panel in longGuidePanels {
+            panel.displayIfNeeded()
+            let frame = panel.frame
+            guard screen.frame.contains(frame), panel.level.rawValue > NSWindow.Level.statusBar.rawValue else {
+              throw NSError(domain: "SnapPin", code: 15, userInfo: [NSLocalizedDescriptionKey: "Invalid edge guide frame or level: \(frame)"])
+            }
+            guard let image = CGWindowListCreateImage(.null, .optionIncludingWindow, CGWindowID(panel.windowNumber), [.boundsIgnoreFraming, .bestResolution]) else {
+              throw NSError(domain: "SnapPin", code: 15, userInfo: [NSLocalizedDescriptionKey: "No edge guide window pixels after presentation"])
+            }
+            let bitmap = NSBitmapImageRep(cgImage: image)
+            guard let color = bitmap.colorAt(x: bitmap.pixelsWide/2, y: bitmap.pixelsHigh/2)?.usingColorSpace(.deviceRGB),
+                  color.blueComponent > 0.85, color.redComponent < 0.15 else {
+              throw NSError(domain: "SnapPin", code: 15, userInfo: [NSLocalizedDescriptionKey: "Edge guide has no blue pixels"])
+            }
+          }
+          MacStartupLog.write("long-native-guide-edge-smoke-ready", "fullWidth=true allFourOnScreen=true bluePixels=true \(edgeStatus)")
+          hideLongCaptureGuide()
+          runLongCaptureDocumentSmoke(result: result)
+        } catch {
+          hideLongCaptureGuide()
+          result(FlutterError(code: "long_smoke_failed", message: error.localizedDescription, details: nil))
         }
-        let bitmap = NSBitmapImageRep(cgImage: image)
-        guard let color = bitmap.colorAt(x: bitmap.pixelsWide/2, y: bitmap.pixelsHigh/2)?.usingColorSpace(.deviceRGB),
-              color.blueComponent > 0.85, color.redComponent < 0.15 else {
-          throw NSError(domain: "SnapPin", code: 15, userInfo: [NSLocalizedDescriptionKey: "Edge guide has no blue pixels"])
-        }
       }
-      MacStartupLog.write("long-native-guide-edge-smoke-ready", "fullWidth=true allFourOnScreen=true bluePixels=true \(edgeStatus)")
-      hideLongCaptureGuide()
     } catch {
       hideLongCaptureGuide()
       result(FlutterError(code: "long_smoke_failed", message: error.localizedDescription, details: nil))
+    }
+  }
+
+  private static func runLongCaptureDocumentSmoke(result: @escaping FlutterResult) {
+    guard let screen = NSScreen.screens.first else {
+      result(FlutterError(code: "long_smoke_failed", message: "No test display", details: nil))
       return
     }
     let rect = NSRect(x: screen.visibleFrame.minX + 80, y: screen.visibleFrame.minY + 80,
