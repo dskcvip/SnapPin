@@ -237,6 +237,63 @@ void main() {
     },
   );
 
+  test(
+    'detached viewport reanchors beneath fixed navigation and localized popup',
+    () async {
+      Uint8List viewport(int top, {bool popup = false}) {
+        final image = img.decodePng(_frameWithFixedHeader(top))!;
+        if (popup) {
+          for (var y = 160; y < 540; y++) {
+            for (var x = 40; x < 60; x++) {
+              image.setPixelRgb(x, y, 250, 0, 250);
+            }
+          }
+        }
+        return image.getBytes(order: img.ChannelOrder.rgba);
+      }
+
+      final session = LongStitchSession.startRgba(viewport(600), 160, 600);
+      addTearDown(session.dispose);
+      for (var top = 720; top <= 1800; top += 120) {
+        expect(
+          session.pushRgba(viewport(top), 160, 600).kind,
+          LongStepKind.appended,
+        );
+      }
+      final height = session.height;
+      expect(
+        session.pushRgba(viewport(4000), 160, 600).kind,
+        LongStepKind.noMatch,
+      );
+      expect(
+        session.pushRgba(viewport(3880), 160, 600).kind,
+        LongStepKind.noMatch,
+      );
+      // Re-enter captured content at a non-four-pixel offset. Header and popup
+      // differ from the stored canvas, but the majority of body rows are exact.
+      final recovered = session.pushRgba(viewport(721, popup: true), 160, 600);
+      expect(recovered.kind, LongStepKind.rewound);
+      expect(session.height, height, reason: 'A real gap cannot be invented');
+      expect(
+        session.pushRgba(viewport(841, popup: true), 160, 600).kind,
+        LongStepKind.rewound,
+      );
+      expect(session.height, height);
+      final directory = Directory.systemTemp.createTempSync(
+        'snappin-reanchor-',
+      );
+      addTearDown(() => directory.deleteSync(recursive: true));
+      final file = await session.savePng(File('${directory.path}/result.png'));
+      final output = img.decodePng(file.readAsBytesSync())!;
+      expect(output.width, 160);
+      expect(output.height, height);
+      final expected = img.decodePng(_frame(1200))!;
+      final actual = output.getPixel(100, 800);
+      final source = expected.getPixel(100, 200);
+      expect([actual.r, actual.g, actual.b], [source.r, source.g, source.b]);
+    },
+  );
+
   test('raw session owns input and retains original width', () {
     final initial = img
         .decodePng(_frame(0))!

@@ -27,6 +27,9 @@ class LongStep {
     this.direction = 'none',
     this.matchedRows = 0,
     this.overlapRows = 0,
+    this.candidateCount = 0,
+    this.recoveryFrames = 0,
+    this.recoveryBytes = 0,
   });
 
   final LongStepKind kind;
@@ -34,6 +37,7 @@ class LongStep {
   final double score, diff;
   final String direction;
   final int matchedRows, overlapRows;
+  final int candidateCount, recoveryFrames, recoveryBytes;
 }
 
 class LongStitchSession {
@@ -106,7 +110,7 @@ class LongStitchSession {
       throw StateError('长截图采集帧尺寸变化');
     }
     final raw = image.getBytes(order: img.ChannelOrder.rgba);
-    return _pushRaw(raw, sourcePng: png);
+    return _pushRaw(raw);
   }
 
   LongStep pushRgba(Uint8List pixels, int frameWidth, int frameHeight) {
@@ -119,23 +123,19 @@ class LongStitchSession {
     return _pushRaw(Uint8List.fromList(pixels));
   }
 
-  Uint8List _recoveryPng(Uint8List pixels) => Uint8List.fromList(
-    img.encodePng(
-      img.Image.fromBytes(
-        width: width,
-        height: _frameHeight,
-        bytes: pixels.buffer,
-        bytesOffset: pixels.offsetInBytes,
-        numChannels: 4,
-      ),
-    ),
-  );
+  void _rememberDetached(Uint8List pixels) {
+    // Keep bounded raw recovery frames. Encoding a full Retina viewport to PNG
+    // on every failed match used to block acquisition for seconds.
+    final limit = math.min(64 * 1024 * 1024, _maxCanvasBytes ~/ 4);
+    if (pixels.length > limit) return;
+    _detachedFrames.add(pixels);
+    while (_detachedFrames.length * pixels.length > limit ||
+        _detachedFrames.length > 256) {
+      _detachedFrames.removeAt(0);
+    }
+  }
 
-  LongStep _pushRaw(
-    Uint8List raw, {
-    Uint8List? sourcePng,
-    bool replay = false,
-  }) {
+  LongStep _pushRaw(Uint8List raw, {bool replay = false}) {
     final next = raw;
     if (!replay) _steps++;
     final frameDiff = _difference(_previous, next, 0, 0, _frameHeight);
@@ -165,12 +165,8 @@ class LongStitchSession {
       if (!replay && _detachedFrames.isNotEmpty) {
         final frames = List<Uint8List>.of(_detachedFrames.reversed);
         _detachedFrames.clear();
-        for (final png in frames) {
-          final image = img.decodePng(png)!;
-          final step = _pushRaw(
-            image.getBytes(order: img.ChannelOrder.rgba),
-            replay: true,
-          );
+        for (final pixels in frames) {
+          final step = _pushRaw(pixels, replay: true);
           if (step.kind == LongStepKind.noMatch) break;
         }
         final added = _height - heightBeforeReplay;
@@ -270,12 +266,7 @@ class LongStitchSession {
     if (!_previousLocated) {
       _previous = next;
       if (!replay) {
-        _detachedFrames.add(
-          sourcePng == null
-              ? _recoveryPng(next)
-              : Uint8List.fromList(sourcePng),
-        );
-        if (_detachedFrames.length > 256) _detachedFrames.removeAt(0);
+        _rememberDetached(next);
       }
       return LongStep(
         LongStepKind.noMatch,
@@ -286,6 +277,8 @@ class LongStitchSession {
         0,
         frameDiff,
         direction: 'awaiting-anchor',
+        recoveryFrames: _detachedFrames.length,
+        recoveryBytes: _detachedFrames.length * next.length,
       );
     }
 
@@ -309,20 +302,11 @@ class LongStitchSession {
     for (final shift in candidates) {
       checkShift(shift);
     }
-    if (bestSupport < 24) {
-      for (var shift = 1; shift <= maximumShift; shift++) {
-        if (!candidates.contains(shift)) checkShift(shift);
-      }
-    }
     if (bestSupport < 24 || bestShift == 0) {
       _previous = next;
       _previousLocated = false;
       if (!replay) {
-        _detachedFrames.add(
-          sourcePng == null
-              ? _recoveryPng(next)
-              : Uint8List.fromList(sourcePng),
-        );
+        _rememberDetached(next);
       }
       return LongStep(
         LongStepKind.noMatch,
@@ -333,6 +317,9 @@ class LongStitchSession {
         0,
         frameDiff,
         direction: 'unmatched',
+        candidateCount: candidates.length,
+        recoveryFrames: _detachedFrames.length,
+        recoveryBytes: _detachedFrames.length * next.length,
       );
     }
     _ensureCapacity(_height + bestShift);
@@ -414,19 +401,21 @@ class LongStitchSession {
     int secondTop,
     int maximumShift,
   ) {
-    final rowsByHash = <int, List<int>>{};
-    for (var row = 0; row < _frameHeight; row++) {
-      final hash = _rowHash(first, firstTop + row);
-      if (hash != null) rowsByHash.putIfAbsent(hash, () => []).add(row);
-    }
     final votes = <int, int>{};
-    for (var row = 0; row < _frameHeight; row += 8) {
-      final hash = _rowHash(second, secondTop + row);
-      if (hash == null) continue;
-      for (final tailRow in rowsByHash[hash] ?? const <int>[]) {
-        final shift = tailRow - row;
-        if (shift > 0 && shift <= maximumShift) {
-          votes[shift] = (votes[shift] ?? 0) + 1;
+    for (final band in [-1, 0, 1, 2, 3]) {
+      final rowsByHash = <int, List<int>>{};
+      for (var row = 0; row < _frameHeight; row++) {
+        final hash = _rowHash(first, firstTop + row, band: band);
+        if (hash != null) rowsByHash.putIfAbsent(hash, () => []).add(row);
+      }
+      for (var row = 0; row < _frameHeight; row += 8) {
+        final hash = _rowHash(second, secondTop + row, band: band);
+        if (hash == null) continue;
+        for (final tailRow in rowsByHash[hash] ?? const <int>[]) {
+          final shift = tailRow - row;
+          if (shift > 0 && shift <= maximumShift) {
+            votes[shift] = (votes[shift] ?? 0) + 1;
+          }
         }
       }
     }
@@ -435,14 +424,16 @@ class LongStitchSession {
     return ranked.take(24).toList();
   }
 
-  int? _rowHash(Uint8List pixels, int row) {
-    final stride = math.max(1, width ~/ 16);
+  int? _rowHash(Uint8List pixels, int row, {int band = -1}) {
+    final left = band < 0 ? 0 : width * band ~/ 4;
+    final right = band < 0 ? width : width * (band + 1) ~/ 4;
+    final stride = math.max(1, (right - left) ~/ 16);
     final start = row * width * 4;
-    final base = pixels[start];
+    final base = pixels[start + left * 4];
     var texture = 0;
     var hash = 2166136261;
     var count = 0;
-    for (var x = 0; x < width; x += stride) {
+    for (var x = left; x < right; x += stride) {
       final index = start + x * 4;
       texture += (pixels[index] - base).abs();
       for (var channel = 0; channel < 3; channel++) {
@@ -557,19 +548,21 @@ class LongStitchSession {
     // four-pixel scan misses positions between its probes after a scrollbar
     // drag, especially when the pointer or page content changes slightly.
     if (!_previousLocated) {
-      final rowsByHash = <int, List<int>>{};
-      for (var row = 0; row < _height; row++) {
-        final hash = _rowHash(_canvas, row);
-        if (hash != null) rowsByHash.putIfAbsent(hash, () => []).add(row);
-      }
       final votes = <int, int>{};
-      for (var row = 0; row < _frameHeight; row += 8) {
-        final hash = _rowHash(frame, row);
-        if (hash == null) continue;
-        for (final canvasRow in rowsByHash[hash] ?? const <int>[]) {
-          final top = canvasRow - row;
-          if (top >= 0 && top <= lastTop) {
-            votes[top] = (votes[top] ?? 0) + 1;
+      for (final band in [-1, 0, 1, 2, 3]) {
+        final rowsByHash = <int, List<int>>{};
+        for (var row = 0; row < _height; row++) {
+          final hash = _rowHash(_canvas, row, band: band);
+          if (hash != null) rowsByHash.putIfAbsent(hash, () => []).add(row);
+        }
+        for (var row = 0; row < _frameHeight; row += 8) {
+          final hash = _rowHash(frame, row, band: band);
+          if (hash == null) continue;
+          for (final canvasRow in rowsByHash[hash] ?? const <int>[]) {
+            final top = canvasRow - row;
+            if (top >= 0 && top <= lastTop) {
+              votes[top] = (votes[top] ?? 0) + 1;
+            }
           }
         }
       }
@@ -577,10 +570,11 @@ class LongStitchSession {
         ..sort((a, b) => votes[b]!.compareTo(votes[a]!));
       for (final top in ranked.take(16)) {
         if (votes[top]! >= 4 &&
-            _difference(_canvas, frame, top, 0, _frameHeight) < 2) {
+            _matchRows(_canvas, top, frame, 0, _frameHeight).support >= 24) {
           return top;
         }
       }
+      return null;
     }
     for (var top = 0; top <= lastTop; top += 4) {
       if (top == _viewportTop) continue;

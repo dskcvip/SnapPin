@@ -1007,6 +1007,7 @@ class _BallWindowState extends State<BallWindow>
               'canvasBytes=${_longSession!.width * step.height * 4} steps=${step.steps} '
               'score=${step.score.toStringAsFixed(3)} diff=${step.diff.toStringAsFixed(2)} '
               'matchedRows=${step.matchedRows} overlapRows=${step.overlapRows} '
+              'candidates=${step.candidateCount} recoveryFrames=${step.recoveryFrames} recoveryBytes=${step.recoveryBytes} '
               'transport=${raw == null ? 'png' : 'rgba'} bytes=${frame.length} capture=${captureMs}ms stitch=${stitchMs}ms '
               'total=${DateTime.now().difference(sampledAt).inMilliseconds}ms',
         );
@@ -1015,6 +1016,13 @@ class _BallWindowState extends State<BallWindow>
         _longNoMatchSince ??= DateTime.now();
       } else if (step.kind == LongStepKind.appended ||
           step.kind == LongStepKind.rewound) {
+        if (_longNoMatchSince != null) {
+          AppLog.write(
+            'long-anchor-recovered',
+            'direction=${step.direction} height=${step.height} steps=${step.steps} '
+                'waitMs=${DateTime.now().difference(_longNoMatchSince!).inMilliseconds}',
+          );
+        }
         _longNoMatchSince = null;
         _longWarningShown = false;
       }
@@ -1060,7 +1068,7 @@ class _BallWindowState extends State<BallWindow>
             'steps': step.steps,
             'warning': showWarning,
             'message': showWarning
-                ? '滚动过快，找不到重叠；请向上滚回已截区域'
+                ? '暂未找到可拼接的重叠；请滚回已截区域后继续'
                 : step.kind == LongStepKind.rewound
                 ? '当前内容已截取；继续滚动可扩展长图'
                 : '滚动页面继续截图 · 已 ${step.height} px',
